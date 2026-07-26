@@ -158,6 +158,7 @@ type Member struct {
 	Pub        []byte
 	Name       string
 	Removed    bool
+	AddedBy    []byte // kto go wpuścił (nil dla założyciela) — usunięcie kaskaduje
 	Avatar     []byte // sha256 of the avatar blob ("" = default initials)
 	AvatarMime string
 }
@@ -190,10 +191,23 @@ func SortCanonical(evs []*Event) {
 // for membership only if decryptable — so Fold needs at least the epochs
 // covering membership events. Returns error on an unauthorized or bad event.
 func Fold(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
+	return fold(evs, chatID, keys, true)
+}
+
+// FoldTrusted pomija weryfikację podpisów. Wolno jej użyć wyłącznie na
+// zdarzeniach, które przeszły już przez ingest (czyli na tym, co leży w naszej
+// bazie) — sprawdzanie Ed25519 to ~90% kosztu foldu, a robimy go często.
+func FoldTrusted(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
+	return fold(evs, chatID, keys, false)
+}
+
+func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*State, error) {
 	SortCanonical(evs)
 	st := &State{Members: map[string]*Member{}}
+	// lamport rodziców: porządek stosowania ma wynikać z DAG-u, nie z licznika
+	seen := make(map[string]uint64, len(evs))
 	for _, e := range evs {
-		if !e.VerifySig() {
+		if verify && !e.VerifySig() {
 			return nil, fmt.Errorf("event %x: bad signature", e.ID()[:6])
 		}
 		isGenesis := len(st.Owner) == 0
@@ -204,7 +218,24 @@ func Fold(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
 		} else if !bytes.Equal(e.Chat, chatID) {
 			return nil, errors.New("event from another chat")
 		}
+		// Lamport = max(rodzice)+1, dokładnie. Bez tego autor sam wybiera, w
+		// którym miejscu historii wyląduje jego zdarzenie: antydatowane "add"
+		// wchodzi w stan sprzed czyjegoś usunięcia, a Lamport = 2^64-1 przewija
+		// licznik i blokuje wszystkim dopisywanie.
+		if err := checkLamport(e, seen, isGenesis); err != nil {
+			return nil, err
+		}
+		seen[string(e.ID())] = e.Lamport
 		key, ok := keys[e.Epoch]
+		var body Body
+		if ok {
+			var err error
+			if body, err = e.Decrypt(key); err != nil {
+				// zły klucz epoki (np. podrzucony przez peera) nie może zabić
+				// całego czatu — traktujemy go jak brak klucza
+				ok = false
+			}
+		}
 		if !ok {
 			// Can't decrypt: tolerate only content kinds; membership must be readable.
 			switch e.Kind {
@@ -213,12 +244,13 @@ func Fold(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
 			}
 			return nil, fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
 		}
-		body, err := e.Decrypt(key)
-		if err != nil {
-			return nil, fmt.Errorf("event %x: decrypt: %w", e.ID()[:6], err)
-		}
 		switch e.Kind {
 		case KindCreate:
+			// genesis jest dokładnie jeden: drugi "create" nadpisywałby
+			// właściciela, czyli każdy członek przejmowałby czat
+			if !isGenesis {
+				return nil, errors.New("second genesis event")
+			}
 			// body.Name = chat name, body.Text = creator's display name
 			st.Owner = e.Author
 			st.Name = body.Name
@@ -229,15 +261,13 @@ func Fold(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
 				return nil, errors.New("add by non-member")
 			}
 			if len(body.Pub) == ed25519.PublicKeySize {
-				st.Members[string(body.Pub)] = &Member{Pub: body.Pub, Name: body.Name}
+				st.Members[string(body.Pub)] = &Member{Pub: body.Pub, Name: body.Name, AddedBy: e.Author}
 			}
 		case KindRemove:
 			if !bytes.Equal(e.Author, st.Owner) {
 				return nil, errors.New("remove by non-owner")
 			}
-			if m, ok := st.Members[string(body.Pub)]; ok {
-				m.Removed = true
-			}
+			removeTree(st, body.Pub)
 		case KindRekey:
 			if !bytes.Equal(e.Author, st.Owner) {
 				return nil, errors.New("rekey by non-owner")
@@ -269,4 +299,47 @@ func Fold(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
 		return nil, errors.New("no genesis event")
 	}
 	return st, nil
+}
+
+// checkLamport wymusza Lamport = max(rodzice)+1 i obecność rodziców przed
+// dzieckiem. Uczciwy klient zawsze tak liczy (heads + 1), więc to nie zmienia
+// niczego dla poprawnej historii — odcina za to wybieranie sobie miejsca
+// w porządku foldu.
+func checkLamport(e *Event, seen map[string]uint64, isGenesis bool) error {
+	if isGenesis {
+		return nil
+	}
+	if len(e.Parents) == 0 {
+		return fmt.Errorf("event %x: no parents", e.ID()[:6])
+	}
+	var max uint64
+	for _, p := range e.Parents {
+		lam, ok := seen[string(p)]
+		if !ok {
+			return fmt.Errorf("event %x: parent %x not applied before child", e.ID()[:6], p[:4])
+		}
+		if lam > max {
+			max = lam
+		}
+	}
+	if e.Lamport != max+1 {
+		return fmt.Errorf("event %x: lamport %d, expected %d", e.ID()[:6], e.Lamport, max+1)
+	}
+	return nil
+}
+
+// removeTree: usunięcie kaskaduje na tych, których usuwany wpuścił. Bez tego
+// wystarczy dodać do czatu drugą swoją tożsamość, żeby przeżyć wyrzucenie —
+// zostaje członkiem, więc dostaje wszystkie klucze epok, także te po rotacji.
+func removeTree(st *State, pub []byte) {
+	m, ok := st.Members[string(pub)]
+	if !ok || m.Removed {
+		return
+	}
+	m.Removed = true
+	for _, other := range st.Members {
+		if bytes.Equal(other.AddedBy, pub) {
+			removeTree(st, other.Pub)
+		}
+	}
 }

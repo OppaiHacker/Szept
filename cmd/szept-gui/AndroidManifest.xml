@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Własny manifest (fyne używa go zamiast szablonu): domyślny nie ma RECORD_AUDIO.
-     debuggable=true — build do sideloadu; przed Play Store zmienić na false. -->
+     debuggable=false: z debuggable każdy z dostępem do adb wyciąga `run-as`
+     prywatny katalog aplikacji (identity.key + baza) bez roota.
+     allowBackup=false: klucz tożsamości nie ma jeździć w kopiach zapasowych. -->
 <manifest
 	xmlns:android="http://schemas.android.com/apk/res/android"
 	package="chat.szept"
@@ -22,7 +24,10 @@
 	<!-- ws:// (cleartext) idzie przez gniazda Go — polityka cleartext Androida
 	     dotyczy tylko javowego stosu; atrybutu usesCleartextTraffic nie zna
 	     kompilator manifestu fyne, więc go tu nie ma -->
-	<application android:label="szept" android:debuggable="true">
+	<application android:label="szept"
+		android:debuggable="false"
+		android:allowBackup="false"
+		android:fullBackupContent="false">
 	<activity android:name="org.golang.app.GoNativeActivity"
 		android:label="szept"
 		android:configChanges="orientation|keyboardHidden|uiMode"

@@ -128,8 +128,31 @@ type Manager struct {
 
 	mu      sync.Mutex
 	peers   map[string]*Peer
-	pending map[string][]byte // pub -> connID of our outgoing offer
-	dialing map[string]*Peer  // pub -> peer awaiting answer
+	pending map[string][]byte    // pub -> connID of our outgoing offer
+	dialing map[string]*Peer     // pub -> peer awaiting answer
+	seen    map[string]time.Time // odtworzone blob-y sygnalingu — patrz fresh()
+}
+
+// sigTTL: tyle samo, co okno świeżości podpisanego blobu.
+const sigTTL = 2 * time.Minute
+
+// fresh odsiewa powtórki: podpisana oferta jest ważna 2 minuty, a przez ten
+// czas connector (albo ktokolwiek na ws://) może ją odtwarzać w kółko —
+// każda kopia zakładałaby nowy PeerConnection z gatheringiem ICE.
+func (m *Manager) fresh(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	if t, ok := m.seen[key]; ok && now.Sub(t) < sigTTL {
+		return false
+	}
+	for k, t := range m.seen {
+		if now.Sub(t) >= sigTTL {
+			delete(m.seen, k)
+		}
+	}
+	m.seen[key] = now
+	return true
 }
 
 func NewManager(priv ed25519.PrivateKey, conn *connector.Client, stun []string) *Manager {
@@ -140,6 +163,7 @@ func NewManager(priv ed25519.PrivateKey, conn *connector.Client, stun []string) 
 		priv: priv, pub: priv.Public().(ed25519.PublicKey), conn: conn,
 		cfg:   webrtc.Configuration{ICEServers: []webrtc.ICEServer{{URLs: stun}}},
 		peers: map[string]*Peer{}, pending: map[string][]byte{}, dialing: map[string]*Peer{},
+		seen: map[string]time.Time{},
 	}
 	conn.OnSignal = m.onSignal
 	return m
@@ -283,6 +307,9 @@ func (m *Manager) onSignal(from []byte, blob []byte) {
 		return
 	}
 	if m.Accept == nil || !m.Accept(p.From) {
+		return
+	}
+	if !m.fresh(p.Kind + string(p.From) + string(p.ConnID)) {
 		return
 	}
 	switch p.Kind {

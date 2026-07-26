@@ -36,6 +36,10 @@ const (
 	sendBufHigh  = 1 << 20 // powyżej tylu bajtów w kolejce nadawca czeka
 	wantRetry    = 25 * time.Second
 	maxServing   = 3 // równoległych wysyłek na jednego peera
+	// asmBudget: łączny sufit pamięci na wszystkie składanki naraz. Pojedyncza
+	// składanka mieści do MaxFileBytes, a zamówień może być tyle, ile zdarzeń
+	// z załącznikiem ktoś nam wyśle (jedno waży ~300 bajtów).
+	asmBudget = 64 << 20
 )
 
 // blobWant: załącznik, którego jeszcze nie mamy.
@@ -116,13 +120,23 @@ func (c *Core) SaveAttachment(hash []byte, name, dir string) (string, error) {
 	ext := filepath.Ext(safe)
 	base := strings.TrimSuffix(safe, ext)
 	path := filepath.Join(dir, safe)
-	for i := 1; i < 100; i++ {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			break
+	// O_EXCL zamiast Stat+WriteFile: w katalogu współdzielonym (np. /tmp) ktoś
+	// podstawia dowiązanie pod przewidywalną nazwę i zapis idzie w cudzy plik.
+	// O_EXCL nie pójdzie za dowiązaniem — po prostu bierzemy następną nazwę.
+	for i := 1; ; i++ {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_, werr := f.Write(data)
+			if cerr := f.Close(); werr == nil {
+				werr = cerr
+			}
+			return path, werr
+		}
+		if !os.IsExist(err) || i >= 100 {
+			return "", err
 		}
 		path = filepath.Join(dir, fmt.Sprintf("%s-%d%s", base, i, ext))
 	}
-	return path, os.WriteFile(path, data, 0o600)
 }
 
 // BlobBytes zwraca treść załącznika, jeśli już ją mamy.
@@ -413,6 +427,14 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 	if w == nil || !bytes.Equal(w.chat, m.Chat) {
 		c.mu.Unlock()
 		return // nikt tego nie zamawiał
+	}
+	held := 0
+	for _, as := range c.incoming {
+		held += as.bytes
+	}
+	if held+len(m.Part) > asmBudget {
+		c.mu.Unlock()
+		return // budżet pamięci na składanki wyczerpany
 	}
 	a := c.incoming[key]
 	if a == nil || len(a.parts) != m.Total {

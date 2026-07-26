@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"szept/internal/attach"
 	"szept/internal/media"
 	"szept/internal/p2p"
 )
@@ -333,18 +334,22 @@ type assembly struct {
 	born  time.Time
 }
 
-var assemblers = struct {
-	m map[string]map[uint32]*assembly // peer+label -> frame -> parts
-}{m: map[string]map[uint32]*assembly{}}
-
 func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 	kind, chat, ok := parseLabel(label)
 	if !ok {
 		return
 	}
-	// sender must be an active chat member
+	// sender must be an active chat member *and* must have announced the call:
+	// bez tego członek spoza rozmowy wpycha dźwięk do głośnika i obraz na ekran
 	st, err := c.ChatState(chat)
 	if err != nil || !st.IsMember(p.Pub) {
+		return
+	}
+	c.mu.Lock()
+	call := c.calls[string(chat)]
+	inCall := call != nil && call.Joined && call.Members[string(p.Pub)]
+	c.mu.Unlock()
+	if !inCall {
 		return
 	}
 	switch kind {
@@ -369,10 +374,10 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		}
 		key := string(p.Pub) + label
 		c.mu.Lock()
-		frames := assemblers.m[key]
+		frames := c.assemblers[key]
 		if frames == nil {
 			frames = map[uint32]*assembly{}
-			assemblers.m[key] = frames
+			c.assemblers[key] = frames
 		}
 		a := frames[frameID]
 		if a == nil {
@@ -397,6 +402,12 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		}
 		c.mu.Unlock()
 		if complete {
+			// nagłówek w limitach wymiarów, zanim UI odpali jpeg.Decode: ramka ma
+			// ~3 MB, ale JPEG może zadeklarować 65535×65535 px i dekoder spróbuje
+			// zaalokować gigabajty (bomba dekompresyjna od członka rozmowy)
+			if attach.CheckDims(jpeg) != nil {
+				return
+			}
 			if cb := c.OnVideoFrame; cb != nil {
 				cb(chat, p.Pub, kind, jpeg)
 			}

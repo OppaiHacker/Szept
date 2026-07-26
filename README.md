@@ -133,3 +133,7 @@ make test
   z tą samą tożsamością pokaże wiadomość dalej.
 
 Szczegóły bezpieczeństwa: [SECURITY.md](SECURITY.md).
+
+## Licencja
+
+[GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
