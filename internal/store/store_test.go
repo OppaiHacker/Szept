@@ -1,11 +1,15 @@
 package store
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 
 	"szept/internal/crypt"
 	"szept/internal/event"
@@ -95,6 +99,19 @@ func TestStoreRoundtrip(t *testing.T) {
 		t.Fatal("invite reused")
 	}
 
+	// zgadywanie PIN-u pali zaproszenie: "redeem" to zwykła wiadomość na
+	// otwartym kanale, więc bez licznika 10^6 kombinacji idzie w sekundy
+	h3 := crypt.RandBytes(32)
+	s.PutInvite(h3, Invite{Chat: chat, PinHash: pinHash[:], Exp: time.Now().Add(time.Minute).Unix()})
+	for i := 0; i < MaxPinTries; i++ {
+		if _, err := s.TakeInvite(h3, []byte("000000")); err == nil {
+			t.Fatal("wrong pin accepted")
+		}
+	}
+	if _, err := s.TakeInvite(h3, []byte("123456")); err == nil {
+		t.Fatal("zaproszenie przeżyło zgadywanie PIN-u")
+	}
+
 	// expired invite must be rejected and not counted as open
 	h2 := crypt.RandBytes(32)
 	s.PutInvite(h2, Invite{Chat: chat, Exp: time.Now().Add(-time.Second).Unix()})
@@ -103,5 +120,67 @@ func TestStoreRoundtrip(t *testing.T) {
 	}
 	if n := s.OpenInviteCount(); n != 0 {
 		t.Fatalf("OpenInviteCount = %d, want 0", n)
+	}
+}
+
+// Plik bazy nie ma zdradzać metadanych rozmowy (kto, jakiego rodzaju zdarzenia,
+// nazwy czatów), a wartości mają być związane ze swoim miejscem — przestawienie
+// dwóch rekordów musi się wywalić na AEAD.
+func TestAtRestOpaque(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	sk := crypt.NewKey() // ten sam klucz magazynu przy ponownym otwarciu
+	s, err := Open(path, sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	key := crypt.NewKey()
+	gen, _ := event.New(priv, make([]byte, 32), event.KindCreate,
+		event.Body{Name: "tajna-nazwa", Text: "a"}, 1, nil, 1, key)
+	chat := gen.ID()
+	s.AddEvent(chat, gen)
+	s.PutChat(chat, ChatMeta{Name: "tajna-nazwa"})
+	s.PutChatKey(chat, 1, key)
+	h1, _ := s.PutBlob([]byte("plik jeden"))
+	h2, _ := s.PutBlob([]byte("plik dwa"))
+	s.Close()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range [][]byte{pub, key, []byte("tajna-nazwa"), []byte(`"kind":"create"`), []byte("plik jeden")} {
+		if bytes.Contains(raw, leak) {
+			t.Fatalf("plik bazy zawiera jawnie %q", leak)
+		}
+	}
+
+	// przestawienie wartości dwóch blobów: klucz ten sam, miejsce inne
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bBlobs)
+		v1, v2 := bytes.Clone(b.Get(h1)), bytes.Clone(b.Get(h2))
+		b.Put(h1, v2)
+		return b.Put(h2, v1)
+	})
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(path, sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if _, ok := s2.GetBlob(h1); ok {
+		t.Fatal("przestawiony blob dał się odczytać mimo poprawnego klucza")
+	}
+	// kontrola dodatnia: nieruszony rekord z tym samym kluczem czyta się dalej
+	h3, _ := s2.PutBlob([]byte("plik trzy"))
+	if v, ok := s2.GetBlob(h3); !ok || string(v) != "plik trzy" {
+		t.Fatal("nieruszony blob przestał się czytać")
 	}
 }

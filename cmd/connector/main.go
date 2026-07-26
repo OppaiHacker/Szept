@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"szept/internal/connector"
 )
@@ -56,7 +57,8 @@ func main() {
 	log.Printf("klienci łączą się adresem: %s://<publiczny-adres-tego-serwera>%s", scheme, portSuffix(ln.Addr().String()))
 	log.Printf("test w przeglądarce: http://<adres>%s (strona statusu)", portSuffix(ln.Addr().String()))
 
-	srv := &http.Server{Handler: connector.NewServer()}
+	// ReadHeaderTimeout: bez tego wolne/zawieszone żądania trzymają połączenia (Slowloris).
+	srv := &http.Server{Handler: connector.NewServer(), ReadHeaderTimeout: 10 * time.Second}
 	if *cert != "" && *key != "" {
 		log.Fatal(srv.ServeTLS(ln, *cert, *key))
 	}

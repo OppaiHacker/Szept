@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"szept/internal/attach"
 	"szept/internal/connector"
 	"szept/internal/crypt"
 	"szept/internal/event"
@@ -67,14 +68,16 @@ type Core struct {
 	P2P  *p2p.Manager
 	Cfg  Config
 
-	mu        sync.Mutex
-	orphans   map[string]map[string]*event.Event // chatKey -> eventID -> event
-	redeem    *pendingRedeem
-	calls     map[string]*Call
-	listeners []chan struct{}
-	wants     map[string]*blobWant // blob hash -> attachment we still need
-	incoming  map[string]*blobAsm  // blob hash -> chunks arriving now
-	serving   map[string]int       // peer -> blob sends in flight
+	mu         sync.Mutex
+	orphans    map[string]map[string]*event.Event // chatKey -> eventID -> event
+	states     map[string]*foldedState            // chatKey -> cached fold (see ChatState)
+	redeem     *pendingRedeem
+	calls      map[string]*Call
+	listeners  []chan struct{}
+	wants      map[string]*blobWant            // blob hash -> attachment we still need
+	incoming   map[string]*blobAsm             // blob hash -> chunks arriving now
+	serving    map[string]int                  // peer -> blob sends in flight
+	assemblers map[string]map[uint32]*assembly // peer+label -> frame -> video parts
 
 	// media hooks (set by calls.go / UIs)
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
@@ -96,10 +99,13 @@ func Open(cfg Config, id *identity.Identity) (*Core, error) {
 	c := &Core{
 		ID: id, St: st, Conn: conn, Cfg: cfg,
 		orphans:  map[string]map[string]*event.Event{},
+		states:   map[string]*foldedState{},
 		calls:    map[string]*Call{},
 		wants:    map[string]*blobWant{},
 		incoming: map[string]*blobAsm{},
 		serving:  map[string]int{},
+
+		assemblers: map[string]map[uint32]*assembly{},
 	}
 	c.P2P = p2p.NewManager(id.Priv, conn, cfg.STUN)
 	c.P2P.Accept = c.acceptPeer
@@ -222,7 +228,43 @@ func (c *Core) chatIDs() map[string]store.ChatMeta {
 	return m
 }
 
+// foldedState: wynik ostatniego foldu czatu. Fold weryfikuje całą historię, a
+// pytamy o stan na każdy pakiet mediów (głos = 50 ramek/s) i na każde odebrane
+// zdarzenie — bez cache'u czat z tysiącem zdarzeń zjada procesor w całości.
+type foldedState struct {
+	st  *event.State
+	err error
+}
+
+// invalidate: wołać po każdym zapisie zdarzenia albo klucza epoki tego czatu.
+func (c *Core) invalidate(chat []byte) {
+	c.mu.Lock()
+	delete(c.states, string(chat))
+	c.mu.Unlock()
+}
+
+// ChatState zwraca złożony stan czatu. Wynik jest tylko do odczytu — jest
+// współdzielony przez wszystkich czytelników aż do najbliższego zapisu.
+//
+// ponytail: fold nadal przelatuje całą historię, tylko rzadziej (i bez
+// sprawdzania podpisów, bo baza trzyma wyłącznie zweryfikowane zdarzenia).
+// Przy historii idącej w dziesiątki tysięcy zdarzeń kolejnym krokiem jest fold
+// przyrostowy albo migawka stanu co N zdarzeń.
 func (c *Core) ChatState(chat []byte) (*event.State, error) {
+	c.mu.Lock()
+	cached := c.states[string(chat)]
+	c.mu.Unlock()
+	if cached != nil {
+		return cached.st, cached.err
+	}
+	st, err := c.foldChat(chat)
+	c.mu.Lock()
+	c.states[string(chat)] = &foldedState{st: st, err: err}
+	c.mu.Unlock()
+	return st, err
+}
+
+func (c *Core) foldChat(chat []byte) (*event.State, error) {
 	evs, err := c.St.Events(chat)
 	if err != nil {
 		return nil, err
@@ -231,7 +273,7 @@ func (c *Core) ChatState(chat []byte) (*event.State, error) {
 	if err != nil {
 		return nil, err
 	}
-	return event.Fold(evs, chat, keys)
+	return event.FoldTrusted(evs, chat, keys)
 }
 
 type ChatInfo struct {
@@ -257,7 +299,9 @@ func (c *Core) Chats() []ChatInfo {
 			if m.Removed {
 				continue
 			}
-			ci.Members = append(ci.Members, *m)
+			mem := *m
+			mem.Name = safeName(mem.Name)
+			ci.Members = append(ci.Members, mem)
 			if !bytes.Equal(m.Pub, c.ID.Pub) && c.P2P.Peer(m.Pub) != nil {
 				ci.Online++
 			}
@@ -276,10 +320,40 @@ func (c *Core) Chats() []ChatInfo {
 	return out
 }
 
+// MaxName: sufit na nazwę przychodzącą z sieci (SetNick pilnuje tego u siebie,
+// ale peer wysyła co chce).
+const MaxName = 64
+
+// safeText czyści tekst z sieci przed pokazaniem go w UI: znaki sterujące
+// wycinamy, bo TUI wypisuje treść prosto na terminal, a sekwencje ANSI/OSC
+// potrafią przerysować ekran, podszyć się pod cudzą wiadomość albo ruszyć
+// schowek. Nowa linia i tabulator zostają — to normalna treść wiadomości.
+func safeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// safeName: jednolinijkowa nazwa (autor, czat, znajomy) o ograniczonej długości.
+func safeName(s string) string {
+	s = strings.ReplaceAll(safeText(s), "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	if len(s) > MaxName {
+		s = strings.ToValidUTF8(s[:MaxName], "")
+	}
+	return s
+}
+
 // displayName: direct 2-person unnamed chat shows the other side's name.
 func (c *Core) displayName(st *event.State) string {
 	if st.Name != "" {
-		return st.Name
+		return safeName(st.Name)
 	}
 	var others []string
 	for _, m := range st.Members {
@@ -299,13 +373,13 @@ func (c *Core) memberName(st *event.State, pub []byte) string {
 	}
 	if st != nil {
 		if m, ok := st.Members[string(pub)]; ok && m.Name != "" {
-			return m.Name
+			return safeName(m.Name)
 		}
 	}
 	if fs, err := c.St.Friends(); err == nil {
 		for _, f := range fs {
 			if bytes.Equal(f.Pub, pub) {
-				return f.Name
+				return safeName(f.Name)
 			}
 		}
 	}
@@ -366,10 +440,10 @@ func (c *Core) Messages(chat []byte) []Msg {
 		m := Msg{ID: id, Author: e.Author, Name: name, TS: time.Unix(b.TS, 0)}
 		switch e.Kind {
 		case event.KindMsg:
-			m.Kind, m.Text = "msg", b.Text
+			m.Kind, m.Text = "msg", safeText(b.Text)
 		case event.KindFile:
-			m.Kind, m.Text = "file", b.Text
-			m.Blob, m.Mime, m.File, m.Size, m.W, m.H = b.Blob, b.Mime, b.Name, b.Size, b.W, b.H
+			m.Kind, m.Text = "file", safeText(b.Text)
+			m.Blob, m.Mime, m.File, m.Size, m.W, m.H = b.Blob, b.Mime, attach.SafeName(b.Name, b.Mime), b.Size, b.W, b.H
 			m.Prev, m.PrevMime = b.Prev, b.PrevMime
 			m.Have = c.St.HasBlob(b.Blob)
 			m.HavePrev = len(b.Prev) > 0 && c.St.HasBlob(b.Prev)
@@ -377,7 +451,7 @@ func (c *Core) Messages(chat []byte) []Msg {
 		case event.KindCreate:
 			m.Kind, m.Info, m.Text = "info", e.Kind, name+" utworzył(a) czat"
 		case event.KindAdd:
-			m.Kind, m.Info, m.Text = "info", e.Kind, name+" dodał(a) "+b.Name
+			m.Kind, m.Info, m.Text = "info", e.Kind, name+" dodał(a) "+safeName(b.Name)
 		case event.KindRemove:
 			m.Kind, m.Info, m.Text = "info", e.Kind, name+" usunął(-ęła) członka"
 		case event.KindRekey:
@@ -497,18 +571,22 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 	if !ok {
 		return nil, fmt.Errorf("brak klucza epoki %d", st.Epoch)
 	}
-	e, err := event.New(c.ID.Priv, chat, kind, body, c.St.NextLamport(chat), c.St.Heads(chat), st.Epoch, key)
+	// heads i lamport z jednego odczytu: Fold wymaga Lamport = max(rodzice)+1,
+	// więc te dwie wartości muszą pochodzić z tej samej migawki
+	heads := c.St.Heads(chat)
+	e, err := event.New(c.ID.Priv, chat, kind, body, c.St.LamportAfter(chat, heads), heads, st.Epoch, key)
 	if err != nil {
 		return nil, err
 	}
 	// validate against the fold before persisting
 	evs, _ := c.St.Events(chat)
-	if _, err := event.Fold(append(evs, e), chat, keys); err != nil {
+	if _, err := event.FoldTrusted(append(evs, e), chat, keys); err != nil {
 		return nil, err
 	}
 	if _, err := c.St.AddEvent(chat, e); err != nil {
 		return nil, err
 	}
+	c.invalidate(chat)
 	c.gossip(chat, e, nil)
 	c.Notify()
 	return e, nil
@@ -531,6 +609,7 @@ func (c *Core) CreateChat(name string) ([]byte, error) {
 	if err := c.St.PutChat(chat, store.ChatMeta{Name: name}); err != nil {
 		return nil, err
 	}
+	c.invalidate(chat)
 	c.announceProfile() // awatar i nazwa od razu, nie po najbliższym cyklu
 	c.Notify()
 	return chat, nil
@@ -573,11 +652,25 @@ func (c *Core) Rename(chat []byte, name string) error {
 }
 
 // Kick removes a member (owner only, enforced by Fold) and rotates the key.
+// Usunięcie kaskaduje na wpuszczonych przez niego (event.Fold), a otwarte
+// łącze zrywamy od razu — inaczej wyrzucony dalej rozmawia z naszymi handlerami.
 func (c *Core) Kick(chat []byte, pub []byte) error {
 	if _, err := c.appendEvent(chat, event.KindRemove, event.Body{Pub: pub, TS: time.Now().Unix()}); err != nil {
 		return err
 	}
-	return c.Rekey(chat)
+	err := c.Rekey(chat)
+	c.dropUnauthorized()
+	return err
+}
+
+// dropUnauthorized zamyka łącza do peerów, z którymi nie chcemy już rozmawiać
+// (ta sama reguła, co przy wpuszczaniu — acceptPeer).
+func (c *Core) dropUnauthorized() {
+	for _, p := range c.P2P.Peers() {
+		if !c.acceptPeer(p.Pub) {
+			p.Close()
+		}
+	}
 }
 
 // Rekey bumps the epoch: rekey event (encrypted with old key) + fresh key
@@ -595,6 +688,7 @@ func (c *Core) Rekey(chat []byte) error {
 	if err := c.St.PutChatKey(chat, st.Epoch+1, newKey); err != nil {
 		return err
 	}
+	c.invalidate(chat)
 	c.pushKeys(chat, nil)
 	c.Notify()
 	return nil

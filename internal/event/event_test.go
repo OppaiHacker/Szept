@@ -56,3 +56,57 @@ func TestDAGFoldAndAuth(t *testing.T) {
 		t.Fatal("decrypted with wrong key")
 	}
 }
+
+// Porządek foldu musi wynikać z DAG-u, usunięcie musi kaskadować, a zły klucz
+// epoki nie może wywracać całego czatu.
+func TestFoldOrderingAndRemoval(t *testing.T) {
+	_, owner, _ := ed25519.GenerateKey(nil)
+	malPub, mallory, _ := ed25519.GenerateKey(nil)
+	sockPub, _, _ := ed25519.GenerateKey(nil)
+	key := crypt.NewKey()
+	keys := map[uint32][]byte{1: key}
+
+	gen, _ := New(owner, make([]byte, 32), KindCreate, Body{Name: "grupa", Text: "szef"}, 1, nil, 1, key)
+	chatID := gen.ID()
+	add, _ := New(owner, chatID, KindAdd, Body{Pub: malPub, Name: "mallory"}, 2, [][]byte{chatID}, 1, key)
+	rm, _ := New(owner, chatID, KindRemove, Body{Pub: malPub}, 3, [][]byte{add.ID()}, 1, key)
+
+	// antydatowanie: "add" z lamportem sprzed usunięcia nie może wejść w stan
+	backdated, _ := New(mallory, chatID, KindAdd, Body{Pub: sockPub}, 3, [][]byte{add.ID()}, 1, key)
+	if st, err := Fold([]*Event{gen, add, rm, backdated}, chatID, keys); err == nil && st.IsMember(sockPub) {
+		t.Fatal("antydatowany add wpuścił usuniętego z powrotem")
+	}
+	// lamport musi być max(rodzice)+1 — inaczej 2^64-1 przewija licznik i blokuje dopisywanie
+	if _, err := Fold([]*Event{gen, mustNew(t, owner, chatID, KindMsg, Body{Text: "x"}, ^uint64(0), [][]byte{chatID}, key)},
+		chatID, keys); err == nil {
+		t.Fatal("zdarzenie z dowolnym lamportem weszło do DAG-u")
+	}
+	// usunięcie kaskaduje na tych, których usuwany wpuścił
+	sock, _ := New(mallory, chatID, KindAdd, Body{Pub: sockPub, Name: "sock"}, 3, [][]byte{add.ID()}, 1, key)
+	rm2, _ := New(owner, chatID, KindRemove, Body{Pub: malPub}, 4, [][]byte{sock.ID()}, 1, key)
+	st, err := Fold([]*Event{gen, add, sock, rm2}, chatID, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.IsMember(malPub) || st.IsMember(sockPub) {
+		t.Fatalf("kick nie kaskaduje: mallory=%v sock=%v", st.IsMember(malPub), st.IsMember(sockPub))
+	}
+	// podrzucony klucz epoki: treść pomijamy, czat ma działać dalej
+	if _, err := Fold([]*Event{gen, add}, chatID, map[uint32][]byte{1: key, 7: crypt.NewKey()}); err != nil {
+		t.Fatalf("zły klucz epoki zabił fold: %v", err)
+	}
+	// drugi "create" nie przejmuje własności czatu
+	takeover, _ := New(mallory, chatID, KindCreate, Body{Name: "moje", Text: "m"}, 3, [][]byte{add.ID()}, 1, key)
+	if st, err := Fold([]*Event{gen, add, takeover}, chatID, keys); err == nil && !bytes.Equal(st.Owner, gen.Author) {
+		t.Fatal("drugi genesis przejął własność")
+	}
+}
+
+func mustNew(t *testing.T, priv ed25519.PrivateKey, chat []byte, kind string, b Body, lamport uint64, parents [][]byte, key []byte) *Event {
+	t.Helper()
+	e, err := New(priv, chat, kind, b, lamport, parents, 1, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}

@@ -29,13 +29,23 @@
   ID; zdarzenia weryfikowane **przed** zapisem (podpis + autoryzacja przez fold:
   genesis→właściciel, add→członek, remove/rekey→właściciel, msg→członek).
   Historia jest niezmienialna — modyfikacja zmienia hash i unieważnia potomków.
+- Porządek stosowania zdarzeń wynika z DAG-u, nie z licznika nadawcy: `Lamport`
+  musi być dokładnie `max(rodzice)+1`, a rodzic musi być zastosowany przed
+  dzieckiem. Bez tego autor wybierałby sobie miejsce w historii — antydatowane
+  `add` wchodziłoby w stan sprzed czyjegoś usunięcia.
 - **Klucze epok** wędrują wyłącznie kanałami E2E (DTLS) do zweryfikowanych
   członków; nigdy nie są nadpisywane; zły klucz = wykrywalny błąd AEAD.
+  Przyjmujemy je **tylko od członka czatu** (w trakcie dołączania — od tego, kto
+  czat wprowadził), a klucz, którym nie da się odszyfrować, jest traktowany jak
+  brak klucza: treść zostaje nieczytelna, ale czat działa dalej.
 - **Usunięcie członka** → automatyczna rotacja epoki: wyrzucony nie odszyfruje
-  nowych wiadomości i nie dostaje nowych zdarzeń (peers odmawiają synca).
+  nowych wiadomości i nie dostaje nowych zdarzeń (peers odmawiają synca), a jego
+  łącze jest zrywane. Usunięcie **kaskaduje** na tych, których wpuścił —
+  inaczej wystarczyłoby dodać do czatu drugą swoją tożsamość, żeby przeżyć kick.
   Ręczna rotacja: `/rekey`.
 - Zaproszenia: sekret 128-bit, po stronie zapraszającego trzymany **hash**;
-  jednorazowość egzekwowana atomowo.
+  jednorazowość egzekwowana atomowo. PIN ma **limit 5 prób** — potem zaproszenie
+  jest spalone (bez tego 10⁶ kombinacji zgaduje się w sekundy po samym kanale).
 
 ## Załączniki i awatary
 
@@ -64,20 +74,37 @@
 
 ## Dane na dysku
 
-- Zdarzenia leżą w bazie tak, jak w sieci — **ciała zaszyfrowane**.
+- **Cała baza jest zaszyfrowana kluczem magazynu**, nie tylko ciała zdarzeń:
+  koperta (klucz publiczny autora, rodzaj zdarzenia, epoka, powiązania) też,
+  bo to metadane rozmowy. Z pliku bazy nie da się odczytać nawet grafu
+  „kto z kim i ile”. Jawne zostają wyłącznie klucze rekordów — identyfikatory
+  zdarzeń, skróty blobów, klucze publiczne znajomych — czyli same skróty.
+- Każda wartość jest **związana ze swoim miejscem** w bazie (bucket + klucz jako
+  associated data): mając plik bazy nie da się przestawiać zaszyfrowanych
+  rekordów, np. podmienić bloba pod danym skrótem albo przenieść klucza epoki
+  do innego czatu.
+- **Hasło do klucza jest opcjonalne, ale bez niego nie ma szyfrowania w
+  spoczynku**: `identity.key` bez hasła rozpakuje każdy, kto ma plik, a z jego
+  seeda wyprowadza się klucz magazynu, czyli cała reszta bazy.
 - Treść załączników i awatarów (bloby) szyfrowana kluczem magazynu, adresowana
   swoim skrótem — ta sama grafika w pięciu czatach leży na dysku raz.
 - Metadane (nazwy czatów, klucze epok, znajomi, zaproszenia) szyfrowane kluczem
   wyprowadzonym (HKDF) z seeda tożsamości → bez odszyfrowania `identity.key`
-  baza jest bezużyteczna. Hasło do klucza = szyfrowanie całości w spoczynku.
+  nie ma z nich nic.
+- Załącznik otwarty przyciskiem „Otwórz” ląduje **odszyfrowany w katalogu
+  tymczasowym** (systemowy odtwarzacz musi dostać plik) i tam zostaje.
 
 ## Co widzi connector (uczciwie)
 
 - pary **pubkey ↔ IP** zarejestrowanych klientów i to, **kto z kim** wymienia
   sygnaling (metadane połączeń). Nie widzi: treści, nazw, członkostwa, kluczy.
 - Mitygacje: postaw **własny** connector (200 linii, stateless), używaj `wss://`,
-  w razie potrzeby Tor/VPN. Rejestracja wymaga podpisu z timestampem — nie da
-  się podszyć pod cudzy pubkey ani odtworzyć starej rejestracji.
+  w razie potrzeby Tor/VPN. Rejestracja wymaga podpisu z timestampem, jedno
+  gniazdo obsługuje jeden pubkey, a przejęcie zajętego slotu wymaga podpisu
+  świeższego niż ten, który go trzyma — sama powtórka podsłuchanej ramki
+  (możliwa na `ws://`) nie wystarczy.
+- Sygnaling ma ochronę przed powtórką: ten sam podpisany blob przyjmujemy raz
+  w oknie 2 minut, więc connector nie zaleje klienta kopiami jednej oferty.
 
 ## Znane kompromisy / ścieżki rozwoju
 

@@ -55,18 +55,43 @@ func (c *Core) onPeerUp(p *p2p.Peer) {
 
 // ---- ctrl dispatch ----
 
+// known: czy z tym peerem łączy nas cokolwiek poza wiszącym zaproszeniem.
+// Obcy wpuszczony na czas otwartego zaproszenia ma prawo tylko do wykupienia go
+// — reszta handlerów (klucze, sync, bloby) nie jest dla przypadkowych gości.
+func (c *Core) known(pub []byte) bool {
+	if c.St.IsFriend(pub) {
+		return true
+	}
+	c.mu.Lock()
+	r := c.redeem
+	c.mu.Unlock()
+	if r != nil && bytes.Equal(r.Inviter, pub) {
+		return true
+	}
+	for chatID := range c.chatIDs() {
+		if st, err := c.ChatState([]byte(chatID)); err == nil && st.IsMember(pub) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Core) onCtrl(p *p2p.Peer, data []byte) {
 	var m Ctrl
 	if err := json.Unmarshal(data, &m); err != nil {
+		return
+	}
+	if m.T != "redeem" && m.T != "hello" && !c.known(p.Pub) {
 		return
 	}
 	switch m.T {
 	case "hello":
 		if m.Name != "" && c.St.IsFriend(p.Pub) {
 			fs, _ := c.St.Friends()
+			name := safeName(m.Name)
 			for _, f := range fs {
-				if bytes.Equal(f.Pub, p.Pub) && f.Name != m.Name {
-					f.Name = m.Name
+				if bytes.Equal(f.Pub, p.Pub) && f.Name != name {
+					f.Name = name
 					c.St.PutFriend(f)
 				}
 			}
@@ -123,8 +148,14 @@ func (c *Core) handleSync(p *p2p.Peer, m Ctrl) {
 	if len(want) > 0 {
 		p.SendCtrl(Ctrl{T: "want", Chat: m.Chat, IDs: want})
 	}
-	// reply with our heads once, so the other side can pull from us too
+	// reply with our heads once, so the other side can pull from us too —
+	// but only to members: with an open invite we accept strangers, and a
+	// stranger poking a chat ID must not get the DAG map back.
+	// (chat with no folded state yet: Heads is empty anyway)
 	if !m.Reply {
+		if st, err := c.ChatState(m.Chat); err == nil && !st.IsMember(p.Pub) {
+			return
+		}
 		p.SendCtrl(Ctrl{T: "sync", Chat: m.Chat, Heads: c.St.Heads(m.Chat), Reply: true})
 	}
 }
@@ -138,10 +169,12 @@ func (c *Core) handleWant(p *p2p.Peer, m Ctrl) {
 		return
 	}
 	var wires [][]byte
+	bytesOut := 0
 	sent := map[string]bool{}
 	queue := append([][]byte(nil), m.IDs...)
-	// send requested events plus their ancestors (bounded)
-	for len(queue) > 0 && len(wires) < 2000 {
+	// send requested events plus their ancestors (bounded — sztuki ORAZ bajty:
+	// jedna wiadomość ctrl ponad limit SCTP nie dojdzie i sync stanie)
+	for len(queue) > 0 && len(wires) < 2000 && bytesOut < 1<<20 {
 		id := queue[0]
 		queue = queue[1:]
 		if sent[string(id)] {
@@ -152,7 +185,9 @@ func (c *Core) handleWant(p *p2p.Peer, m Ctrl) {
 			continue
 		}
 		sent[string(id)] = true
-		wires = append(wires, event.Marshal(e))
+		w := event.Marshal(e)
+		bytesOut += len(w)
+		wires = append(wires, w)
 		queue = append(queue, e.Parents...)
 	}
 	if len(wires) > 0 {
@@ -180,8 +215,24 @@ func (c *Core) handleEvents(p *p2p.Peer, m Ctrl) {
 	}
 	if fresh > 0 {
 		c.drainOrphans(m.Chat, p)
+		c.redeemDone(m.Chat)
 		c.Notify()
 	}
+}
+
+// redeemDone zamyka wykupione zaproszenie dopiero, gdy naprawdę jesteśmy
+// w czacie. Wcześniej to jedyne, co łączy nas z zapraszającym — skasowane za
+// szybko odcina go bramą known() w połowie dołączania.
+func (c *Core) redeemDone(chat []byte) {
+	st, err := c.ChatState(chat)
+	if err != nil || !st.IsMember(c.ID.Pub) {
+		return
+	}
+	c.mu.Lock()
+	if c.redeem != nil && bytes.Equal(c.redeem.Chat, chat) {
+		c.redeem = nil
+	}
+	c.mu.Unlock()
 }
 
 // ingest verifies and persists one event; returns true if newly stored.
@@ -214,7 +265,8 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 		return false
 	}
 	keys, _ := c.St.ChatKeys(chat)
-	if _, err := event.Fold(append(evs, e), chat, keys); err != nil {
+	// FoldTrusted: podpis e sprawdziliśmy wyżej, reszta leży już w bazie
+	if _, err := event.FoldTrusted(append(evs, e), chat, keys); err != nil {
 		if strings.Contains(err.Error(), "missing key") {
 			c.park(chat, e)
 			if from != nil {
@@ -226,6 +278,7 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	if fresh, err := c.St.AddEvent(chat, e); err != nil || !fresh {
 		return false
 	}
+	c.invalidate(chat)
 	// keep chat name cache fresh for the UI list
 	if e.Kind == event.KindCreate || e.Kind == event.KindRename {
 		if st, err := c.ChatState(chat); err == nil {
@@ -244,16 +297,26 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	return true
 }
 
+// maxOrphans: sufit na sieroty ŁĄCZNIE, nie na czat — znajomy może zakładać
+// dowolnie wiele czatów (bootstrap w handleSync), więc limit per czat nie jest
+// żadnym limitem.
+const maxOrphans = 5000
+
 func (c *Core) park(chat []byte, e *event.Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	total := 0
+	for _, m := range c.orphans {
+		total += len(m)
+	}
+	if total >= maxOrphans {
+		return
+	}
 	key := string(chat)
 	if c.orphans[key] == nil {
 		c.orphans[key] = map[string]*event.Event{}
 	}
-	if len(c.orphans[key]) < 5000 {
-		c.orphans[key][string(e.ID())] = e
-	}
+	c.orphans[key][string(e.ID())] = e
 }
 
 func (c *Core) drainOrphans(chat []byte, from *p2p.Peer) {
@@ -282,9 +345,27 @@ func (c *Core) drainOrphans(chat []byte, from *p2p.Peer) {
 	}
 }
 
+// handleKeys przyjmuje klucze epok. Tylko od członka czatu (albo w trakcie
+// dołączania, gdy stanu jeszcze nie ma — wtedy jedynie od zapraszającego):
+// podrzucony klucz jest nie do usunięcia i psuje epokę na zawsze.
 func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 	if !c.knownChat(m.Chat) {
 		return
+	}
+	if st, err := c.ChatState(m.Chat); err == nil {
+		if !st.IsMember(p.Pub) {
+			return
+		}
+	} else {
+		// czat bez złożonego stanu = dopiero dołączamy; klucze może dać ta sama
+		// strona, która czat wprowadziła (patrz handleSync)
+		c.mu.Lock()
+		r := c.redeem
+		c.mu.Unlock()
+		fromInviter := r != nil && bytes.Equal(r.Inviter, p.Pub) && bytes.Equal(r.Chat, m.Chat)
+		if !c.St.IsFriend(p.Pub) && !fromInviter {
+			return
+		}
 	}
 	existing, err := c.St.ChatKeys(m.Chat)
 	if err != nil {
@@ -300,18 +381,14 @@ func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 		}
 	}
 	if added {
+		c.invalidate(m.Chat)
 		c.drainOrphans(m.Chat, p)
 		go c.announceProfile() // nowy czat = trzeba w nim ogłosić swój profil
 		// z kluczem w ręku da się wreszcie odczytać metryczki załączników
 		go c.rescanAttachments()
 		// with keys in hand, pull the DAG
 		p.SendCtrl(Ctrl{T: "sync", Chat: m.Chat, Heads: c.St.Heads(m.Chat)})
-		// redemption complete?
-		c.mu.Lock()
-		if c.redeem != nil && bytes.Equal(c.redeem.Chat, m.Chat) {
-			c.redeem = nil
-		}
-		c.mu.Unlock()
+		c.redeemDone(m.Chat)
 		c.Notify()
 	}
 }
@@ -324,7 +401,7 @@ func (c *Core) handleRedeem(p *p2p.Peer, m Ctrl) {
 	if err != nil || !bytes.Equal(inv.Chat, m.Chat) {
 		return
 	}
-	name := m.Name
+	name := safeName(m.Name)
 	if name == "" {
 		name = identity.Fingerprint(p.Pub)[:9]
 	}

@@ -6,7 +6,10 @@ FYNE ?= $(HOME)/go/bin/fyne
 PREFIX ?= $(HOME)/.local
 APPID  := chat.szept
 
-.PHONY: all test clean linux windows connector-windows android install uninstall
+# Binarki są .PHONY celowo: reguły nie mają listy źródeł, więc bez tego `make`
+# po edycji kodu nie robi nic i zostaje stara binarka. `go build` i tak cache'uje.
+.PHONY: all test clean linux windows connector-windows android install uninstall \
+	$(BIN)/szept-connector $(BIN)/szept $(BIN)/szept-gui
 
 all: $(BIN)/szept-connector $(BIN)/szept $(BIN)/szept-gui
 

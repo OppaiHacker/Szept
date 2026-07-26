@@ -5,15 +5,18 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +56,7 @@ func SignRegister(priv ed25519.PrivateKey, pub []byte, ts int64) []byte {
 type client struct {
 	ws *websocket.Conn
 	mu sync.Mutex
+	ts int64 // timestamp rejestracji trzymającej slot — patrz "register"
 }
 
 func (c *client) send(m Msg) error {
@@ -65,6 +69,7 @@ func (c *client) send(m Msg) error {
 type Server struct {
 	mu    sync.Mutex
 	peers map[string]*client
+	ips   map[string]int // adres IP -> otwarte sesje WS
 	up    websocket.Upgrader
 	start time.Time
 }
@@ -72,8 +77,51 @@ type Server struct {
 func NewServer() *Server {
 	return &Server{
 		peers: map[string]*client{},
+		ips:   map[string]int{},
 		up:    websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 		start: time.Now(),
+	}
+}
+
+// MaxSessionsPerIP: klucze Ed25519 są darmowe, więc limit na pubkey nic nie daje —
+// liczymy sesje po adresie IP.
+const MaxSessionsPerIP = 64
+
+// clientIP zwraca "" gdy limit ma nie obowiązywać.
+// ponytail: za reverse proxy wszyscy przychodzą z loopbacku, więc go zwalniamy;
+// jeśli kiedyś proxy będzie zdalne, trzeba zaufanemu X-Forwarded-For.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip == nil || ip.IsLoopback() {
+		return ""
+	}
+	return host
+}
+
+func (s *Server) takeSlot(ip string) bool {
+	if ip == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ips[ip] >= MaxSessionsPerIP {
+		return false
+	}
+	s.ips[ip]++
+	return true
+}
+
+func (s *Server) freeSlot(ip string) {
+	if ip == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ips[ip]--; s.ips[ip] <= 0 {
+		delete(s.ips, ip)
 	}
 }
 
@@ -92,6 +140,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.Count(), time.Since(s.start).Round(time.Second))
 		return
 	}
+	ip := clientIP(r)
+	if !s.takeSlot(ip) {
+		http.Error(w, "too many connections", http.StatusTooManyRequests)
+		return
+	}
+	defer s.freeSlot(ip)
 	ws, err := s.up.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -140,12 +194,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				c.send(Msg{Op: "error", Err: "bad register"})
 				continue
 			}
-			pub = m.Pub
+			// jedno gniazdo = jeden pubkey: inaczej każda kolejna rejestracja
+			// zostawia w mapie wpis, którego rozłączenie już nie sprząta
+			if pub != nil && !bytes.Equal(pub, m.Pub) {
+				c.send(Msg{Op: "error", Err: "already registered"})
+				continue
+			}
+			// przejęcie zajętego slotu wymaga świeższego podpisu niż ten, który
+			// go trzyma — sama powtórka podsłuchanej ramki (ws://) nie wystarczy
 			s.mu.Lock()
+			if old := s.peers[string(m.Pub)]; old != nil && old != c && m.TS <= old.ts {
+				s.mu.Unlock()
+				c.send(Msg{Op: "error", Err: "stale register"})
+				continue
+			}
+			pub = m.Pub
+			c.ts = m.TS
 			s.peers[string(pub)] = c
 			s.mu.Unlock()
 			c.send(Msg{Op: "ok"})
 		case "lookup":
+			if pub == nil {
+				c.send(Msg{Op: "error", Err: "register first"})
+				continue
+			}
 			s.mu.Lock()
 			_, online := s.peers[string(m.Pub)]
 			s.mu.Unlock()
@@ -307,15 +379,49 @@ func dialFallbackDNS(rawURL string) (*websocket.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		addrs, err := r.LookupHost(ctx, host)
-		if err != nil {
+		ip := ""
+		if addrs, err := r.LookupHost(ctx, host); err == nil && len(addrs) > 0 {
+			ip = addrs[0]
+		} else if ip, err = dohLookup(ctx, host); err != nil {
+			// port 53 ucięty (firma/operator) i DoH też nie przeszło
 			return nil, fmt.Errorf("dns fallback: %w", err)
 		}
 		var dl net.Dialer
-		return dl.DialContext(ctx, network, net.JoinHostPort(addrs[0], port))
+		return dl.DialContext(ctx, network, net.JoinHostPort(ip, port))
 	}
 	ws, _, err := d.Dial(rawURL, nil)
 	return ws, err
+}
+
+// dohLookup: DNS over HTTPS, gdy port 53 jest zablokowany. Pytamy 1.1.1.1 po IP
+// (cert Cloudflare ma IP SAN), więc nie potrzeba DNS-u żeby zapytać o DNS.
+func dohLookup(ctx context.Context, host string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		"https://1.1.1.1/dns-query?type=A&name="+url.QueryEscape(host), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/dns-json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var v struct {
+		Answer []struct {
+			Type int    `json:"type"`
+			Data string `json:"data"`
+		} `json:"Answer"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&v); err != nil {
+		return "", err
+	}
+	for _, a := range v.Answer {
+		if a.Type == 1 && net.ParseIP(a.Data) != nil { // 1 = A
+			return a.Data, nil
+		}
+	}
+	return "", errors.New("doh: brak rekordu A dla " + host)
 }
 
 func (c *Client) write(m Msg) error {
