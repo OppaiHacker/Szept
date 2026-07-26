@@ -1,0 +1,26 @@
+# build output
+bin/
+/szept
+/szept-gui
+/szept-connector
+*.exe
+*.apk
+*.aab
+*.so
+*.test
+
+# local runtime data (identity keys, message DB)
+*.db
+*.bolt
+.szept/
+
+# generated knowledge graph
+graphify-out/
+
+# local tooling config
+.claude/settings.local.json
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
