@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"szept/internal/attach"
 	"szept/internal/media"
 	"szept/internal/p2p"
 )
@@ -402,12 +401,6 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		}
 		c.mu.Unlock()
 		if complete {
-			// nagłówek w limitach wymiarów, zanim UI odpali jpeg.Decode: ramka ma
-			// ~3 MB, ale JPEG może zadeklarować 65535×65535 px i dekoder spróbuje
-			// zaalokować gigabajty (bomba dekompresyjna od członka rozmowy)
-			if attach.CheckDims(jpeg) != nil {
-				return
-			}
 			if cb := c.OnVideoFrame; cb != nil {
 				cb(chat, p.Pub, kind, jpeg)
 			}
