@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Własny manifest (fyne używa go zamiast szablonu): domyślny nie ma RECORD_AUDIO.
+     debuggable=true — build do sideloadu; przed Play Store zmienić na false. -->
+<manifest
+	xmlns:android="http://schemas.android.com/apk/res/android"
+	package="chat.szept"
+	android:versionCode="16"
+	android:versionName="1.0.0.16">
+
+	<uses-permission android:name="android.permission.INTERNET" />
+	<uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+	<!-- Galeria w aplikacji czyta pliki wprost z dysku. Aplikacja fyne nie ma
+	     jak poprosić o te uprawnienia w czasie działania (brak dostępu do JNI
+	     bez forka fyne), więc użytkownik włącza je z ustawień systemu:
+	     Aplikacje → szept → Uprawnienia → Pliki i multimedia. Bez nich zostaje
+	     systemowy wybór plików, który uprawnień nie wymaga. -->
+	<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+	<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+	<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+	<!-- ws:// (cleartext) idzie przez gniazda Go — polityka cleartext Androida
+	     dotyczy tylko javowego stosu; atrybutu usesCleartextTraffic nie zna
+	     kompilator manifestu fyne, więc go tu nie ma -->
+	<application android:label="szept" android:debuggable="true">
+	<activity android:name="org.golang.app.GoNativeActivity"
+		android:label="szept"
+		android:configChanges="orientation|keyboardHidden|uiMode"
+		android:exported="true"
+		android:theme="@android:style/Theme">
+		<meta-data android:name="android.app.lib_name" android:value="szept" />
+		<intent-filter>
+			<action android:name="android.intent.action.MAIN" />
+			<category android:name="android.intent.category.LAUNCHER" />
+		</intent-filter>
+	</activity>
+
+	<receiver android:name="org.golang.app.FyneNotificationReceiver"
+			  android:exported="false" />
+	</application>
+</manifest>

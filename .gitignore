@@ -1,0 +1,20 @@
+# build output
+bin/
+/szept
+/szept-gui
+/szept-connector
+*.exe
+*.apk
+*.aab
+*.so
+*.test
+
+# local runtime data (identity keys, message DB)
+*.db
+*.bolt
+.szept/
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
