@@ -24,7 +24,12 @@ który mówi peerom, jak się nawzajem znaleźć. Nigdy nie widzi treści.
   hashy — „jak blockchain”); po dołączeniu nowego członka historia synchronizuje
   się do niego automatycznie, a każde urządzenie trzyma pełną kopię,
 - wszystko end-to-end: transport = WebRTC DTLS z **podpisywanym sygnalingiem**,
-  treści = XChaCha20-Poly1305 kluczami epokowymi czatu, zdarzenia podpisane Ed25519.
+  treści = XChaCha20-Poly1305 kluczami epokowymi czatu, zdarzenia podpisane Ed25519,
+- **obfuskacja ruchu**: każdy datagram peer↔peer jest szyfrowany strumieniem
+  ChaCha20 kluczem z podpisanej oferty, więc na łączu to szum bez nagłówków
+  STUN/DTLS i o zmiennej długości — DPI nie rozpozna WebRTC ani nie zablokuje
+  połączenia po sygnaturze. Pakiety do publicznych serwerów STUN pozostają jawne
+  (muszą się parsować jako STUN); mDNS wyłączony, by nic jawnego nie wyciekało.
 
 ## Budowanie (Linux)
 
@@ -133,3 +138,7 @@ make test
   z tą samą tożsamością pokaże wiadomość dalej.
 
 Szczegóły bezpieczeństwa: [SECURITY.md](SECURITY.md).
+
+## Licencja
+
+[GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
