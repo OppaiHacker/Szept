@@ -25,7 +25,10 @@ import (
 
 // msgPage: ile dymków rysujemy od razu. Telefon nie ma po co budować pół
 // tysiąca widgetów przy wejściu do czatu — starsze dociąga przycisk u góry.
-const msgPage = 40
+// ponytail: stały sufit, nie prawdziwa wirtualizacja. widget.List umie
+// recyklingować wiersze, ale wymaga znanej wysokości każdego z nich, a dymek
+// z zawijanym tekstem i miniaturą jej nie ma.
+const msgPage = 30
 
 // grupowanie: kolejne wiadomości tej samej osoby w tym odstępie zlewają się
 // w jeden blok (jeden podpis, jeden awatar) — tak robi Discord.
@@ -33,23 +36,15 @@ const groupWindow = 5 * time.Minute
 
 // ---- lista czatów ----
 
-// rebuildChats: mobile rysuje własne wiersze, pulpit odświeża widget.List.
+// rebuildChats: te same dotykowe wiersze na obu platformach. Pulpit miał tu
+// widget.List z samą nazwą czatu — bez awatara, zajawki i godziny wyglądał jak
+// inna aplikacja niż telefon, a zaznaczenie rysowało bladą płachtę na całą
+// szerokość. Czatów są dziesiątki, więc recykling wierszy nic tu nie dawał.
 func (u *ui) rebuildChats() {
-	if !u.mobile {
-		u.chatLst.Refresh()
-		if len(u.rows) > 0 {
-			typing := u.entry != nil && u.w.Canvas().Focused() == fyne.Focusable(u.entry)
-			u.chatLst.Select(u.sel) // podświetlenie aktywnego czatu
-			if typing {
-				u.w.Canvas().Focus(u.entry) // Select kradnie fokus polu
-			}
-		}
-		return
-	}
 	u.chatBox.RemoveAll()
 	for i, r := range u.rows {
 		i, r := i, r
-		u.chatBox.Add(u.chatRow(r, func() {
+		u.chatBox.Add(u.chatRow(r, !u.mobile && i == u.sel, func() {
 			u.sel = i
 			u.shown = 0
 			u.openConv()
@@ -65,47 +60,56 @@ func (u *ui) rebuildChats() {
 }
 
 // chatRow: awatar, nazwa, zajawka, po prawej godzina i odznaka.
-func (u *ui) chatRow(r chatRow, tap func()) fyne.CanvasObject {
+func (u *ui) chatRow(r chatRow, sel bool, tap func()) fyne.CanvasObject {
 	prev := u.chatPreview(r.info)
-	body := twoLine(r.info.Name, prev.text, 15, 12, 22)
+	body := twoLine(r.info.Name, prev.text, 15, 12)
 	when := mutedText("", 10)
 	if !prev.ts.IsZero() {
 		when.Text = shortTime(prev.ts)
 	}
 	right := container.NewVBox(container.NewCenter(when))
-	if r.unread > 0 {
+	switch {
+	case r.unread > 0:
 		right.Add(container.NewCenter(badge(r.unread)))
-	} else if len(r.info.InCall) > 0 {
+	case len(r.info.InCall) > 0:
 		call := canvas.NewText("📞", cGreen)
 		call.TextSize = fs(12)
 		right.Add(container.NewCenter(call))
-	} else if r.info.Online > 0 {
+	case r.info.Online > 0:
 		on := canvas.NewText(fmt.Sprintf("● %d", r.info.Online), cGreen)
 		on.TextSize = fs(10)
 		right.Add(container.NewCenter(on))
 	}
 
 	// awatar grupy: przy dwóch osobach twarz rozmówcy, w grupie inicjał nazwy
-	av := u.chatAvatar(r.info)
+	av := u.chatAvatar(r.info, avatarBig)
 	row := container.NewBorder(nil, nil,
-		container.NewHBox(hspace(2), container.NewCenter(av), hspace(8)),
-		right, container.NewCenter(body))
-	return tappable(container.NewPadded(row), tap, nil)
+		container.NewHBox(container.NewCenter(av), hspace(6)),
+		right, vcenter(body))
+	inner := fyne.CanvasObject(container.NewPadded(row))
+	if sel {
+		bg := canvas.NewRectangle(cSurface2)
+		bg.CornerRadius = 10
+		inner = container.NewPadded(container.NewStack(bg, container.NewPadded(row)))
+	}
+	return tappable(inner, tap, nil)
 }
 
-func (u *ui) chatAvatar(ci core.ChatInfo) fyne.CanvasObject {
+func (u *ui) chatAvatar(ci core.ChatInfo, size float32) fyne.CanvasObject {
 	if len(ci.Members) == 2 {
 		for _, m := range ci.Members {
 			if !bytes.Equal(m.Pub, u.c.ID.Pub) {
-				return u.avatarView(m.Pub, m.Name, avatarBig)
+				return u.avatarView(m.Pub, m.Name, size)
 			}
 		}
 	}
-	return u.avatarView(ci.ID, ci.Name, avatarBig)
+	return u.avatarView(ci.ID, ci.Name, size)
 }
 
+// badge: czerwona pigułka z liczbą nieprzeczytanych — ten sam kolor co odznaka
+// na dolnej nawigacji, żeby jedno oznaczało to samo w dwóch miejscach.
 func badge(n int) fyne.CanvasObject {
-	bg := canvas.NewRectangle(cAccent)
+	bg := canvas.NewRectangle(cRed)
 	bg.CornerRadius = 9
 	txt := canvas.NewText(fmt.Sprint(n), theme.Color(theme.ColorNameForegroundOnPrimary))
 	if n > 99 {
@@ -187,76 +191,14 @@ func dayLabel(t time.Time) string {
 	return fmt.Sprintf("%d %s %d", t.Day(), plMonths[int(t.Month())-1], t.Year())
 }
 
-// ---- lista czatów na pulpicie (widget.List) ----
-
-func (u *ui) chatCount() int { return len(u.rows) }
-
-func (u *ui) chatTemplate() fyne.CanvasObject {
-	name := widget.NewLabel("czat")
-	name.Truncation = fyne.TextTruncateEllipsis
-	call := canvas.NewText("📞", cGreen)
-	call.TextSize = fs(12)
-	online := canvas.NewText("", cGreen)
-	online.TextSize = fs(12)
-	badgeBg := canvas.NewRectangle(cAccent)
-	badgeBg.CornerRadius = 9
-	badgeTxt := canvas.NewText("0", theme.Color(theme.ColorNameForegroundOnPrimary))
-	badgeTxt.TextSize = fs(11)
-	badgeTxt.TextStyle = fyne.TextStyle{Bold: true}
-	b := container.NewGridWrap(fyne.NewSize(22, 18),
-		container.NewStack(badgeBg, container.NewCenter(badgeTxt)))
-	right := container.NewHBox(container.NewCenter(call), container.NewCenter(online),
-		container.NewCenter(b), hspace(2))
-	return container.NewBorder(nil, nil, nil, right, name)
-}
-
-func (u *ui) chatUpdate(i widget.ListItemID, o fyne.CanvasObject) {
-	if i >= len(u.rows) {
-		return
-	}
-	r := u.rows[i]
-	border := o.(*fyne.Container)
-	name := border.Objects[0].(*widget.Label)
-	right := border.Objects[1].(*fyne.Container)
-	call := right.Objects[0].(*fyne.Container).Objects[0].(*canvas.Text)
-	online := right.Objects[1].(*fyne.Container).Objects[0].(*canvas.Text)
-	b := right.Objects[2].(*fyne.Container).Objects[0].(*fyne.Container)
-	badgeTxt := b.Objects[0].(*fyne.Container).Objects[1].(*fyne.Container).Objects[0].(*canvas.Text)
-
-	name.TextStyle = fyne.TextStyle{Bold: r.unread > 0}
-	name.SetText(r.info.Name)
-	name.Refresh() // SetText nie odświeża przy samej zmianie TextStyle
-	if len(r.info.InCall) > 0 {
-		call.Show()
-	} else {
-		call.Hide()
-	}
-	if r.info.Online > 0 {
-		online.Text = fmt.Sprintf("● %d", r.info.Online)
-		online.Show()
-	} else {
-		online.Hide()
-	}
-	online.Refresh()
-	if r.unread > 0 {
-		badgeTxt.Text = fmt.Sprintf("%d", r.unread)
-		b.Show()
-	} else {
-		b.Hide()
-	}
-	b.Refresh()
-}
-
 // ---- widok rozmowy ----
 
 func (u *ui) buildConv() {
-	u.title = canvas.NewText("", cFg)
-	u.title.TextSize = fs(16)
-	u.title.TextStyle = fyne.TextStyle{Bold: true}
-	u.subtitle = mutedText("", 11)
+	u.title = newClipText("", fs(16), cFg).bold()
+	u.subtitle = newClipText("", fs(11), cMuted)
 	u.headAvatar = container.NewStack()
 	u.msgBox = container.NewVBox()
-	u.msgScr = container.NewVScroll(u.msgBox)
+	u.msgScr = vscroll(u.msgBox)
 
 	composer := u.buildComposer() // pole wiadomości + komendy / (commands.go)
 	u.buildCallControls()
@@ -271,15 +213,22 @@ func (u *ui) buildConv() {
 		b.Importance = widget.LowImportance
 		back = b
 	}
+	// awatar dostaje stałą klatkę avatarRow×avatarRow. Bez niej pusty Stack ma
+	// MinSize zero i Border wylicza lewą kolumnę PRZED pierwszym
+	// updateConvHeader — awatar dorysowywał się potem na tytule i podpisie.
+	headAv := container.NewGridWrap(fyne.NewSize(avatarRow, avatarRow), u.headAvatar)
 	head := container.NewBorder(nil, nil,
-		container.NewHBox(back, container.NewCenter(u.headAvatar), hspace(6)),
+		container.NewHBox(back, container.NewCenter(headAv), hspace(6)),
 		actions,
 		container.NewVBox(layout.NewSpacer(), u.title, u.subtitle, layout.NewSpacer()))
-	bar := container.NewStack(canvas.NewRectangle(cSurface),
-		container.NewVBox(container.NewPadded(head), canvas.NewRectangle(cSep)))
+	line := canvas.NewRectangle(cSep)
+	line.SetMinSize(fyne.NewSize(1, 1))
+	bar := container.NewStack(canvas.NewRectangle(cDeep),
+		container.NewVBox(container.NewPadded(head), line))
 
 	bottom := container.NewVBox(u.hintBox, u.banner, composer)
-	u.convRoot = container.NewBorder(bar, bottom, nil, nil, u.msgScr)
+	u.convRoot = container.NewBorder(bar, bottom, nil, nil,
+		container.NewStack(canvas.NewRectangle(cBg), u.msgScr))
 }
 
 // buildCallControls: przyciski mediów żyją w banerze rozmowy, więc poza
@@ -353,27 +302,13 @@ func (u *ui) buildCallControls() {
 }
 
 func (u *ui) updateConvHeader(ch *core.ChatInfo) {
-	name := ch.Name
-	if u.mobile { // canvas.Text nie zawija — długa nazwa wypchnęłaby przyciski poza ekran
-		name = trunc(name, 16)
-	}
-	u.title.Text = name
-	u.title.Refresh()
-	on := ""
+	u.title.setText(ch.Name)
+	sub := fmt.Sprintf("%d członków", len(ch.Members))
 	if ch.Online > 0 {
-		on = fmt.Sprintf(" · %d online", ch.Online)
+		sub = fmt.Sprintf("%d z %d online", ch.Online+1, len(ch.Members))
 	}
-	u.subtitle.Text = fmt.Sprintf("%d członków%s", len(ch.Members), on)
-	if u.mobile {
-		// canvas.Text nie zawija ani nie przycina: pełny podpis wchodził pod
-		// przyciski po prawej. Na wąskim ekranie ważniejsze jest „kto jest”.
-		u.subtitle.Text = fmt.Sprintf("%d osób", len(ch.Members))
-		if ch.Online > 0 {
-			u.subtitle.Text = fmt.Sprintf("%d z %d online", ch.Online+1, len(ch.Members))
-		}
-	}
-	u.subtitle.Refresh()
-	u.headAvatar.Objects = []fyne.CanvasObject{u.chatAvatar(*ch)}
+	u.subtitle.setText(sub)
+	u.headAvatar.Objects = []fyne.CanvasObject{u.chatAvatar(*ch, avatarRow)}
 	u.headAvatar.Refresh()
 }
 
@@ -386,13 +321,19 @@ func (u *ui) openConv() {
 		return
 	}
 	if u.convPage == nil {
-		u.convPage = container.NewStack(backdrop(), u.convRoot)
+		u.convPage = slidePage(container.NewStack(backdrop(), u.convRoot))
 	}
-	if !u.onStack(u.convPage) {
+	fresh := !u.onStack(u.convPage)
+	if fresh {
 		u.root.Add(u.convPage)
 	}
 	u.root.Refresh()
 	u.refresh() // dopiero teraz chatOpen() widzi stronę i rysuje wiadomości
+	if fresh {
+		// wjazd dopiero po narysowaniu dymków — animowanie pustej strony, która
+		// w połowie drogi dopiero się wypełnia, wygląda gorzej niż brak animacji
+		slideIn(u.convPage, u.w.Canvas().Size().Width)
+	}
 }
 
 // openChat: przełącza na wskazany czat i (na telefonie) otwiera jego stronę.
@@ -553,15 +494,69 @@ func (u *ui) nearBottom() bool {
 	return u.msgScr.Offset.Y >= max-60
 }
 
+// daySeparator: kreska przez całą szerokość z datą w środku. Kreska była tu
+// tworzona i nigdy nie dodana do widoku — została sama, wisząca w powietrzu
+// etykieta. Etykieta zasłania kreskę własnym tłem, bo fyne nie umie przerwać
+// prostokąta w środku.
 func daySeparator(t time.Time) fyne.CanvasObject {
 	line := canvas.NewRectangle(cSep)
 	line.SetMinSize(fyne.NewSize(1, 1))
-	lbl := mutedText(dayLabel(t), 10)
-	return container.NewPadded(container.NewBorder(nil, nil, nil, nil,
-		container.NewHBox(layout.NewSpacer(), container.NewCenter(lbl), layout.NewSpacer())))
+	lbl := mutedText(strings.ToUpper(dayLabel(t)), 10)
+	cover := canvas.NewRectangle(cBg)
+	cover.CornerRadius = 8
+	return container.NewPadded(container.NewStack(
+		container.NewVBox(layout.NewSpacer(), line, layout.NewSpacer()),
+		container.NewCenter(container.NewStack(cover, container.NewPadded(lbl)))))
+}
+
+// bubbleMax: ile pikseli zostaje na sam tekst w dymku. Liczone z realnej
+// szerokości ekranu, nie z liczby znaków — telefony bywają różnie szerokie.
+func (u *ui) bubbleMax() float32 {
+	w := u.w.Canvas().Size().Width
+	if w <= 0 {
+		return 0
+	}
+	return w - bubbleMargin(u.mobile) - avatarSmall - 8*theme.Padding()
+}
+
+// bubbleFits: czy tekst zmieści się w dymku bez zawijania. Ma to znaczenie, bo
+// zawijający widget.Label podaje minimalną szerokość z najdłuższego słowa —
+// dopóki zawijanie jest włączone, dymek nie potrafi przytulić treści i „ok”
+// rozciąga się na całą szerokość ekranu jak nagłówek.
+func (u *ui) bubbleFits(s string) bool {
+	max := u.bubbleMax()
+	if max <= 0 || strings.Count(s, "\n") > 3 {
+		return false
+	}
+	for _, line := range strings.Split(s, "\n") {
+		if fyne.MeasureText(line, theme.TextSize(), fyne.TextStyle{}).Width > max {
+			return false
+		}
+	}
+	return true
+}
+
+// wrapFor: dymek przytulający treść musi mieć zawijanie WYŁĄCZONE — patrz bubbleFits.
+func wrapFor(hug bool) fyne.TextWrap {
+	if hug {
+		return fyne.TextWrapOff
+	}
+	return fyne.TextWrapWord
+}
+
+// bubbleMargin: pusty pas z drugiej strony dymka, żeby wiadomość nigdy nie sięgała
+// obu krawędzi — inaczej nie widać, kto mówi.
+func bubbleMargin(mobile bool) float32 {
+	if mobile {
+		return 60
+	}
+	return 200
 }
 
 // bubbleRow: jeden dymek z podpisem i awatarem (albo bez, gdy grupujemy).
+// Godzina pojawia się tylko przy pierwszej wiadomości z serii — kolejne dymki
+// tej samej osoby są nagie, tak jak w Discordzie. To nie tylko wygląd: dymek bez
+// stopki to pięć widgetów mniej, a przewijamy ich tu kilkaset.
 func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 	lastBubble **canvas.Rectangle, lastOwn *bool) fyne.CanvasObject {
 	own := bytes.Equal(m.Author, u.c.ID.Pub)
@@ -569,52 +564,66 @@ func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 	if own {
 		bg.FillColor = cBubbleMe
 	}
-	bg.CornerRadius = 14
+	bg.CornerRadius = 16
 
 	var content fyne.CanvasObject
+	hug := false // dymek szerokości treści zamiast na całą szerokość wiersza
+	// miniatura i kafelek pliku mają znany rozmiar, więc dymek może je obleźć —
+	// o szerokości decyduje wtedy tylko podpis
 	if m.Kind == "file" {
 		body := container.NewVBox(u.attachView(m, animate))
+		hug = true
 		if m.Text != "" { // podpis pod załącznikiem
 			cap := widget.NewLabel(m.Text)
-			cap.Wrapping = fyne.TextWrapWord
+			hug = u.bubbleFits(m.Text)
+			cap.Wrapping = wrapFor(hug)
 			body.Add(cap)
 		}
 		content = container.NewPadded(body)
 	} else {
 		txt := widget.NewLabel(m.Text)
-		txt.Wrapping = fyne.TextWrapWord
+		hug = u.bubbleFits(m.Text)
+		txt.Wrapping = wrapFor(hug)
 		content = txt
 	}
-	stamp := mutedText(m.TS.Format("15:04"), 9)
-	inner := container.NewVBox(content,
-		container.NewHBox(layout.NewSpacer(), stamp, hspace(4)))
-	bubble := tappable(container.NewStack(bg, inner), nil, func() { u.msgActions(m) })
+
+	bubble := tappable(container.NewStack(bg, content), nil, func() { u.msgActions(m) })
 	*lastBubble, *lastOwn = bg, own
 
-	margin := float32(60)
-	if !u.mobile {
-		margin = 200
-	}
-	var row fyne.CanvasObject
+	margin := bubbleMargin(u.mobile)
 	if own {
-		row = container.NewBorder(nil, nil, hspace(margin), hspace(2), bubble)
-	} else {
-		av := fyne.CanvasObject(hspace(avatarSmall))
+		// Godzina NAD dymkiem, nie w jego środku: w środku siedziała pod tekstem
+		// bez własnego marginesu i wchodziła w zaokrąglony róg, a przy krótkiej
+		// treści („ok”) to ona dyktowała szerokość dymka. Nad dymkiem jest
+		// symetrycznie do cudzych wiadomości, które mają tam nazwisko i godzinę.
+		body := fyne.CanvasObject(bubble)
 		if !grouped {
-			av = container.NewVBox(u.avatarView(m.Author, m.Name, avatarSmall), layout.NewSpacer())
+			body = container.NewVBox(container.NewHBox(layout.NewSpacer(),
+				mutedText(m.TS.Format("15:04"), 9), hspace(4)), bubble)
 		}
-		left := container.NewHBox(hspace(2), av, hspace(4))
-		body := bubble
-		if !grouped {
-			who := canvas.NewText(m.Name, authorColor(m.Author))
-			who.TextSize = fs(11)
-			who.TextStyle = fyne.TextStyle{Bold: true}
-			return container.NewBorder(nil, nil, left, hspace(margin),
-				container.NewVBox(who, bubble))
+		if hug {
+			return container.NewHBox(layout.NewSpacer(), body, hspace(2))
 		}
-		row = container.NewBorder(nil, nil, left, hspace(margin), body)
+		return container.NewBorder(nil, nil, hspace(margin), hspace(2), body)
 	}
-	return row
+
+	av := fyne.CanvasObject(hspace(avatarSmall))
+	if !grouped {
+		av = container.NewVBox(u.avatarView(m.Author, m.Name, avatarSmall), layout.NewSpacer())
+	}
+	left := container.NewHBox(hspace(2), av)
+	body := fyne.CanvasObject(bubble)
+	if !grouped {
+		who := canvas.NewText(m.Name, authorColor(m.Author))
+		who.TextSize = fs(11)
+		who.TextStyle = fyne.TextStyle{Bold: true}
+		body = container.NewVBox(
+			container.NewHBox(who, mutedText(m.TS.Format("15:04"), 9)), bubble)
+	}
+	if hug {
+		return container.NewHBox(left, body, layout.NewSpacer())
+	}
+	return container.NewBorder(nil, nil, left, hspace(margin), body)
 }
 
 // ---- akcje wiadomości (długie przytrzymanie) ----
@@ -831,7 +840,7 @@ func (u *ui) personRow(pub []byte, name, tag string, online bool, tap func()) fy
 		container.NewHBox(hspace(2), container.NewCenter(dot), hspace(4),
 			container.NewCenter(u.avatarView(pub, name, avatarRow)), hspace(8)),
 		container.NewCenter(widget.NewIcon(theme.NavigateNextIcon())),
-		container.NewCenter(twoLine(name, sub, 14, 10, 22)))
+		vcenter(twoLine(name, sub, 14, 10)))
 	return tappable(container.NewPadded(row), tap, nil)
 }
 

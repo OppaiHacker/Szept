@@ -20,10 +20,10 @@ import (
 )
 
 // appBar: górny pasek strony — strzałka wstecz, tytuł i opcjonalne akcje.
+// Tytuł jest przycinany do miejsca, które zostało między strzałką a akcjami;
+// wcześniej długa nazwa wypychała przyciski za krawędź ekranu.
 func (u *ui) appBar(title string, back func(), actions ...fyne.CanvasObject) fyne.CanvasObject {
-	t := canvas.NewText(title, cFg)
-	t.TextSize = fs(17)
-	t.TextStyle = fyne.TextStyle{Bold: true}
+	t := newClipText(title, fs(17), cFg).bold()
 	var left fyne.CanvasObject
 	if back != nil {
 		b := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), back)
@@ -33,9 +33,11 @@ func (u *ui) appBar(title string, back func(), actions ...fyne.CanvasObject) fyn
 		left = hspace(theme.Padding())
 	}
 	right := container.NewHBox(actions...)
-	bg := canvas.NewRectangle(cSurface)
-	row := container.NewBorder(nil, nil, left, right, container.NewCenter(t))
-	return container.NewStack(bg, container.NewVBox(row, canvas.NewRectangle(cSep)))
+	bg := canvas.NewRectangle(cDeep)
+	row := container.NewBorder(nil, nil, left, right, vcenter(t))
+	line := canvas.NewRectangle(cSep)
+	line.SetMinSize(fyne.NewSize(1, 1))
+	return container.NewStack(bg, container.NewVBox(row, line))
 }
 
 // backdrop: nieprzezroczyste tło strony, które ZJADA dotknięcia. Samo
@@ -46,15 +48,20 @@ func backdrop() fyne.CanvasObject {
 	return tappable(canvas.NewRectangle(cBg), func() {}, nil)
 }
 
-// pushPage kładzie stronę na wierzchu. Stack rysuje warstwy jedna na drugiej,
-// więc bez własnego tła prześwitywałby ekran pod spodem.
+// pushPage kładzie stronę na wierzchu i wsuwa ją z prawej krawędzi. Stack rysuje
+// warstwy jedna na drugiej, więc bez własnego tła prześwitywałby ekran pod spodem.
 func (u *ui) pushPage(title string, content fyne.CanvasObject, actions ...fyne.CanvasObject) {
-	page := container.NewStack(backdrop(), container.NewBorder(
-		u.appBar(title, func() { u.popPage() }, actions...), nil, nil, nil, content))
+	page := slidePage(container.NewStack(backdrop(), container.NewBorder(
+		u.appBar(title, func() { u.popPage() }, actions...), nil, nil, nil, content)))
 	u.root.Add(page)
 	u.root.Refresh()
+	slideIn(page, u.w.Canvas().Size().Width)
 }
 
+// popPage zdejmuje wierzchnią stronę OD RAZU — popAllPages kręci się w pętli
+// dopóki coś zdejmuje, a chatOpen() pyta o zawartość stosu zaraz po powrocie.
+// Animowane wyjeżdżanie musiałoby stronę na chwilę zostawić i jedno i drugie
+// zaczęłoby kłamać.
 func (u *ui) popPage() bool {
 	if u.root == nil || len(u.root.Objects) <= 1 {
 		return false
@@ -75,12 +82,53 @@ func (u *ui) popAllPages() {
 // pulpit dialog przycięty do okna.
 func (u *ui) page(title string, content fyne.CanvasObject, actions ...fyne.CanvasObject) {
 	if u.mobile {
-		u.pushPage(title, container.NewVScroll(container.NewPadded(content)), actions...)
+		u.pushPage(title, vscroll(container.NewPadded(content)), actions...)
 		return
 	}
 	scr := container.NewVScroll(content)
-	scr.SetMinSize(u.dlgSize(440, 620))
+	// wysokość z treści, nie na sztywno: krótka strona w oknie na 620 px to była
+	// płachta pustki z przyciskiem „Zamknij” przyklejonym gdzieś na dole
+	scr.SetMinSize(u.dlgSize(440, content.MinSize().Height+theme.Padding()*2))
 	dialog.ShowCustom(title, "Zamknij", scr, u.w)
+}
+
+// ---- dialogi ----
+//
+// dialog.ShowInformation/ShowError/ShowConfirm rysują pod treścią ogromną,
+// półprzezroczystą ikonę („?”, „!”) na pół okienka i podpisują przyciski po
+// angielsku (lang.L("Yes")) — w polskiej aplikacji wygląda to jak cudzy widget
+// wklejony w środek. Warianty Custom* nie mają ani ikony, ani gotowych napisów.
+
+// dlgBody: treść dialogu. Zawijany tekst ma minimalną szerokość najdłuższego
+// słowa, więc bez rozpórki dialog byłby paskiem na trzy litery.
+func (u *ui) dlgBody(text string) fyne.CanvasObject {
+	t := widget.NewLabel(text)
+	t.Wrapping = fyne.TextWrapWord
+	return container.NewVBox(hspace(u.dlgSize(360, 0).Width), t)
+}
+
+func (u *ui) info(title, text string) {
+	dialog.NewCustom(title, "OK", u.dlgBody(text), u.w).Show()
+}
+
+func (u *ui) fail(err error) {
+	if err == nil {
+		return
+	}
+	dialog.NewCustom("Nie wyszło", "OK", u.dlgBody(err.Error()), u.w).Show()
+}
+
+// confirm: pytanie tak/nie. Dialog zostaje nawet na telefonie — jedno zdanie
+// i dwa przyciski nie potrzebują całego ekranu, a pytanie ma zatrzymać rękę.
+func (u *ui) confirm(text string, yes func()) {
+	d := dialog.NewCustomConfirm("Na pewno?", "Tak", "Anuluj", u.dlgBody(text),
+		func(ok bool) {
+			if ok {
+				yes()
+			}
+		}, u.w)
+	d.SetConfirmImportance(widget.DangerImportance)
+	d.Show()
 }
 
 // ---- klocki stron ----
@@ -90,7 +138,7 @@ func navRow(icon fyne.Resource, title, desc string, tap func()) fyne.CanvasObjec
 	row := container.NewBorder(nil, nil,
 		container.NewHBox(hspace(4), container.NewCenter(widget.NewIcon(icon)), hspace(10)),
 		container.NewCenter(widget.NewIcon(theme.NavigateNextIcon())),
-		container.NewCenter(twoLine(title, desc, 14, 11, 26)))
+		vcenter(twoLine(title, desc, 14, 11)))
 	return tappable(container.NewPadded(row), tap, nil)
 }
 
@@ -121,6 +169,7 @@ type tapBox struct {
 	tap     func()
 	long    func()
 	hover   *canvas.Rectangle
+	anim    *fyne.Animation
 }
 
 func tappable(content fyne.CanvasObject, tap, long func()) *tapBox {
@@ -134,7 +183,14 @@ func (t *tapBox) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(t.hover, t.content))
 }
 
+// Dotknięcie w trakcie wybiegu (scroll.go) znaczy „stój”, nie „otwórz” — tak
+// zachowuje się każda lista na Androidzie. Bez tego palec położony na lecącej
+// liście otwierał czat, w który akurat trafił.
 func (t *tapBox) Tapped(*fyne.PointEvent) {
+	if activeFling != nil {
+		stopFling()
+		return
+	}
 	if t.tap != nil {
 		t.flash()
 		t.tap()
@@ -148,17 +204,29 @@ func (t *tapBox) TappedSecondary(*fyne.PointEvent) {
 	}
 }
 
-// flash: krótkie rozjaśnienie zamiast stanu wciśnięcia — na dotyku i tak nie ma
-// kursora, a potwierdzenie dotknięcia jest potrzebne.
+// pressTint: podświetlenie dotkniętego wiersza.
+var pressTint = color.NRGBA{0xff, 0xff, 0xff, 0x1c}
+
+// flash: rozjaśnienie i zgaśnięcie zamiast stanu wciśnięcia.
+//
+// ponytail: podświetlenie leci dopiero po puszczeniu palca, bo prawdziwy stan
+// „wciśnięty” wymagałby mobile.Touchable — a wtedy driver fyne uznaje wiersz za
+// najgłębszy obiekt zdarzeń przeciągania (findObjectAtPositionMatching bierze
+// najgłębsze trafienie) i skoro wiersz nie umie Dragged, przewijanie ROZPOCZĘTE
+// na wierszu przestaje działać w ogóle. Reakcja po puszczeniu to mały koszt za
+// działające przewijanie listy.
 func (t *tapBox) flash() {
-	t.hover.FillColor = color.NRGBA{0xff, 0xff, 0xff, 0x1a}
+	if t.anim != nil {
+		t.anim.Stop()
+	}
+	t.hover.FillColor = pressTint
 	t.hover.Refresh()
-	a := canvas.NewColorRGBAAnimation(color.NRGBA{0xff, 0xff, 0xff, 0x1a},
-		color.NRGBA{0xff, 0xff, 0xff, 0x00}, 250*msec, func(c color.Color) {
+	t.anim = canvas.NewColorRGBAAnimation(pressTint, color.NRGBA{0xff, 0xff, 0xff, 0x00},
+		220*msec, func(c color.Color) {
 			t.hover.FillColor = c
 			t.hover.Refresh()
 		})
-	a.Start()
+	t.anim.Start()
 }
 
 // ---- dolna nawigacja ----
@@ -176,7 +244,7 @@ type navTab struct {
 }
 
 func (u *ui) buildBottomNav(labels []string, icons []fyne.Resource) fyne.CanvasObject {
-	bg := canvas.NewRectangle(cSurface)
+	bg := canvas.NewRectangle(cDeep)
 	row := container.NewGridWithColumns(len(labels))
 	u.tabs = nil
 	for i := range labels {
@@ -203,7 +271,9 @@ func (u *ui) buildBottomNav(labels []string, icons []fyne.Resource) fyne.CanvasO
 		row.Add(tappable(cell, func() { u.selectTab(i) }, nil))
 		u.tabs = append(u.tabs, t)
 	}
-	return container.NewStack(bg, container.NewVBox(canvas.NewRectangle(cSep), row))
+	line := canvas.NewRectangle(cSep)
+	line.SetMinSize(fyne.NewSize(1, 1))
+	return container.NewStack(bg, container.NewVBox(line, row))
 }
 
 // selectTab przełącza zakładkę główną (dolny pasek) i zdejmuje strony ze stosu.
@@ -212,9 +282,19 @@ func (u *ui) selectTab(i int) {
 		return
 	}
 	u.popAllPages()
+	prev := u.tab
 	u.tab = i
 	u.tabBody.Objects = []fyne.CanvasObject{u.tabViews[i]}
 	u.tabBody.Refresh()
+	// nowa zakładka wjeżdża z tej strony, z której „przyszła” — 24 px wystarczy,
+	// żeby przełączenie było widoczne, a nie żeby na nie czekać
+	if prev != i {
+		if prev < i {
+			slideIn(u.tabBody, 24)
+		} else {
+			slideIn(u.tabBody, -24)
+		}
+	}
 	for j, t := range u.tabs {
 		if j == i {
 			t.txt.Color = cAccent
