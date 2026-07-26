@@ -205,3 +205,26 @@ func TestVerify(t *testing.T) {
 		t.Error("przyjąłem HTML jako obraz")
 	}
 }
+
+// bombJPEG: poprawny nagłówek JPEG (SOI + SOF0) deklarujący podane wymiary —
+// tak wygląda bomba dekompresyjna: 3 MB pliku, gigabajty po zdekodowaniu.
+func bombJPEG(w, h int) []byte {
+	return []byte{
+		0xff, 0xd8, // SOI
+		0xff, 0xc0, 0x00, 0x11, 0x08, // SOF0, len 17, precyzja 8
+		byte(h >> 8), byte(h), byte(w >> 8), byte(w),
+		0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, // 3 komponenty
+	}
+}
+
+func TestCheckDims(t *testing.T) {
+	if err := CheckDims(testPNG(t, 10, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDims(bombJPEG(65535, 65535)); err == nil {
+		t.Error("przyjąłem JPEG deklarujący 65535x65535 px")
+	}
+	if err := CheckDims(bombJPEG(9000, 100)); err == nil {
+		t.Error("przyjąłem JPEG szerszy niż limit boku")
+	}
+}

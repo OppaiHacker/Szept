@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 
 	"szept/internal/connector"
@@ -29,6 +30,7 @@ type sigPayload struct {
 	To     []byte `json:"to"`
 	TS     int64  `json:"ts"`
 	ConnID []byte `json:"connid"`
+	Obf    []byte `json:"obf,omitempty"` // 32B ChaCha20 key for wire obfuscation; offerer picks it
 }
 
 type sigEnvelope struct {
@@ -113,10 +115,11 @@ func (p *Peer) CloseMedia(prefix string) {
 func (p *Peer) Close() { p.pc.Close() }
 
 type Manager struct {
-	priv ed25519.PrivateKey
-	pub  ed25519.PublicKey
-	conn *connector.Client
-	cfg  webrtc.Configuration
+	priv      ed25519.PrivateKey
+	pub       ed25519.PublicKey
+	conn      *connector.Client
+	cfg       webrtc.Configuration
+	stunHosts map[string]bool // STUN server hostnames: their traffic bypasses obfuscation
 
 	// Accept decides whether we talk to this pubkey at all (friend, chat
 	// co-member or invite target). Trust boundary — default deny.
@@ -161,8 +164,9 @@ func NewManager(priv ed25519.PrivateKey, conn *connector.Client, stun []string) 
 	}
 	m := &Manager{
 		priv: priv, pub: priv.Public().(ed25519.PublicKey), conn: conn,
-		cfg:   webrtc.Configuration{ICEServers: []webrtc.ICEServer{{URLs: stun}}},
-		peers: map[string]*Peer{}, pending: map[string][]byte{}, dialing: map[string]*Peer{},
+		cfg:       webrtc.Configuration{ICEServers: []webrtc.ICEServer{{URLs: stun}}},
+		stunHosts: stunHostSet(stun),
+		peers:     map[string]*Peer{}, pending: map[string][]byte{}, dialing: map[string]*Peer{},
 		seen: map[string]time.Time{},
 	}
 	conn.OnSignal = m.onSignal
@@ -206,6 +210,22 @@ func (m *Manager) sign(p sigPayload) []byte {
 	return connector.JSON(env)
 }
 
+// apiFor builds a WebRTC API whose UDP transport obfuscates every peer-bound
+// datagram with the shared key. mDNS is disabled so no cleartext .local
+// multicast leaks onto the wire alongside the obfuscated flow.
+func (m *Manager) apiFor(key []byte) (*webrtc.API, error) {
+	se := webrtc.SettingEngine{}
+	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	if len(key) == crypt.KeySize {
+		n, err := newObfNet(key, m.stunHosts)
+		if err != nil {
+			return nil, err
+		}
+		se.SetNet(n)
+	}
+	return webrtc.NewAPI(webrtc.WithSettingEngine(se)), nil
+}
+
 // Connect dials a peer (idempotent: returns existing link if up).
 func (m *Manager) Connect(pub []byte) error {
 	if bytes.Equal(pub, m.pub) {
@@ -221,6 +241,7 @@ func (m *Manager) Connect(pub []byte) error {
 		return nil
 	}
 	connID := crypt.RandBytes(8)
+	obfKey := crypt.NewKey()
 	m.pending[string(pub)] = connID
 	m.mu.Unlock()
 
@@ -231,7 +252,11 @@ func (m *Manager) Connect(pub []byte) error {
 		return err
 	}
 
-	pc, err := webrtc.NewPeerConnection(m.cfg)
+	api, err := m.apiFor(obfKey)
+	if err != nil {
+		return fail(err)
+	}
+	pc, err := api.NewPeerConnection(m.cfg)
 	if err != nil {
 		return fail(err)
 	}
@@ -261,7 +286,7 @@ func (m *Manager) Connect(pub []byte) error {
 	}
 	payload := sigPayload{
 		Kind: "offer", SDP: pc.LocalDescription().SDP,
-		From: m.pub, To: pub, TS: time.Now().Unix(), ConnID: connID,
+		From: m.pub, To: pub, TS: time.Now().Unix(), ConnID: connID, Obf: obfKey,
 	}
 	if err := m.signal(pub, m.sign(payload)); err != nil {
 		pc.Close()
@@ -342,7 +367,11 @@ func (m *Manager) handleOffer(p sigPayload) {
 	}
 	m.mu.Unlock()
 
-	pc, err := webrtc.NewPeerConnection(m.cfg)
+	api, err := m.apiFor(p.Obf)
+	if err != nil {
+		return
+	}
+	pc, err := api.NewPeerConnection(m.cfg)
 	if err != nil {
 		return
 	}

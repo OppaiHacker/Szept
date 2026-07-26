@@ -244,6 +244,13 @@ func Verify(data []byte, mime string) error {
 	return nil
 }
 
+// CheckDims sprawdza limity wymiarów z samego nagłówka, bez dekodowania —
+// dla bajtów, które nie przechodzą przez Check/Verify (ramki wideo rozmów).
+func CheckDims(data []byte) error {
+	_, _, _, err := imageDims(data)
+	return err
+}
+
 // imageDims czyta nagłówek obrazu i pilnuje limitów rozmiaru (bomby).
 func imageDims(data []byte) (format string, w, h int, err error) {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
