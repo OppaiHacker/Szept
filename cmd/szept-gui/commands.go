@@ -11,7 +11,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -292,7 +291,7 @@ func (u *ui) sysErr(body string) {
 func (u *ui) pushSys(m sysMsg) {
 	ch := u.cur()
 	if ch == nil {
-		dialog.ShowInformation("szept — "+m.title, m.body, u.w)
+		u.info("szept — "+m.title, m.body)
 		return
 	}
 	k := string(ch.ID)
@@ -324,8 +323,10 @@ func embedCard(tone color.NRGBA, content, right fyne.CanvasObject) fyne.CanvasOb
 	bar := canvas.NewRectangle(tone)
 	bar.CornerRadius = 2
 	bar.SetMinSize(fyne.NewSize(4, 4))
-	return container.NewStack(bg,
-		container.NewBorder(nil, nil, bar, right, container.NewPadded(content)))
+	// Padded z zewnątrz: embed leży w tej samej kolumnie co dymki, a te nigdy nie
+	// dotykają krawędzi ekranu — bez tego kolorowy pasek wychodził na sam brzeg.
+	return container.NewPadded(container.NewStack(bg,
+		container.NewBorder(nil, nil, bar, right, container.NewPadded(content))))
 }
 
 func (u *ui) sysEmbed(i int, s sysMsg) fyne.CanvasObject {
@@ -415,7 +416,11 @@ func (u *ui) buildComposer() fyne.CanvasObject {
 	// spinacz: pełna strona z galerią i systemowym wyborem (media.go);
 	// tekst z pola leci jako podpis pod plikiem
 	add := widget.NewButtonWithIcon("", theme.ContentAddIcon(), u.attachPage)
-	return container.NewBorder(nil, nil, add, send, e)
+	add.Importance = widget.LowImportance
+	row := container.NewBorder(nil, nil, add, send, e)
+	// pole siedzi na własnym, ciemniejszym pasku (jak composer Discorda) —
+	// wcześniej wisiało wprost na tle rozmowy i zlewało się z ostatnim dymkiem
+	return container.NewStack(canvas.NewRectangle(cSurface), container.NewPadded(row))
 }
 
 func (u *ui) submit(s string) {
@@ -435,7 +440,7 @@ func (u *ui) submit(s string) {
 		return
 	}
 	if err := u.c.Send(ch.ID, s); err != nil {
-		dialog.ShowError(err, u.w)
+		u.fail(err)
 	}
 }
 

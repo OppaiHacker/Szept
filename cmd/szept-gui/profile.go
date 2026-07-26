@@ -12,7 +12,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	qrcode "github.com/skip2/go-qrcode"
@@ -27,7 +26,7 @@ import (
 
 func (u *ui) mePage() fyne.CanvasObject {
 	u.meBox = container.NewVBox()
-	return container.NewVScroll(u.meBox)
+	return vscroll(u.meBox)
 }
 
 // rebuildMe: przerysowuje zakładkę po zmianie nazwy, awatara albo connectora.
@@ -238,16 +237,6 @@ func (u *ui) isFriend(pub []byte) bool {
 // store2friend: członek czatu ma dokładnie to, co potrzebne we wpisie znajomego.
 func store2friend(pub []byte, name string) store.Friend {
 	return store.Friend{Pub: bytes.Clone(pub), Name: name}
-}
-
-// confirm: pytanie tak/nie. Dialog zostaje nawet na telefonie — jedno zdanie
-// i dwa przyciski nie potrzebują całego ekranu, a pytanie ma zatrzymać rękę.
-func (u *ui) confirm(text string, yes func()) {
-	dialog.ShowConfirm("Na pewno?", text, func(ok bool) {
-		if ok {
-			yes()
-		}
-	}, u.w)
 }
 
 // ---- lista znajomych ----
