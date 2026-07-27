@@ -63,7 +63,7 @@ func TestNonMedia(t *testing.T) {
 		if strings.HasSuffix(m.Name, ".png") {
 			t.Errorf("%s: nazwa %q udaje obraz", name, m.Name)
 		}
-		if _, _, err := Avatar(data); err == nil {
+		if _, _, err := Avatar(data, image.Rectangle{}); err == nil {
 			t.Errorf("%s: przeszedł jako awatar", name)
 		}
 	}
@@ -145,7 +145,7 @@ func TestAvatarStripsPayload(t *testing.T) {
 	if _, _, err := image.DecodeConfig(bytes.NewReader(poly)); err != nil {
 		t.Fatal("pointless test: polyglot does not decode as image")
 	}
-	out, mime, err := Avatar(poly)
+	out, mime, err := Avatar(poly, image.Rectangle{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestAvatarStripsPayload(t *testing.T) {
 
 // GIF can be set as avatar and remains animated GIF.
 func TestAvatarGIF(t *testing.T) {
-	out, mime, err := Avatar(testGIF(t, 8))
+	out, mime, err := Avatar(testGIF(t, 8), image.Rectangle{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +189,93 @@ func TestAvatarGIF(t *testing.T) {
 	frames, delays, err := GifFrames(out)
 	if err != nil || len(frames) != 8 || len(delays) != 8 {
 		t.Fatalf("GifFrames: %v %d", err, len(frames))
+	}
+}
+
+// Banner keeps a GIF animated (so an animated banner still moves) and never
+// exceeds the frame cap — every frame is held unpacked in RAM while it plays.
+func TestBannerGIF(t *testing.T) {
+	out, mime, err := Banner(testGIF(t, 60), image.Rectangle{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mime != "image/gif" {
+		t.Fatalf("mime = %q, chciałem image/gif", mime)
+	}
+	g, err := gif.DecodeAll(bytes.NewReader(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Image) < 2 || len(g.Image) > BannerFrames {
+		t.Fatalf("%d klatek, chciałem 2..%d", len(g.Image), BannerFrames)
+	}
+	if b := g.Image[0].Bounds(); b.Dx() != BannerW || b.Dy() != BannerH {
+		t.Fatalf("klatka %v", b)
+	}
+	if len(out) > MaxBannerOut {
+		t.Fatalf("baner %d B ponad limit", len(out))
+	}
+	// a still image still comes out as PNG
+	if _, mime, err := Banner(testPNG(t, 300, 300), image.Rectangle{}); err != nil ||
+		mime != "image/png" {
+		t.Fatalf("PNG baner: %v %q", err, mime)
+	}
+}
+
+// halfPNG: left half red, right half blue — tells apart which region got cut.
+func halfPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			c := color.RGBA{0xff, 0, 0, 0xff}
+			if x >= w/2 {
+				c = color.RGBA{0, 0, 0xff, 0xff}
+			}
+			img.Set(x, y, c)
+		}
+	}
+	var b bytes.Buffer
+	if err := png.Encode(&b, img); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// The framed rectangle decides what lands in the avatar. A rectangle from
+// outside the image is not an error — it falls back to the center, because
+// it arrives from the UI and must never be trusted blindly.
+func TestAvatarCrop(t *testing.T) {
+	data := halfPNG(t, 200, 100)
+	redAt := func(out []byte, x, y int) bool {
+		img, _, err := image.Decode(bytes.NewReader(out))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, _, b, _ := img.At(x, y).RGBA()
+		return r > 0xc000 && b < 0x4000
+	}
+	left, _, err := Avatar(data, image.Rect(0, 0, 100, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !redAt(left, AvatarSide/2, AvatarSide/2) {
+		t.Fatal("kadr z lewej połowy nie jest czerwony")
+	}
+	right, _, err := Avatar(data, image.Rect(100, 0, 200, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redAt(right, AvatarSide/2, AvatarSide/2) {
+		t.Fatal("kadr z prawej połowy wyszedł czerwony")
+	}
+	// nonsense rectangle: center crop, so both halves show up
+	mid, _, err := Avatar(data, image.Rect(-900, -900, -800, -800))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !redAt(mid, 10, AvatarSide/2) || redAt(mid, AvatarSide-10, AvatarSide/2) {
+		t.Fatal("kadr spoza obrazka nie wrócił do środka")
 	}
 }
 

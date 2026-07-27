@@ -9,6 +9,7 @@ package main
 
 import (
 	"errors"
+	"image"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"szept/internal/attach"
 	"szept/internal/boot"
 	"szept/internal/core"
 )
@@ -50,6 +52,12 @@ func TestShots(t *testing.T) {
 	shot("04-znajomi")
 	u.selectTab(2)
 	shot("05-ty")
+
+	// kadrowanie na telefonie: dialog jest węższy niż na pulpicie, więc ramka
+	// musi się do niego skurczyć zamiast wypchnąć przyciski poza ekran
+	u.cropDlg("Kadr awatara", seedBanner(t), 1, 1, true, func(image.Rectangle) {})
+	shot("05b-kadr-awatara")
+	u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
 
 	// panel rozmowy + scena 3D (dołączenie bez peerów: brak urządzeń audio
 	// tylko loguje błąd, stan Joined i tak się ustawia)
@@ -154,6 +162,16 @@ func TestShotsDesktop(t *testing.T) {
 	// przy zmianach w nagłówku, więc zrzut zostaje jako test
 	u.profilePage(u.c.ID.Pub, u.c.ID.Name, false, u.cur())
 	shot("31-profil")
+	u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
+
+	// kadrowanie: ramka, suwak i podpis muszą zmieścić się w dialogu — okrągły
+	// podgląd awatara i pasek baneru mają zupełnie inne proporcje
+	u.cropDlg("Kadr awatara", seedBanner(t), 1, 1, true, func(image.Rectangle) {})
+	shot("32-kadr-awatara")
+	u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
+	u.cropDlg("Kadr baneru", seedBanner(t), attach.BannerW, attach.BannerH, false,
+		func(image.Rectangle) {})
+	shot("33-kadr-baneru")
 	u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
 
 	// ekrany startowe stoją poza normalnym przepływem aplikacji, więc ich

@@ -192,7 +192,7 @@ func TestAttachmentAndAvatarTransfer(t *testing.T) {
 		}
 	}
 
-	if err := a.SetAvatar(testImageGIF(t)); err != nil {
+	if err := a.SetAvatar(testImageGIF(t), image.Rectangle{}); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "b sees ala's avatar", 25*time.Second, func() bool {

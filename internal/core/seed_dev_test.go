@@ -91,10 +91,10 @@ func TestSeedDevice(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := a.SetAvatar(seedPNG(t, 200, 200, 1)); err != nil {
+	if err := a.SetAvatar(seedPNG(t, 200, 200, 1), image.Rectangle{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SetAvatar(seedPNG(t, 200, 200, 2)); err != nil {
+	if err := b.SetAvatar(seedPNG(t, 200, 200, 2), image.Rectangle{}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -237,20 +237,32 @@ func (u *ui) bannerW() float32 {
 }
 
 // bannerView: wide strip above a profile, w px across (height follows the
-// fixed banner ratio). nil when the person has no banner or its bytes have
+// fixed banner ratio). An animated banner plays off the shared ticker, same as
+// an animated avatar. nil when the person has no banner or its bytes have
 // not arrived yet — caller then simply skips the header.
 func (u *ui) bannerView(pub []byte, w float32) fyne.CanvasObject {
-	data, _, hash := u.c.BannerOf(pub)
+	data, mime, hash := u.c.BannerOf(pub)
 	if len(data) == 0 {
 		return nil
 	}
-	img := u.still(fmt.Sprintf("%x", hash), data, false)
+	sz := fyne.NewSize(w, w*float32(attach.BannerH)/float32(attach.BannerW))
+	key := fmt.Sprintf("%x", hash)
+	if attach.Animated(mime) && len(u.anims)+len(u.msgAnims) < maxAnims {
+		if cl := u.clip(key, data, false); cl != nil {
+			ci := canvas.NewImageFromImage(cl.frames[0])
+			ci.FillMode = canvas.ImageFillContain
+			ci.SetMinSize(sz)
+			u.anims = append(u.anims, &anim{clip: cl, img: ci})
+			return ci
+		}
+	}
+	img := u.still(key, data, false)
 	if img == nil {
 		return nil
 	}
 	ci := canvas.NewImageFromImage(img)
 	ci.FillMode = canvas.ImageFillContain
-	ci.SetMinSize(fyne.NewSize(w, w*float32(attach.BannerH)/float32(attach.BannerW)))
+	ci.SetMinSize(sz)
 	return ci
 }
 
@@ -259,6 +271,9 @@ func (u *ui) bannerView(pub []byte, w float32) fyne.CanvasObject {
 func (u *ui) bannerPage() {
 	preview := container.NewStack()
 	redraw := func() {
+		// refresh first: it clears the animation list before redrawing the rest
+		// of the app, so a preview built afterwards keeps playing
+		u.refresh()
 		if b := u.bannerView(u.c.ID.Pub, u.bannerW()*1.3); b != nil {
 			preview.Objects = []fyne.CanvasObject{b}
 		} else {
@@ -266,16 +281,18 @@ func (u *ui) bannerPage() {
 				container.NewCenter(mutedText("(brak baneru)", 12))}
 		}
 		preview.Refresh()
-		u.refresh()
 	}
 	redraw()
 	set := func(data []byte) {
-		if err := u.c.SetBanner(data); err != nil {
-			u.fail(err)
-			return
-		}
-		redraw()
-		u.toast("Baner zmieniony")
+		u.cropDlg("Kadr baneru", data, attach.BannerW, attach.BannerH, false,
+			func(crop image.Rectangle) {
+				if err := u.c.SetBanner(data, crop); err != nil {
+					u.fail(err)
+					return
+				}
+				redraw()
+				u.toast("Baner zmieniony")
+			})
 	}
 	pickSys := bigButton("Wybierz z galerii", theme.FolderOpenIcon(), func() {
 		u.pickImage(attach.MaxAvatarBytes, func(_ string, data []byte) { set(data) })
@@ -297,10 +314,11 @@ func (u *ui) bannerPage() {
 	})
 	u.page("Baner", container.NewVBox(
 		preview, vspace(8), pickSys, del,
-		mutedWrap(fmt.Sprintf("Obrazek jest przycinany do paska %d×%d px i kodowany od nowa "+
-			"jako PNG. Animacja nie przechodzi — zostaje pierwsza klatka. Baner rozchodzi "+
-			"się do twoich czatów jak awatar: podpisanym zdarzeniem.",
-			attach.BannerW, attach.BannerH)),
+		mutedWrap(fmt.Sprintf("Kadr wybierasz sam — obrazek jest przycinany do paska %d×%d px "+
+			"i kodowany od nowa: PNG, a GIF zostaje GIF-em, więc animowany baner nadal się "+
+			"rusza (najwyżej %d klatek). Baner rozchodzi się do twoich czatów jak awatar: "+
+			"podpisanym zdarzeniem.",
+			attach.BannerW, attach.BannerH, attach.BannerFrames)),
 		vspace(6), section("Z FOLDERU "+strings.ToUpper(filepath.Base(u.mediaDir()))), grid,
 	))
 }
@@ -310,18 +328,20 @@ func (u *ui) bannerPage() {
 func (u *ui) avatarPage() {
 	preview := container.NewStack(u.avatarView(u.c.ID.Pub, u.c.ID.Name, avatarHuge*1.4))
 	redraw := func() {
+		u.refresh() // before the preview — see bannerPage
 		preview.Objects = []fyne.CanvasObject{
 			u.avatarView(u.c.ID.Pub, u.c.ID.Name, avatarHuge*1.4)}
 		preview.Refresh()
-		u.refresh()
 	}
 	set := func(data []byte) {
-		if err := u.c.SetAvatar(data); err != nil {
-			u.fail(err)
-			return
-		}
-		redraw()
-		u.toast("Awatar zmieniony")
+		u.cropDlg("Kadr awatara", data, 1, 1, true, func(crop image.Rectangle) {
+			if err := u.c.SetAvatar(data, crop); err != nil {
+				u.fail(err)
+				return
+			}
+			redraw()
+			u.toast("Awatar zmieniony")
+		})
 	}
 	pickSys := bigButton("Wybierz z galerii", theme.FolderOpenIcon(), func() {
 		u.pickImage(attach.MaxAvatarBytes, func(_ string, data []byte) { set(data) })
@@ -343,9 +363,10 @@ func (u *ui) avatarPage() {
 	})
 	u.page("Awatar", container.NewVBox(
 		container.NewCenter(preview), vspace(8), pickSys, del,
-		mutedWrap("PNG, JPEG, WebP albo GIF (animowany zostaje animowany). Obrazek jest "+
-			"przycinany do kwadratu, skalowany do "+fmt.Sprint(attach.AvatarSide)+
-			" px i kodowany od nowa — nic poza samą grafiką nie przechodzi dalej."),
+		mutedWrap("PNG, JPEG, WebP albo GIF (animowany zostaje animowany). Kadr wybierasz "+
+			"sam, obrazek jest przycinany do kwadratu, skalowany do "+
+			fmt.Sprint(attach.AvatarSide)+" px i kodowany od nowa — nic poza samą grafiką "+
+			"nie przechodzi dalej."),
 		vspace(6), section("Z FOLDERU "+strings.ToUpper(filepath.Base(u.mediaDir()))), grid,
 	))
 }

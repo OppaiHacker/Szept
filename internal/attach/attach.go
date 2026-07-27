@@ -50,6 +50,13 @@ const (
 	AvatarSide = 256
 	// BannerW/BannerH: profile banner is a wide strip, center-cropped.
 	BannerW, BannerH = 720, 240
+	// MaxBannerOut: banner limit after normalization. Higher than the avatar's —
+	// the strip covers three times the area, and an animated one needs the room.
+	MaxBannerOut = 2 << 20
+	// BannerFrames: frame cap for an animated banner. Every frame is held
+	// unpacked in RAM while it plays (720×240 RGBA ≈ 700 kB), so a long loop
+	// would cost hundreds of megabytes on a phone.
+	BannerFrames = 48
 
 	maxGifFrames = 300
 	maxDim       = 8000
@@ -303,33 +310,52 @@ func Preview(data []byte, mime string) (out []byte, w, h int, err error) {
 	return buf.Bytes(), w, h, nil
 }
 
-// Avatar normalizes image into avatar: square AvatarSide px, re-encoded
-// using our encoder. GIF stays GIF (preserving animation), others output
-// as PNG. Returns resulting bytes and mime type.
-func Avatar(data []byte) ([]byte, string, error) {
-	if len(data) == 0 {
-		return nil, "", errors.New("pusty plik")
-	}
-	if len(data) > MaxAvatarBytes {
-		return nil, "", fmt.Errorf("awatar ma %s — limit to %s",
-			HumanSize(int64(len(data))), HumanSize(MaxAvatarBytes))
-	}
-	mime := Sniff(data)
-	if !IsImage(mime) {
-		return nil, "", errors.New("awatar musi być obrazem: PNG, JPEG, GIF albo WebP")
-	}
-	if _, _, _, err := imageDims(data); err != nil {
-		return nil, "", err
-	}
-	if mime == "image/gif" {
-		return avatarGIF(data)
+// SourceImage decodes the first frame onto the image's logical canvas —
+// Rect(0, 0, W, H), the coordinate space every crop rectangle is expressed in.
+// GIF goes through GifFrames: image.Decode hands back the raw first frame,
+// which in a GIF may be a partial patch smaller than the canvas.
+//
+// Exported because the framing UI has to see exactly the same picture the
+// normalization below will cut from — otherwise the chosen rectangle would
+// land somewhere else.
+func SourceImage(data []byte) (image.Image, error) {
+	if SniffAny(data) == "image/gif" {
+		frames, _, err := GifFrames(data)
+		if err != nil {
+			return nil, err
+		}
+		return frames[0], nil
 	}
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, "", fmt.Errorf("to nie jest poprawny obraz: %w", err)
+		return nil, fmt.Errorf("to nie jest poprawny obraz: %w", err)
+	}
+	b := src.Bounds()
+	if b.Min == (image.Point{}) {
+		return src, nil
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(dst, dst.Bounds(), src, b.Min, draw.Src)
+	return dst, nil
+}
+
+// Avatar normalizes image into avatar: square AvatarSide px, re-encoded
+// using our encoder. GIF stays GIF (preserving animation), others output
+// as PNG. crop picks the region of the source (zero value = center crop).
+// Returns resulting bytes and mime type.
+func Avatar(data []byte, crop image.Rectangle) ([]byte, string, error) {
+	if err := checkCard(data, "awatar"); err != nil {
+		return nil, "", err
+	}
+	if Sniff(data) == "image/gif" {
+		return animGIF(data, crop, AvatarSide, AvatarSide, MaxAvatarOut, maxGifFrames)
+	}
+	src, err := SourceImage(data)
+	if err != nil {
+		return nil, "", err
 	}
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, square(src, AvatarSide)); err != nil {
+	if err := png.Encode(&buf, cropScale(src, crop, AvatarSide, AvatarSide)); err != nil {
 		return nil, "", err
 	}
 	if buf.Len() > MaxAvatarOut {
@@ -338,50 +364,67 @@ func Avatar(data []byte) ([]byte, string, error) {
 	return buf.Bytes(), "image/png", nil
 }
 
-// Banner normalizes image into a profile banner: BannerW×BannerH strip,
-// re-encoded as PNG.
-// Banner is a still — an animated GIF keeps its first frame only.
-func Banner(data []byte) ([]byte, string, error) {
-	if len(data) == 0 {
-		return nil, "", errors.New("pusty plik")
-	}
-	if len(data) > MaxAvatarBytes {
-		return nil, "", fmt.Errorf("baner ma %s — limit to %s",
-			HumanSize(int64(len(data))), HumanSize(MaxAvatarBytes))
-	}
-	if !IsImage(Sniff(data)) {
-		return nil, "", errors.New("baner musi być obrazem: PNG, JPEG, GIF albo WebP")
-	}
-	if _, _, _, err := imageDims(data); err != nil {
+// Banner normalizes image into a profile banner: BannerW×BannerH strip.
+// GIF stays GIF, so an animated banner keeps playing; everything else is
+// re-encoded as PNG. crop picks the region (zero value = center crop).
+func Banner(data []byte, crop image.Rectangle) ([]byte, string, error) {
+	if err := checkCard(data, "baner"); err != nil {
 		return nil, "", err
 	}
-	src, _, err := image.Decode(bytes.NewReader(data))
+	if Sniff(data) == "image/gif" {
+		return animGIF(data, crop, BannerW, BannerH, MaxBannerOut, BannerFrames)
+	}
+	src, err := SourceImage(data)
 	if err != nil {
-		return nil, "", fmt.Errorf("to nie jest poprawny obraz: %w", err)
+		return nil, "", err
 	}
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, cropScale(src, BannerW, BannerH)); err != nil {
+	if err := png.Encode(&buf, cropScale(src, crop, BannerW, BannerH)); err != nil {
 		return nil, "", err
 	}
-	if buf.Len() > MaxAvatarOut {
+	if buf.Len() > MaxBannerOut {
 		return nil, "", errors.New("baner po przeskalowaniu wciąż za duży — użyj prostszego obrazka")
 	}
 	return buf.Bytes(), "image/png", nil
 }
 
-// avatarGIF: decodes all frames, compositing diffs (GIF stores diffs, not
-// full images), scales and re-encodes. If output exceeds limit,
+// checkCard: entry validation shared by avatar and banner — size cap, type
+// from magic bytes, and header dimensions (decompression bomb guard).
+func checkCard(data []byte, what string) error {
+	if len(data) == 0 {
+		return errors.New("pusty plik")
+	}
+	if len(data) > MaxAvatarBytes {
+		return fmt.Errorf("%s ma %s — limit to %s", what,
+			HumanSize(int64(len(data))), HumanSize(MaxAvatarBytes))
+	}
+	if !IsImage(Sniff(data)) {
+		return fmt.Errorf("%s musi być obrazem: PNG, JPEG, GIF albo WebP", what)
+	}
+	_, _, _, err := imageDims(data)
+	return err
+}
+
+// animGIF: decodes all frames, compositing diffs (GIF stores diffs, not
+// full images), crops, scales and re-encodes. If output exceeds limit,
 // drops every second frame and retries.
-func avatarGIF(data []byte) ([]byte, string, error) {
+//
+// Dithering every frame to the Plan9 palette is the expensive part
+// and it runs on the calling thread — fine for a few dozen frames, move it off
+// the UI thread if long banners ever feel sluggish.
+func animGIF(data []byte, crop image.Rectangle, w, h, maxOut, maxFrames int) ([]byte, string, error) {
 	frames, delays, err := GifFrames(data)
 	if err != nil {
 		return nil, "", err
 	}
+	for len(frames) > maxFrames {
+		frames, delays = decimate(frames, delays)
+	}
 	for {
 		g := &gif.GIF{LoopCount: 0}
 		for i, fr := range frames {
-			pal := image.NewPaletted(image.Rect(0, 0, AvatarSide, AvatarSide), palette.Plan9)
-			draw.FloydSteinberg.Draw(pal, pal.Bounds(), square(fr, AvatarSide), image.Point{})
+			pal := image.NewPaletted(image.Rect(0, 0, w, h), palette.Plan9)
+			draw.FloydSteinberg.Draw(pal, pal.Bounds(), cropScale(fr, crop, w, h), image.Point{})
 			g.Image = append(g.Image, pal)
 			d := int(delays[i] / (10 * time.Millisecond))
 			if d < 2 {
@@ -394,11 +437,11 @@ func avatarGIF(data []byte) ([]byte, string, error) {
 		if err := gif.EncodeAll(&buf, g); err != nil {
 			return nil, "", err
 		}
-		if buf.Len() <= MaxAvatarOut {
+		if buf.Len() <= maxOut {
 			return buf.Bytes(), "image/gif", nil
 		}
 		if len(frames) <= 1 {
-			return nil, "", errors.New("animowany awatar za duży — użyj krótszego GIF-a")
+			return nil, "", errors.New("animacja za duża — użyj krótszego GIF-a")
 		}
 		frames, delays = decimate(frames, delays)
 	}
@@ -419,25 +462,35 @@ func decimate(frames []image.Image, delays []time.Duration) ([]image.Image, []ti
 	return of, od
 }
 
-// square crops image to center square and scales to side px.
-func square(src image.Image, side int) image.Image { return cropScale(src, side, side) }
-
-// cropScale: center-crop to the target aspect ratio, then scale to w×h.
-func cropScale(src image.Image, w, h int) image.Image {
+// cropScale: cut the chosen region out of src and scale it to w×h. An empty or
+// degenerate crop falls back to the whole image, and a crop whose proportions
+// differ from the target is trimmed to it — nothing ever comes out stretched.
+//
+// The rectangle originates in the UI, hence from the user: it is clamped to the
+// source bounds, never trusted.
+func cropScale(src image.Image, crop image.Rectangle, w, h int) image.Image {
 	b := src.Bounds()
-	cw, chh := b.Dx(), b.Dy()
-	if cw*h > chh*w { // source wider than target — trim the sides
-		cw = chh * w / h
-	} else {
-		chh = cw * h / w
+	r := crop.Intersect(b)
+	if r.Dx() < 2 || r.Dy() < 2 {
+		r = b
 	}
-	crop := image.Rect(0, 0, cw, chh).Add(image.Point{
-		X: b.Min.X + (b.Dx()-cw)/2,
-		Y: b.Min.Y + (b.Dy()-chh)/2,
-	})
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, crop, xdraw.Over, nil)
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, fitAspect(r, w, h), xdraw.Over, nil)
 	return dst
+}
+
+// fitAspect shrinks r to the w:h ratio, keeping its center.
+func fitAspect(r image.Rectangle, w, h int) image.Rectangle {
+	cw, ch := r.Dx(), r.Dy()
+	if cw*h > ch*w { // wider than target — trim the sides
+		cw = ch * w / h
+	} else {
+		ch = cw * h / w
+	}
+	return image.Rect(0, 0, cw, ch).Add(image.Point{
+		X: r.Min.X + (r.Dx()-cw)/2,
+		Y: r.Min.Y + (r.Dy()-ch)/2,
+	})
 }
 
 // GifFrames decodes GIF into list of ready-to-display frames.

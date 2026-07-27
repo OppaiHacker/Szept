@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"image"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,9 +146,10 @@ func (c *Core) BlobBytes(hash []byte) ([]byte, bool) { return c.St.GetBlob(hash)
 // ---- avatars ----
 
 // SetAvatar normalizes image (re-encoding strips appended payloads),
-// stores it and announces it across all active chats.
-func (c *Core) SetAvatar(data []byte) error {
-	out, mime, err := attach.Avatar(data)
+// stores it and announces it across all active chats. crop is the region the
+// user framed; the zero value takes the center of the image.
+func (c *Core) SetAvatar(data []byte, crop image.Rectangle) error {
+	out, mime, err := attach.Avatar(data, crop)
 	if err != nil {
 		return err
 	}
@@ -171,7 +173,7 @@ func (c *Core) SetAvatarPath(path string) error {
 	if err != nil {
 		return err
 	}
-	return c.SetAvatar(data)
+	return c.SetAvatar(data, image.Rectangle{})
 }
 
 // ClearAvatar removes avatar (locally and for peers).
@@ -241,9 +243,10 @@ func (c *Core) SetBio(text string) error {
 	return c.editCard(func(p *store.ProfileMeta) { p.Bio = text })
 }
 
-// SetBanner normalizes the wide image, stores it and announces it.
-func (c *Core) SetBanner(data []byte) error {
-	out, mime, err := attach.Banner(data)
+// SetBanner normalizes the wide image, stores it and announces it. crop is the
+// region the user framed; the zero value takes the center of the image.
+func (c *Core) SetBanner(data []byte, crop image.Rectangle) error {
+	out, mime, err := attach.Banner(data, crop)
 	if err != nil {
 		return err
 	}
