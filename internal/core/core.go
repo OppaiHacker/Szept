@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"szept/internal/event"
 	"szept/internal/i18n"
 	"szept/internal/identity"
+	"szept/internal/media"
 	"szept/internal/p2p"
 	"szept/internal/store"
 )
@@ -32,6 +34,23 @@ type Config struct {
 	// single obvious place for photos, and system file picker doesn't
 	// show thumbnail grid).
 	MediaDir string `json:"media_dir,omitempty"`
+
+	// Connectors: zapisana lista connectorów do przełączania w ustawieniach.
+	Connectors []string `json:"connectors,omitempty"`
+	// ConnectorLists: adresy HTTP dynamicznych list (tekst, jeden ws:// na
+	// linię) — „Odśwież” w ustawieniach dopisuje wpisy do Connectors.
+	ConnectorLists []string `json:"connector_lists,omitempty"`
+
+	Accent    string  `json:"accent,omitempty"`     // kolor akcentu, hex RRGGBB
+	OutputVol float64 `json:"output_vol,omitempty"` // głośność rozmów 0..2, 0 = domyślna 1
+	CamDevice string  `json:"cam_device,omitempty"` // np. /dev/video1
+	NoNotify  bool    `json:"no_notify,omitempty"`  // wycisz powiadomienia systemowe
+
+	Profile string `json:"profile,omitempty"` // aktywne konto (profil), "" = domyślne
+
+	WebhookOn    bool   `json:"webhook_on,omitempty"`
+	WebhookPort  int    `json:"webhook_port,omitempty"`
+	WebhookToken string `json:"webhook_token,omitempty"`
 }
 
 // Ctrl is the JSON message format on the reliable "ctrl" data channel.
@@ -88,9 +107,11 @@ type Core struct {
 	// media hooks (set by calls.go / UIs)
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
 	voiceOut     func(src string, pcm []byte) // speaker mixer sink, set when call active
+	player       *media.Player                // żyje razem z rozmową (JoinCall/LeaveCall)
 	stopVoice    func()
 	stopCam      func()
 	stopScreen   func()
+	webhook      *http.Server
 }
 
 const langKey = "lang"
@@ -177,6 +198,7 @@ func (c *Core) Start() {
 }
 
 func (c *Core) Close() {
+	c.StopWebhook()
 	c.LeaveAllCalls()
 	c.P2P.Close()
 	c.conn().Close()

@@ -16,7 +16,6 @@ import (
 	"fyne.io/fyne/v2/widget"
 	qrcode "github.com/skip2/go-qrcode"
 
-	"szept/internal/boot"
 	"szept/internal/core"
 	"szept/internal/identity"
 	"szept/internal/store"
@@ -55,13 +54,29 @@ func (u *ui) rebuildMe() {
 
 	u.meBox.RemoveAll()
 	u.meBox.Add(container.NewPadded(card(head)))
-	u.meBox.Add(section("PROFIL"))
+	u.meBox.Add(section("KONTO"))
 	u.meBox.Add(navRow(theme.DocumentCreateIcon(), "Nazwa", u.c.ID.Name, u.nickPage))
 	u.meBox.Add(navRow(theme.AccountIcon(), "Awatar", "Zdjęcie widoczne przy twoich wiadomościach", u.avatarPage))
 	u.meBox.Add(navRow(theme.VisibilityIcon(), "Mój kod / QR", "Pokaż go, żeby ktoś dodał cię do znajomych", u.codePage))
 	u.meBox.Add(section("USTAWIENIA"))
-	u.meBox.Add(navRow(theme.ComputerIcon(), "Connector", u.c.Cfg.Connector, u.connectorPage))
-	u.meBox.Add(navRow(theme.FolderOpenIcon(), "Folder z multimediami", u.mediaDir(), u.mediaDirPage))
+	u.meBox.Add(navRow(theme.MenuExpandIcon(), "Pluginy", "wkrótce",
+		u.comingSoonPage("Pluginy", "Rozszerzenia pisane przez społeczność.")))
+	u.meBox.Add(navRow(theme.DocumentSaveIcon(), "Backup & restore",
+		"Kopia tożsamości i bazy w jednym pliku", u.backupPage))
+	u.meBox.Add(navRow(theme.ComputerIcon(), "Connectory", u.c.Cfg.Connector, u.connectorsPage))
+	u.meBox.Add(navRow(theme.DownloadIcon(), "Updater", "wkrótce",
+		u.comingSoonPage("Updater", "Aktualizacje aplikacji prosto z niej samej.")))
+	u.meBox.Add(navRow(theme.MediaPlayIcon(), "Głos i wideo",
+		"Głośność, kamera, scena 3D", u.voicePage))
+	u.meBox.Add(navRow(theme.WarningIcon(), "Hasła i szyfrowanie",
+		"Zmiana hasła szyfrującego bazę", u.passPage))
+	u.meBox.Add(navRow(theme.LoginIcon(), "Konta",
+		"Wiele profili (baz) na jednym urządzeniu", u.accountsPage))
+	u.meBox.Add(navRow(theme.SettingsIcon(), "System",
+		"Powiadomienia, multimedia, ścieżki", u.systemPage))
+	u.meBox.Add(navRow(theme.ColorPaletteIcon(), "Wygląd", "Kolor akcentu", u.appearancePage))
+	u.meBox.Add(navRow(theme.MailSendIcon(), "Boty / webhooki",
+		"Lokalny webhook do wysyłania wiadomości", u.botsPage))
 	u.meBox.Add(section("O APLIKACJI"))
 	u.meBox.Add(navRow(theme.InfoIcon(), "szept "+appVersion(u.a),
 		"P2P, end-to-end, bez serwera treści", u.aboutPage))
@@ -86,33 +101,6 @@ func (u *ui) nickPage() {
 		bigButton("Zapisz", theme.ConfirmIcon(), save),
 		mutedWrap("Nowa nazwa rozejdzie się do wszystkich twoich czatów jako podpisane "+
 			"zdarzenie — zobaczą ją też ci, którzy są teraz offline.")))
-}
-
-func (u *ui) connectorPage() {
-	e := widget.NewEntry()
-	e.SetText(u.c.Cfg.Connector)
-	save := func() {
-		url := core.NormalizeWS(strings.TrimSpace(e.Text))
-		if url == "" || url == u.c.Cfg.Connector {
-			u.popPage()
-			return
-		}
-		u.cfg.Connector = url
-		if err := boot.SaveConfig(u.cfgFile, u.cfg); err != nil {
-			u.fail(err)
-			return
-		}
-		u.c.SetConnector(url)
-		u.updateStatus()
-		u.popPage()
-		u.refresh()
-	}
-	e.OnSubmitted = func(string) { save() }
-	status := mutedWrap("Stan: " + u.connState())
-	u.page("Connector", container.NewVBox(e,
-		bigButton("Zapisz i połącz", theme.ConfirmIcon(), save), status,
-		mutedWrap("Connector to lekki serwer spotkań — mówi wam, gdzie się szukać. "+
-			"Treści nigdy nie widzi.")))
 }
 
 func (u *ui) connState() string {

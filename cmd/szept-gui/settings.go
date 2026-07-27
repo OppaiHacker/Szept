@@ -1,0 +1,576 @@
+package main
+
+// Ustawienia: strony sekcji z zakładki „Ty” (rebuildMe w profile.go).
+// Każda sekcja to osobna strona (mobile) / dialog (desktop) przez u.page().
+
+import (
+	"fmt"
+	"image/color"
+	"io"
+	"net/http"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+
+	"szept/internal/boot"
+	"szept/internal/core"
+)
+
+// saveCfg: jeden punkt zapisu config.json z komunikatem błędu.
+func (u *ui) saveCfg() {
+	if err := boot.SaveConfig(u.cfgFile, u.cfg); err != nil {
+		u.fail(err)
+	}
+}
+
+// ---- wkrótce ----
+
+func (u *ui) comingSoonPage(title, desc string) func() {
+	return func() {
+		t := canvas.NewText("Wkrótce", cAccent)
+		t.TextSize = fs(24)
+		t.TextStyle = fyne.TextStyle{Bold: true}
+		u.page(title, container.NewVBox(
+			vspace(20),
+			container.NewCenter(widget.NewIcon(theme.SettingsIcon())),
+			container.NewCenter(t),
+			container.NewCenter(mutedWrap(desc)),
+		))
+	}
+}
+
+// ---- backup & restore ----
+
+func (u *ui) backupPage() {
+	saveBtn := bigButton("Zapisz kopię (.zip)", theme.DocumentSaveIcon(), func() {
+		fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
+			if err != nil || w == nil {
+				return
+			}
+			defer w.Close()
+			if err := boot.Backup(u.cfg.DataDir, u.c.St.Snapshot, w); err != nil {
+				u.fail(err)
+				return
+			}
+			u.toast("Kopia zapisana")
+		}, u.w)
+		fd.SetFileName("szept-" + time.Now().Format("2006-01-02") + ".zip")
+		u.showFileDlg(fd)
+	})
+	rows := container.NewVBox(
+		card(container.NewVBox(
+			widget.NewLabelWithStyle("Kopia zapasowa", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			mutedWrap("Zip z kluczem tożsamości i migawką bazy (robioną na żywo, spójną). "+
+				"Baza jest zaszyfrowana kluczem z seeda, klucz chroni hasło tożsamości — "+
+				"bez hasła kopia jest bezużyteczna dla znalazcy."),
+			saveBtn,
+		)),
+		vspace(8),
+	)
+	if u.mobile {
+		rows.Add(mutedWrap("Przywracanie kopii jest dostępne na pulpicie — " +
+			"tam kopia wgrywa się jako nowe konto (profil)."))
+	} else {
+		restore := bigButton("Przywróć z kopii…", theme.UploadIcon(), func() {
+			fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+				if err != nil || r == nil {
+					return
+				}
+				path := r.URI().Path()
+				r.Close()
+				name := "kopia-" + time.Now().Format("0102-1504")
+				if err := boot.Restore(path, boot.ProfileDir(name)); err != nil {
+					u.fail(err)
+					return
+				}
+				u.cfg.Profile = name
+				u.saveCfg()
+				u.info("Przywrócono", "Kopia wgrana jako konto „"+name+"”. "+
+					"Uruchom aplikację ponownie, żeby się na nie przełączyć.")
+			}, u.w)
+			u.showFileDlg(fd)
+		})
+		rows.Add(card(container.NewVBox(
+			widget.NewLabelWithStyle("Przywracanie", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			mutedWrap("Kopia NIGDY nie nadpisuje obecnych danych — wgrywa się jako nowe "+
+				"konto (profil), na które przełączasz się po restarcie."),
+			restore,
+		)))
+	}
+	u.page("Backup & restore", rows)
+}
+
+// ---- connectory ----
+
+func (u *ui) connectorsPage() {
+	active := widget.NewEntry()
+	active.SetText(u.c.Cfg.Connector)
+	setActive := func(url string) {
+		url = core.NormalizeWS(strings.TrimSpace(url))
+		if url == "" {
+			return
+		}
+		u.cfg.Connector = url
+		u.saveCfg()
+		u.c.SetConnector(url)
+		u.updateStatus()
+		u.toast("Connector: " + url)
+	}
+	saveActive := bigButton("Zapisz i połącz", theme.ConfirmIcon(), func() { setActive(active.Text) })
+	active.OnSubmitted = func(string) { saveActive.OnTapped() }
+
+	reopen := func() { u.popPage(); u.connectorsPage() }
+
+	rows := container.NewVBox(
+		widget.NewLabelWithStyle("Aktywny connector", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		active, saveActive,
+		mutedWrap("Stan: "+u.connState()),
+		vspace(6), section("ZAPISANE"),
+	)
+	for _, cn := range u.cfg.Connectors {
+		cn := cn
+		desc := ""
+		if cn == u.c.Cfg.Connector {
+			desc = "aktywny"
+		}
+		del := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+			u.cfg.Connectors = without(u.cfg.Connectors, cn)
+			u.saveCfg()
+			reopen()
+		})
+		del.Importance = widget.LowImportance
+		rows.Add(container.NewBorder(nil, nil, nil, del,
+			navRow(theme.ComputerIcon(), cn, desc, func() { setActive(cn) })))
+	}
+	if len(u.cfg.Connectors) == 0 {
+		rows.Add(mutedWrap("Lista pusta — dodaj adresy, między którymi chcesz się przełączać."))
+	}
+	newC := widget.NewEntry()
+	newC.PlaceHolder = "ws://inny-vps:7777"
+	rows.Add(container.NewBorder(nil, nil, nil,
+		widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+			url := core.NormalizeWS(strings.TrimSpace(newC.Text))
+			if url == "" {
+				return
+			}
+			u.cfg.Connectors = appendUnique(u.cfg.Connectors, url)
+			u.saveCfg()
+			reopen()
+		}), newC))
+
+	rows.Add(vspace(6))
+	rows.Add(section("DYNAMICZNE LISTY"))
+	rows.Add(mutedWrap("Adres HTTP zwracający tekst — jeden connector (ws://…) na linię. " +
+		"„Odśwież” dopisuje nowe wpisy do zapisanych."))
+	for _, l := range u.cfg.ConnectorLists {
+		l := l
+		del := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+			u.cfg.ConnectorLists = without(u.cfg.ConnectorLists, l)
+			u.saveCfg()
+			reopen()
+		})
+		del.Importance = widget.LowImportance
+		rows.Add(container.NewBorder(nil, nil, nil, del,
+			navRow(theme.SearchIcon(), l, "", nil)))
+	}
+	newL := widget.NewEntry()
+	newL.PlaceHolder = "https://example.com/connectors.txt"
+	rows.Add(container.NewBorder(nil, nil, nil,
+		widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+			url := strings.TrimSpace(newL.Text)
+			if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+				u.fail(fmt.Errorf("adres listy musi zaczynać się od http(s)://"))
+				return
+			}
+			u.cfg.ConnectorLists = appendUnique(u.cfg.ConnectorLists, url)
+			u.saveCfg()
+			reopen()
+		}), newL))
+	if len(u.cfg.ConnectorLists) > 0 {
+		rows.Add(bigButton("Odśwież listy teraz", theme.ViewRefreshIcon(), func() {
+			lists := append([]string(nil), u.cfg.ConnectorLists...)
+			go func() {
+				found, errs := fetchConnectorLists(lists)
+				fyne.Do(func() {
+					added := 0
+					for _, cn := range found {
+						before := len(u.cfg.Connectors)
+						u.cfg.Connectors = appendUnique(u.cfg.Connectors, cn)
+						added += len(u.cfg.Connectors) - before
+					}
+					u.saveCfg()
+					msg := fmt.Sprintf("Dodano %d nowych connectorów", added)
+					if errs > 0 {
+						msg += fmt.Sprintf(" (%d list nie odpowiedziało)", errs)
+					}
+					u.toast(msg)
+					reopen()
+				})
+			}()
+		}))
+	}
+	u.page("Connectory", rows)
+}
+
+// fetchConnectorLists pobiera listy i zwraca znalezione adresy ws://…
+func fetchConnectorLists(urls []string) (found []string, errs int) {
+	cl := &http.Client{Timeout: 8 * time.Second}
+	for _, url := range urls {
+		resp, err := cl.Get(url)
+		if err != nil {
+			errs++
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		if err != nil {
+			errs++
+			continue
+		}
+		for _, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "ws://") || strings.HasPrefix(line, "wss://") {
+				found = append(found, core.NormalizeWS(line))
+			}
+		}
+	}
+	return found, errs
+}
+
+func appendUnique(s []string, v string) []string {
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(s, v)
+}
+
+func without(s []string, v string) []string {
+	out := s[:0]
+	for _, x := range s {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// ---- głos i wideo ----
+
+func (u *ui) voicePage() {
+	vol := u.cfg.OutputVol
+	if vol <= 0 {
+		vol = 1
+	}
+	volLbl := widget.NewLabel(fmt.Sprintf("%d%%", int(vol*100)))
+	slider := widget.NewSlider(0, 200)
+	slider.Step = 5
+	slider.Value = vol * 100
+	slider.OnChanged = func(v float64) {
+		volLbl.SetText(fmt.Sprintf("%d%%", int(v)))
+		u.c.SetOutputVolume(v / 100) // na żywo, słychać w trakcie rozmowy
+	}
+	slider.OnChangeEnded = func(v float64) {
+		u.cfg.OutputVol = v / 100
+		u.saveCfg()
+	}
+
+	cam := widget.NewEntry()
+	cam.SetText(u.cfg.CamDevice)
+	cam.PlaceHolder = "/dev/video0 (puste = domyślna)"
+	saveCam := func() {
+		u.cfg.CamDevice = strings.TrimSpace(cam.Text)
+		u.saveCfg()
+		u.toast("Zapisane")
+	}
+	cam.OnSubmitted = func(string) { saveCam() }
+
+	u.page("Głos i wideo", container.NewVBox(
+		section("GŁOŚNOŚĆ ROZMÓW"),
+		container.NewBorder(nil, nil, nil, volLbl, slider),
+		mutedWrap("Działa od razu, także w trakcie rozmowy. Głośność i wyciszenie "+
+			"pojedynczych osób ustawisz w panelu rozmowy i na scenie 3D."),
+		vspace(6), section("KAMERA"),
+		cam,
+		bigButton("Zapisz", theme.ConfirmIcon(), saveCam),
+		mutedWrap("Ścieżka V4L2 na Linuksie. Na Androidzie kamera w rozmowach "+
+			"nie jest jeszcze dostępna."),
+		vspace(6), section("JAK TO CHODZI"),
+		mutedWrap("Głos: surowe PCM 16 kHz mono, 20 ms ramki, pełna siatka P2P. "+
+			"Wideo: klatki JPEG po niezawodnych kanałach danych. "+
+			"Wszystko w DTLS między uczestnikami."),
+	))
+}
+
+// ---- hasła i szyfrowanie ----
+
+func (u *ui) passPage() {
+	old := widget.NewPasswordEntry()
+	old.PlaceHolder = "obecne hasło (puste, jeśli brak)"
+	new1 := widget.NewPasswordEntry()
+	new1.PlaceHolder = "nowe hasło"
+	new2 := widget.NewPasswordEntry()
+	new2.PlaceHolder = "nowe hasło jeszcze raz"
+	change := bigButton("Zmień hasło", theme.ConfirmIcon(), func() {
+		if new1.Text != new2.Text {
+			u.fail(fmt.Errorf("nowe hasła się różnią"))
+			return
+		}
+		if err := boot.ChangePass(u.cfg.DataDir, []byte(old.Text), []byte(new1.Text)); err != nil {
+			u.fail(err)
+			return
+		}
+		u.popPage()
+		u.toast("Hasło zmienione")
+	})
+	u.page("Hasła i szyfrowanie", container.NewVBox(
+		section("HASŁO SZYFROWANIA"),
+		old, new1, new2, change,
+		mutedWrap("Hasło chroni klucz tożsamości (argon2id → XChaCha20-Poly1305). "+
+			"Baza danych jest szyfrowana kluczem wyprowadzonym z seeda tożsamości, "+
+			"więc zmiana hasła obejmuje ją automatycznie — bez przepisywania bazy. "+
+			"Puste nowe hasło = brak hasła przy starcie."),
+		vspace(8), section("CO JEST CZYM"),
+		mutedWrap("Wiadomości: XChaCha20-Poly1305 kluczami epok czatu. "+
+			"Podpisy zdarzeń: Ed25519. Transport: WebRTC DTLS. "+
+			"Utrata hasła = utrata konta — nie ma „przypomnij hasło”."),
+	))
+}
+
+// ---- konta (profile) ----
+
+var profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+func (u *ui) accountsPage() {
+	if u.mobile {
+		u.page("Konta", container.NewVBox(card(mutedWrap(
+			"Wiele kont na jednym urządzeniu jest na razie dostępne na pulpicie — "+
+				"Android trzyma dane w piaskownicy aplikacji."))))
+		return
+	}
+	reopen := func() { u.popPage(); u.accountsPage() }
+	rows := container.NewVBox(
+		mutedWrap("Każde konto to osobna baza danych i tożsamość. "+
+			"Przełączenie działa po ponownym uruchomieniu aplikacji."),
+		section("KONTA NA TYM URZĄDZENIU"),
+	)
+	for _, p := range boot.Profiles() {
+		p := p
+		name := p
+		if name == "" {
+			name = "domyślne"
+		}
+		desc := ""
+		if p == u.cfg.Profile {
+			desc = "aktywne"
+		}
+		row := navRow(theme.AccountIcon(), name, desc, func() {
+			if p == u.cfg.Profile {
+				return
+			}
+			u.confirm("Przełączyć na konto „"+name+"”? Zmiana zadziała po restarcie.", func() {
+				u.cfg.Profile = p
+				u.saveCfg()
+				u.info("Konto", "Zapisane. Uruchom aplikację ponownie.")
+			})
+		})
+		if p != "" && p != u.cfg.Profile {
+			del := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+				u.confirm("Usunąć konto „"+name+"” WRAZ z jego bazą i tożsamością? "+
+					"Tego nie da się cofnąć.", func() {
+					if err := os.RemoveAll(boot.ProfileDir(p)); err != nil {
+						u.fail(err)
+						return
+					}
+					reopen()
+				})
+			})
+			del.Importance = widget.LowImportance
+			row = container.NewBorder(nil, nil, nil, del, row)
+		}
+		rows.Add(row)
+	}
+	newName := widget.NewEntry()
+	newName.PlaceHolder = "np. praca"
+	rows.Add(section("NOWE KONTO"))
+	rows.Add(newName)
+	rows.Add(bigButton("Utwórz i przełącz po restarcie", theme.ContentAddIcon(), func() {
+		name := strings.TrimSpace(newName.Text)
+		if !profileName.MatchString(name) {
+			u.fail(fmt.Errorf("nazwa: małe litery, cyfry i myślniki (max 32)"))
+			return
+		}
+		u.cfg.Profile = name
+		u.saveCfg()
+		u.info("Konto", "Zapisane. Po restarcie aplikacja poprowadzi cię przez "+
+			"założenie nowej tożsamości dla „"+name+"”.")
+	}))
+	u.page("Konta", rows)
+}
+
+// ---- system ----
+
+func (u *ui) systemPage() {
+	notif := widget.NewCheck("Powiadomienia o nowych wiadomościach", func(on bool) {
+		u.cfg.NoNotify = !on
+		u.saveCfg()
+	})
+	notif.Checked = !u.cfg.NoNotify
+
+	u.page("System", container.NewVBox(
+		section("POWIADOMIENIA"),
+		notif,
+		vspace(6), section("MULTIMEDIA"),
+		navRow(theme.FolderOpenIcon(), "Folder z multimediami", u.mediaDir(), u.mediaDirPage),
+		bigButton("Wyczyść pamięć podręczną obrazków", theme.DeleteIcon(), func() {
+			u.decoded = map[string]any{}
+			u.toast("Cache wyczyszczony")
+		}),
+		vspace(6), section("ŚCIEŻKI"),
+		card(container.NewVBox(
+			mutedWrap("Konfiguracja: "+u.cfgFile),
+			mutedWrap("Dane: "+u.cfg.DataDir),
+		)),
+	))
+}
+
+// ---- wygląd ----
+
+var accentPresets = []struct {
+	name string
+	hex  string
+}{
+	{"fiolet szeptu", "8b7cf6"},
+	{"błękit", "5865f2"},
+	{"zieleń", "23a55a"},
+	{"róż", "f472b6"},
+	{"bursztyn", "f0b232"},
+}
+
+func (u *ui) appearancePage() {
+	rows := container.NewVBox(section("KOLOR AKCENTU"))
+	sw := container.NewHBox()
+	for _, p := range accentPresets {
+		p := p
+		col, _ := hexColor(p.hex)
+		c := canvas.NewCircle(col)
+		dot := container.NewGridWrap(fyne.NewSize(34, 34), c)
+		sw.Add(tappable(container.NewPadded(dot), func() {
+			u.cfg.Accent = p.hex
+			u.saveCfg()
+			u.applyAccent(p.hex)
+			u.toast("Akcent: " + p.name)
+		}, nil))
+	}
+	rows.Add(sw)
+	rows.Add(mutedWrap("Zmiana działa od razu — akcent barwi przyciski, zaznaczenia i twoje dymki."))
+	rows.Add(vspace(6))
+	rows.Add(section("MOTYW"))
+	rows.Add(mutedWrap("Ciemny — jedyny słuszny. Jasny motyw: wkrótce."))
+	u.page("Wygląd", rows)
+}
+
+// hexColor: "RRGGBB" → kolor.
+func hexColor(s string) (color.NRGBA, bool) {
+	var r, g, b uint8
+	if _, err := fmt.Sscanf(strings.TrimPrefix(s, "#"), "%02x%02x%02x", &r, &g, &b); err != nil {
+		return color.NRGBA{}, false
+	}
+	return color.NRGBA{r, g, b, 0xff}, true
+}
+
+// setAccent przebarwia akcent i własne dymki. Dymek to przyciemniony akcent —
+// jak w oryginalnej parze kolorów.
+func setAccent(col color.NRGBA) {
+	cAccent = col
+	cBubbleMe = color.NRGBA{
+		R: uint8(int(col.R) * 72 / 100), G: uint8(int(col.G) * 72 / 100),
+		B: uint8(int(col.B) * 72 / 100), A: 0xff}
+}
+
+// applyAccent: zmiana na żywo + wymuszenie przerysowania motywu.
+func (u *ui) applyAccent(hex string) {
+	col, ok := hexColor(hex)
+	if !ok {
+		return
+	}
+	setAccent(col)
+	u.a.Settings().SetTheme(szTheme{base: theme.DefaultTheme()})
+	u.msgSig = ""
+	u.refresh()
+}
+
+// ---- boty / webhooki ----
+
+func (u *ui) botsPage() {
+	if u.cfg.WebhookPort == 0 {
+		u.cfg.WebhookPort = 7780
+	}
+	if u.cfg.WebhookToken == "" {
+		u.cfg.WebhookToken = core.NewWebhookToken()
+	}
+	port := widget.NewEntry()
+	port.SetText(fmt.Sprint(u.cfg.WebhookPort))
+
+	apply := func(on bool) {
+		u.cfg.WebhookOn = on
+		fmt.Sscan(port.Text, &u.cfg.WebhookPort)
+		u.saveCfg()
+		if on {
+			if err := u.c.StartWebhook(u.cfg.WebhookPort, u.cfg.WebhookToken); err != nil {
+				u.fail(err)
+				return
+			}
+			u.toast("Webhook nasłuchuje na 127.0.0.1")
+		} else {
+			u.c.StopWebhook()
+		}
+	}
+	enable := widget.NewCheck("Webhook lokalny włączony", apply)
+	enable.Checked = u.c.WebhookOn()
+
+	tok := widget.NewEntry()
+	tok.SetText(u.cfg.WebhookToken)
+	tok.Disable()
+	copyTok := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+		u.w.Clipboard().SetContent(u.cfg.WebhookToken)
+		u.toast("Token w schowku")
+	})
+	regen := widget.NewButtonWithIcon("Nowy token", theme.ViewRefreshIcon(), func() {
+		u.cfg.WebhookToken = core.NewWebhookToken()
+		tok.SetText(u.cfg.WebhookToken)
+		u.saveCfg()
+		if u.c.WebhookOn() {
+			apply(true) // przeładuj nasłuch ze świeżym tokenem
+		}
+	})
+
+	example := widget.NewLabel("curl -X POST http://127.0.0.1:" + port.Text + "/send \\\n" +
+		"  -H \"Authorization: Bearer $TOKEN\" \\\n" +
+		"  -d '{\"chat\":\"nazwa czatu\",\"text\":\"cześć z bota\"}'")
+	example.TextStyle = fyne.TextStyle{Monospace: true}
+	example.Wrapping = fyne.TextWrapBreak
+
+	u.page("Boty / webhooki", container.NewVBox(
+		section("WEBHOOK PRZYCHODZĄCY (LOKALNY)"),
+		enable,
+		widget.NewForm(widget.NewFormItem("Port", port)),
+		container.NewBorder(nil, nil, nil, copyTok, tok),
+		regen,
+		mutedWrap("Nasłuch tylko na 127.0.0.1 — wiadomość wyśle każdy skrypt na tym "+
+			"komputerze, który zna token. Tak robisz bota: skrypt woła webhook, "+
+			"szept podpisuje i szyfruje jak zwykłą wiadomość."),
+		card(example),
+		vspace(6), section("BOTY REAGUJĄCE"),
+		mutedWrap("Wychodzące webhooki (bot odpowiada na wiadomości): wkrótce."),
+	))
+}

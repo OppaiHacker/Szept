@@ -172,6 +172,14 @@ func (t *clipText) bold() *clipText {
 	return t
 }
 
+func (t *clipText) setColor(c color.Color) {
+	if t.txt.Color == c {
+		return
+	}
+	t.txt.Color = c
+	t.txt.Refresh()
+}
+
 func (t *clipText) setText(s string) {
 	if t.full == s {
 		return

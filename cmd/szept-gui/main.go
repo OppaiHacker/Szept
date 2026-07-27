@@ -206,16 +206,17 @@ type ui struct {
 	tab      int
 	convPage *fyne.Container // conversation page (mobile)
 
-	rows      []chatRow
-	sel       int
-	chatBox   *fyne.Container    // touch chat rows (both platforms)
-	friendBox *fyne.Container    // friend list
-	meBox     *fyne.Container    // "You" tab (profile + settings)
-	nav       *container.AppTabs // desktop: Chats | Friends
-	msgBox    *fyne.Container
-	msgScr    *flingScroll
-	center    *fyne.Container   // desktop: toggles welcome <-> conversation
-	convRoot  fyne.CanvasObject // conversation view
+	rows       []chatRow
+	sel        int
+	chatBox    *fyne.Container    // touch chat rows (both platforms)
+	friendBox  *fyne.Container    // friend list
+	meBox      *fyne.Container    // "You" tab (profile + settings)
+	nav        *container.AppTabs // desktop: Chats | Friends
+	msgBox     *fyne.Container
+	msgScr     *flingScroll
+	center     *fyne.Container   // desktop: toggles welcome <-> conversation
+	convRoot   fyne.CanvasObject // conversation view
+	convBottom *fyne.Container   // conversation bottom bar: hints, call panel, composer
 
 	title      *clipText
 	subtitle   *clipText
@@ -226,10 +227,13 @@ type ui struct {
 	scrBtn     *widget.Button
 
 	banner     *fyne.Container
-	bannerLbl  *canvas.Text
+	bannerLbl  *clipText
+	bannerSub  *clipText // druga linia: czat · uczestnicy
 	bannerDot  *canvas.Circle
 	bannerAnim *fyne.Animation
-	callBar    *fyne.Container // mic/camera/screen/hangup — only during call
+	callBar    *fyne.Container // media buttons — only during a call
+	deafBtn    *widget.Button
+	spatialBtn *widget.Button
 
 	entry   *cmdEntry       // message field; "/" triggers commands (commands.go)
 	hintBox *fyne.Container // command hints above field
@@ -261,6 +265,9 @@ type ui struct {
 	vidDlg  dialog.Dialog // mobile: dialog instead of second window
 	vidGrid *fyne.Container
 	vidImgs map[string]*canvas.Image // peer+kind -> image
+
+	sp     *scene3d        // call's 3D scene (nil = closed)
+	spPage *fyne.Container // mobile scene page (to detect Back)
 
 	anims    []*anim        // avatar GIFs — list cleared on every list refresh
 	msgAnims []*anim        // bubble GIFs — persist until conversation is redrawn
@@ -314,7 +321,15 @@ func main() {
 	if *connFlag != "" {
 		cfg.Connector = *connFlag
 	}
+	// konta (profile): wybrane konto podmienia katalog danych; -data wygrywa
+	if cfg.Profile != "" && !mobileUI && *dataFlag == "" {
+		dataDir = boot.ProfileDir(cfg.Profile)
+	}
 	cfg.DataDir = dataDir
+	if col, ok := hexColor(cfg.Accent); ok {
+		setAccent(col)
+		a.Settings().SetTheme(szTheme{base: theme.DefaultTheme()})
+	}
 
 	u := &ui{
 		a: a, w: w, cfg: cfg, cfgFile: cfgFile,
@@ -334,6 +349,11 @@ func main() {
 		}
 		u.c = c
 		c.Start()
+		if cfg.WebhookOn && cfg.WebhookPort > 0 && cfg.WebhookToken != "" {
+			if err := c.StartWebhook(cfg.WebhookPort, cfg.WebhookToken); err != nil {
+				u.fail(err)
+			}
+		}
 		u.buildMain()
 		go u.watch()
 		go u.statusTicker()
@@ -718,7 +738,7 @@ func (u *ui) refresh() {
 		if i == u.sel && open {
 			u.seen[key] = u.c.St.EventCount(u.rows[i].info.ID)
 			u.rows[i].unread = 0
-		} else if u.rows[i].unread > u.unread[key] {
+		} else if u.rows[i].unread > u.unread[key] && !u.cfg.NoNotify {
 			u.a.SendNotification(fyne.NewNotification(
 				"szept — "+u.rows[i].info.Name, "nowa wiadomość"))
 		}
@@ -743,6 +763,7 @@ func (u *ui) refresh() {
 		u.renderMessages(ch)
 	}
 	u.renderCallState(ch)
+	u.spatialSync()
 }
 
 // rebuildVisible: on mobile tabs sit stacked beneath each other and only one is

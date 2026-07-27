@@ -49,36 +49,6 @@ func (c *Core) onPeerUp(p *p2p.Peer) {
 			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "join"})
 		}
 	}
-// ---- peer lifecycle ----
-
-func (c *Core) onPeerUp(p *p2p.Peer) {
-	p.SendCtrl(Ctrl{T: "hello", Name: c.ID.Name})
-	// offer sync for every chat this peer belongs to
-	for idStr := range c.chatIDs() {
-		chat := []byte(idStr)
-		if st, err := c.ChatState(chat); err == nil && st.IsMember(p.Pub) {
-			p.SendCtrl(Ctrl{T: "sync", Chat: chat, Heads: c.St.Heads(chat)})
-		}
-	}
-	// pending invite redemption?
-	c.mu.Lock()
-	r := c.redeem
-	var inCall [][]byte
-	for chatStr, call := range c.calls {
-		if call.Joined {
-			inCall = append(inCall, []byte(chatStr))
-		}
-	}
-	c.mu.Unlock()
-	if r != nil && bytes.Equal(r.Inviter, p.Pub) {
-		p.SendCtrl(Ctrl{T: "redeem", Chat: r.Chat, Secret: r.Secret, Pin: r.Pin, Name: c.ID.Name})
-	}
-	// announce active calls to the newcomer
-	for _, chat := range inCall {
-		if st, err := c.ChatState(chat); err == nil && st.IsMember(p.Pub) {
-			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "join"})
-		}
-	}
 	go c.retryWants(true) // peer connected: may hold missing attachments
 	c.Notify()
 }

@@ -226,21 +226,16 @@ func (u *ui) buildConv() {
 	bar := container.NewStack(canvas.NewRectangle(cDeep),
 		container.NewVBox(container.NewPadded(head), line))
 
-	bottom := container.NewVBox(u.hintBox, u.banner, composer)
-	u.convRoot = container.NewBorder(bar, bottom, nil, nil,
+	u.convBottom = container.NewVBox(u.hintBox, u.banner, composer)
+	u.convRoot = container.NewBorder(bar, u.convBottom, nil, nil,
 		container.NewStack(canvas.NewRectangle(cBg), u.msgScr))
 }
 
-// buildCallControls: media controls live in conversation banner, so outside
-// conversation the title bar stays empty.
+// buildCallControls: the call panel — green connection status with chat name
+// and hang-up on top, a row of tiles below: camera, screen, 3D scene,
+// microphone, deafen (muted output) and volume.
 func (u *ui) buildCallControls() {
-	lbl := func(s string) string {
-		if u.mobile {
-			return ""
-		}
-		return s
-	}
-	u.callBtn = widget.NewButtonWithIcon(lbl("Rozmowa"), theme.MediaPlayIcon(), func() {
+	u.callBtn = widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
 		ch := u.cur()
 		if ch == nil {
 			return
@@ -252,24 +247,35 @@ func (u *ui) buildCallControls() {
 		}
 		u.refresh()
 	})
+	if !u.mobile {
+		u.callBtn.SetText("Rozmowa")
+	}
 	u.callBtn.Importance = widget.HighImportance
-	u.micBtn = widget.NewButtonWithIcon(lbl("Mic"), theme.MediaRecordIcon(), func() {
+	u.micBtn = widget.NewButtonWithIcon("", theme.MediaRecordIcon(), func() {
 		if ch := u.cur(); ch != nil {
 			u.c.ToggleMic(ch.ID)
 			u.refresh()
 		}
 	})
-	u.camBtn = widget.NewButtonWithIcon(lbl("Kamera"), theme.MediaVideoIcon(), func() {
+	u.deafBtn = widget.NewButtonWithIcon("", theme.VolumeUpIcon(), func() {
 		if ch := u.cur(); ch != nil {
-			u.fail(u.c.ToggleCam(ch.ID, ""))
+			u.c.ToggleDeafen(ch.ID)
+			u.refresh()
 		}
 	})
-	u.scrBtn = widget.NewButtonWithIcon(lbl("Ekran"), theme.ComputerIcon(), func() {
+	u.camBtn = widget.NewButtonWithIcon("", theme.MediaVideoIcon(), func() {
+		if ch := u.cur(); ch != nil {
+			u.fail(u.c.ToggleCam(ch.ID, u.cfg.CamDevice))
+		}
+	})
+	u.scrBtn = widget.NewButtonWithIcon("", theme.ComputerIcon(), func() {
 		if ch := u.cur(); ch != nil {
 			u.fail(u.c.ToggleScreen(ch.ID))
 		}
 	})
-	hang := widget.NewButtonWithIcon(lbl("Rozłącz"), theme.MediaStopIcon(), func() {
+	u.spatialBtn = widget.NewButtonWithIcon("", theme.ViewFullScreenIcon(), u.spatialPage)
+	gear := widget.NewButtonWithIcon("", theme.SettingsIcon(), u.voicePage)
+	hang := widget.NewButtonWithIcon("", theme.MediaStopIcon(), func() {
 		if ch := u.cur(); ch != nil {
 			u.c.LeaveCall(ch.ID)
 			u.refresh()
@@ -277,27 +283,45 @@ func (u *ui) buildCallControls() {
 	})
 	hang.Importance = widget.DangerImportance
 
-	u.bannerDot = canvas.NewCircle(cRed)
-	u.bannerLbl = canvas.NewText("", cFg)
-	u.bannerLbl.TextSize = fs(13)
-	u.bannerLbl.TextStyle = fyne.TextStyle{Bold: true}
-	bg := canvas.NewRectangle(cBubbleMe)
-	bg.CornerRadius = 10
+	// głośność pod ręką — to samo pokrętło co w ustawieniach Głos i wideo
+	vol := widget.NewSlider(0, 200)
+	vol.Step = 5
+	if v := u.cfg.OutputVol; v > 0 {
+		vol.Value = v * 100
+	} else {
+		vol.Value = 100
+	}
+	vol.OnChanged = func(v float64) { u.c.SetOutputVolume(v / 100) }
+	vol.OnChangeEnded = func(v float64) {
+		u.cfg.OutputVol = v / 100
+		u.saveCfg()
+	}
+
+	// clipText, nie canvas.Text: podpis „czat · N uczest. · mic” bywa dłuższy
+	// niż pasek, a canvas.Text podaje MinSize całego napisu — Border wypychał
+	// przyciski poza krawędź i dawał im UJEMNĄ szerokość (panika w painterze).
+	u.bannerDot = canvas.NewCircle(cGreen)
+	u.bannerLbl = newClipText("", fs(13), cGreen).bold()
+	u.bannerSub = newClipText("", fs(11), cMuted)
+
+	bg := canvas.NewRectangle(cDeep)
+	bg.CornerRadius = 12
 	dot := container.NewCenter(container.NewGridWrap(fyne.NewSize(10, 10), u.bannerDot))
+	head := container.NewBorder(nil, nil,
+		container.NewHBox(dot, hspace(6)), hang,
+		container.NewVBox(u.bannerLbl, u.bannerSub))
+
 	if u.mobile {
 		// camera and screen have no source on Android (lacking V4L2/X11) — don't offer them
-		u.callBar = container.NewHBox(u.micBtn, hang)
+		u.callBar = container.NewVBox(
+			container.NewGridWithColumns(4, u.micBtn, u.deafBtn, u.spatialBtn, gear),
+			container.NewBorder(nil, nil, widget.NewIcon(theme.VolumeUpIcon()), nil, vol))
 	} else {
-		u.callBar = container.NewHBox(u.micBtn, u.camBtn, u.scrBtn, hang)
+		u.callBar = container.NewVBox(
+			container.NewGridWithColumns(6, u.camBtn, u.scrBtn, u.spatialBtn, u.micBtn, u.deafBtn, gear),
+			container.NewBorder(nil, nil, widget.NewIcon(theme.VolumeUpIcon()), nil, vol))
 	}
-	head := container.NewHBox(dot, hspace(6), container.NewCenter(u.bannerLbl), layout.NewSpacer())
-	var body fyne.CanvasObject
-	if u.mobile { // narrow screen: buttons below text
-		body = container.NewVBox(head, u.callBar)
-	} else {
-		body = container.NewBorder(nil, nil, nil, u.callBar, head)
-	}
-	u.banner = container.NewStack(bg, container.NewPadded(body))
+	u.banner = container.NewStack(bg, container.NewPadded(container.NewVBox(head, u.callBar)))
 	u.banner.Hide()
 }
 
@@ -909,12 +933,24 @@ func (u *ui) renderCallState(ch *core.ChatInfo) {
 			icon = theme.MediaPauseIcon()
 		}
 		u.micBtn.SetIcon(icon)
-		u.bannerLbl.Text = fmt.Sprintf("W ROZMOWIE · %d uczest. · %s", len(call.Members)+1, mic)
-		u.callBtn.Hide() // leave call is in banner
+		if call.Deaf {
+			u.deafBtn.SetIcon(theme.VolumeMuteIcon())
+			mic += " · głuchy"
+		} else {
+			u.deafBtn.SetIcon(theme.VolumeUpIcon())
+		}
+		u.bannerLbl.setText("Nawiązano połączenie")
+		u.bannerLbl.setColor(cGreen)
+		u.bannerDot.FillColor = cGreen
+		u.bannerSub.setText(fmt.Sprintf("%s · %d uczest. · %s", ch.Name, len(call.Members)+1, mic))
+		u.callBtn.Hide() // hang-up lives in the panel
 		u.callBar.Show()
 		u.showBanner()
 	case call != nil && len(call.Members) > 0:
-		u.bannerLbl.Text = fmt.Sprintf("Trwa rozmowa (%d) — dołącz", len(call.Members))
+		u.bannerLbl.setText(fmt.Sprintf("Trwa rozmowa (%d) — dołącz", len(call.Members)))
+		u.bannerLbl.setColor(cFg)
+		u.bannerDot.FillColor = cOrange
+		u.bannerSub.setText(ch.Name)
 		u.callBtn.Show()
 		u.callBar.Hide()
 		u.showBanner()
@@ -923,13 +959,27 @@ func (u *ui) renderCallState(ch *core.ChatInfo) {
 		u.callBar.Hide()
 		u.hideBanner()
 	}
-	u.bannerLbl.Refresh()
+	u.bannerDot.Refresh()
+}
+
+// relayoutBottom: pokazanie/ukrycie panelu zmienia WYSOKOŚĆ dolnego paska, ale
+// Show() na dziecku nie każe rodzicowi się przeliczyć. Bez tego świeżo odsłonięty
+// panel zostaje z rozmiarem zerowym: container.NewPadded robi z niego ujemny,
+// a przycisk z taką ramką wywraca painter (slice bounds out of range).
+func (u *ui) relayoutBottom() {
+	if u.convBottom != nil {
+		u.convBottom.Refresh()
+	}
+	if u.convRoot != nil {
+		u.convRoot.Refresh()
+	}
 }
 
 func (u *ui) showBanner() {
 	if !u.banner.Visible() {
 		u.banner.Show()
-		u.bannerAnim = canvas.NewColorRGBAAnimation(cRed, color.NRGBA{0xf8, 0x71, 0x71, 0x30},
+		u.relayoutBottom()
+		u.bannerAnim = canvas.NewColorRGBAAnimation(cGreen, color.NRGBA{0x23, 0xa5, 0x5a, 0x30},
 			900*msec, func(c color.Color) {
 				u.bannerDot.FillColor = c
 				u.bannerDot.Refresh()
@@ -943,6 +993,7 @@ func (u *ui) showBanner() {
 func (u *ui) hideBanner() {
 	if u.banner.Visible() {
 		u.banner.Hide()
+		u.relayoutBottom()
 		if u.bannerAnim != nil {
 			u.bannerAnim.Stop()
 			u.bannerAnim = nil
