@@ -307,6 +307,9 @@ func (u *ui) updateConvHeader(ch *core.ChatInfo) {
 	if ch.Online > 0 {
 		sub = fmt.Sprintf("%d z %d online", ch.Online+1, len(ch.Members))
 	}
+	if typing := u.c.TypingPeers(ch.ID); len(typing) > 0 {
+		sub = strings.Join(typing, ", ") + " pisze..."
+	}
 	u.subtitle.setText(sub)
 	u.headAvatar.Objects = []fyne.CanvasObject{u.chatAvatar(*ch, avatarRow)}
 	u.headAvatar.Refresh()
@@ -314,6 +317,9 @@ func (u *ui) updateConvHeader(ch *core.ChatInfo) {
 
 // openConv: wchodzi w rozmowę — na telefonie jako pełnoekranowa strona.
 func (u *ui) openConv() {
+	if ch := u.cur(); ch != nil {
+		u.c.MarkChatRead(ch.ID)
+	}
 	u.shown = 0
 	u.msgSig = ""
 	u.refresh()
@@ -581,10 +587,19 @@ func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 		}
 		content = container.NewPadded(body)
 	} else {
-		txt := widget.NewLabel(m.Text)
-		hug = u.bubbleFits(m.Text)
+		txtVal := m.Text
+		if m.Deleted {
+			txtVal = "[Wiadomość usunięta]"
+		}
+		txt := widget.NewLabel(txtVal)
+		hug = u.bubbleFits(txtVal)
 		txt.Wrapping = wrapFor(hug)
 		content = txt
+	}
+
+	if len(m.Reactions) > 0 {
+		rTxt := mutedText(formatReactionsGUI(m.Reactions), 10)
+		content = container.NewVBox(content, rTxt)
 	}
 
 	bubble := tappable(container.NewStack(bg, content), nil, func() { u.msgActions(m) })
@@ -592,14 +607,16 @@ func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 
 	margin := bubbleMargin(u.mobile)
 	if own {
-		// Godzina NAD dymkiem, nie w jego środku: w środku siedziała pod tekstem
-		// bez własnego marginesu i wchodziła w zaokrąglony róg, a przy krótkiej
-		// treści („ok”) to ona dyktowała szerokość dymka. Nad dymkiem jest
-		// symetrycznie do cudzych wiadomości, które mają tam nazwisko i godzinę.
 		body := fyne.CanvasObject(bubble)
 		if !grouped {
+			tsStr := m.TS.Format("15:04")
+			if m.ACK == "read" {
+				tsStr += " ✓✓"
+			} else if m.ACK == "delivered" {
+				tsStr += " ✓"
+			}
 			body = container.NewVBox(container.NewHBox(layout.NewSpacer(),
-				mutedText(m.TS.Format("15:04"), 9), hspace(4)), bubble)
+				mutedText(tsStr, 9), hspace(4)), bubble)
 		}
 		if hug {
 			return container.NewHBox(layout.NewSpacer(), body, hspace(2))
@@ -626,6 +643,22 @@ func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 	return container.NewBorder(nil, nil, left, hspace(margin), body)
 }
 
+func formatReactionsGUI(rm map[string]string) string {
+	counts := map[string]int{}
+	for _, emoji := range rm {
+		counts[emoji]++
+	}
+	var parts []string
+	for emoji, c := range counts {
+		if c > 1 {
+			parts = append(parts, fmt.Sprintf("%s %d", emoji, c))
+		} else {
+			parts = append(parts, emoji)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // ---- akcje wiadomości (długie przytrzymanie) ----
 
 func (u *ui) msgActions(m core.Msg) {
@@ -644,6 +677,22 @@ func (u *ui) msgActions(m core.Msg) {
 	quote.Wrapping = fyne.TextWrapWord
 
 	rows := container.NewVBox(card(container.NewVBox(head, quote)), vspace(6))
+
+	emojiRow := container.NewHBox(layout.NewSpacer())
+	for _, em := range []string{"👍", "❤️", "😂", "😮", "😢", "🔥"} {
+		em := em
+		btn := widget.NewButton(em, func() {
+			u.fail(u.c.ReactMsg(chat, m.ID, em))
+			u.msgSig = ""
+			u.popPage()
+			u.refresh()
+		})
+		emojiRow.Add(btn)
+	}
+	emojiRow.Add(layout.NewSpacer())
+	rows.Add(emojiRow)
+	rows.Add(vspace(6))
+
 	if m.Text != "" {
 		rows.Add(navRow(theme.ContentCopyIcon(), "Kopiuj tekst", "", func() {
 			u.w.Clipboard().SetContent(m.Text)
@@ -664,6 +713,13 @@ func (u *ui) msgActions(m core.Msg) {
 				u.fetchFull(m)
 			}))
 	}
+	rows.Add(navRow(theme.DeleteIcon(), "Usuń u wszystkich",
+		"Wysyła zdarzenie usunięcia wiadomości do DAG w czacie", func() {
+			u.fail(u.c.DeleteMsg(chat, m.ID))
+			u.msgSig = ""
+			u.popPage()
+			u.refresh()
+		}))
 	rows.Add(navRow(theme.VisibilityOffIcon(), "Ukryj u mnie",
 		"Zniknie tylko na tym urządzeniu — u innych zostaje", func() {
 			u.fail(u.c.HideMsg(chat, m.ID))
@@ -671,9 +727,6 @@ func (u *ui) msgActions(m core.Msg) {
 			u.popPage()
 			u.refresh()
 		}))
-	rows.Add(vspace(8))
-	rows.Add(mutedWrap("Historia czatu jest podpisana i replikowana u wszystkich, " +
-		"więc „usuń u wszystkich” nie istnieje. Ukrycie działa lokalnie."))
 	u.page("Wiadomość", rows)
 }
 

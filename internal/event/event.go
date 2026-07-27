@@ -29,11 +29,15 @@ const (
 	KindFile   = "file"   // {Blob, Mime, Name, Size, W, H, Text=podpis} attachment
 	KindAvatar = "avatar" // {Blob, Mime} author's avatar; empty Blob clears it
 	KindNick   = "nick"   // {Name} author renames themselves in this chat
+	KindReact  = "react"  // {Target, Text=emoji} reaction to an event
+	KindDelete = "delete" // {Target} deletes/revokes an event
 )
 
-// QuietKinds: zdarzenia profilowe. Nie są treścią rozmowy — nie rysujemy ich
-// i nie nabijają odznaki nieprzeczytanych.
-func QuietKind(kind string) bool { return kind == KindAvatar || kind == KindNick }
+// QuietKinds: zdarzenia profilowe i modyfikujące. Nie są osobną treścią rozmowy —
+// nie rysujemy ich jako osobnych linii i nie nabijają odznaki nieprzeczytanych.
+func QuietKind(kind string) bool {
+	return kind == KindAvatar || kind == KindNick || kind == KindReact || kind == KindDelete
+}
 
 type Event struct {
 	Chat    []byte   `json:"chat"` // genesis ID; zeros for the genesis event itself
@@ -47,10 +51,11 @@ type Event struct {
 }
 
 type Body struct {
-	Text string `json:"text,omitempty"`
-	Name string `json:"name,omitempty"`
-	Pub  []byte `json:"pub,omitempty"`
-	TS   int64  `json:"ts,omitempty"` // author's clock, display only (inside AEAD)
+	Text   string `json:"text,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Pub    []byte `json:"pub,omitempty"`
+	TS     int64  `json:"ts,omitempty"`     // author's clock, display only (inside AEAD)
+	Target []byte `json:"target,omitempty"` // ID of target event (KindReact / KindDelete)
 
 	// attachments (KindFile / KindAvatar): only the sha256 of the content
 	// travels in the DAG; the bytes are fetched on demand from peers.
@@ -164,10 +169,12 @@ type Member struct {
 }
 
 type State struct {
-	Name    string
-	Owner   []byte
-	Epoch   uint32
-	Members map[string]*Member // key: hex-free string(pub)
+	Name      string
+	Owner     []byte
+	Epoch     uint32
+	Members   map[string]*Member           // key: hex-free string(pub)
+	Reactions map[string]map[string]string // key: string(targetID) -> pub -> emoji
+	Deleted   map[string]bool              // key: string(targetID) -> true
 }
 
 func (s *State) IsMember(pub []byte) bool {
@@ -203,7 +210,11 @@ func FoldTrusted(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, e
 
 func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*State, error) {
 	SortCanonical(evs)
-	st := &State{Members: map[string]*Member{}}
+	st := &State{
+		Members:   map[string]*Member{},
+		Reactions: map[string]map[string]string{},
+		Deleted:   map[string]bool{},
+	}
 	// lamport rodziców: porządek stosowania ma wynikać z DAG-u, nie z licznika
 	seen := make(map[string]uint64, len(evs))
 	for _, e := range evs {
@@ -239,7 +250,7 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 		if !ok {
 			// Can't decrypt: tolerate only content kinds; membership must be readable.
 			switch e.Kind {
-			case KindMsg, KindRename, KindFile, KindAvatar, KindNick:
+			case KindMsg, KindRename, KindFile, KindAvatar, KindNick, KindReact, KindDelete:
 				continue
 			}
 			return nil, fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
@@ -292,6 +303,28 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 			// your own display name, nobody else's
 			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed && body.Name != "" {
 				m.Name = body.Name
+			}
+		case KindReact:
+			if !st.IsMember(e.Author) {
+				return nil, errors.New("react by non-member")
+			}
+			if len(body.Target) > 0 {
+				tID := string(body.Target)
+				if st.Reactions[tID] == nil {
+					st.Reactions[tID] = make(map[string]string)
+				}
+				if body.Text == "" {
+					delete(st.Reactions[tID], string(e.Author))
+				} else {
+					st.Reactions[tID][string(e.Author)] = body.Text
+				}
+			}
+		case KindDelete:
+			if !st.IsMember(e.Author) {
+				return nil, errors.New("delete by non-member")
+			}
+			if len(body.Target) > 0 {
+				st.Deleted[string(body.Target)] = true
 			}
 		}
 	}
