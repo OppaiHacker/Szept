@@ -139,7 +139,7 @@ func navRow(icon fyne.Resource, title, desc string, tap func()) fyne.CanvasObjec
 	return tappable(container.NewPadded(row), tap, nil)
 }
 
-// section: group header (like Discord settings).
+// section: group header on settings pages.
 func section(title string) fyne.CanvasObject {
 	t := canvas.NewText(title, cMuted)
 	t.TextSize = fs(11)

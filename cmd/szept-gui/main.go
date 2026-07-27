@@ -42,8 +42,8 @@ const msec = time.Millisecond
 
 // ---- palette ----
 
-// Palette like in mobile Discord (same neutral grays), only accent
-// stays szept purple. Three background levels matter here: app bars and navigation are
+// Dark palette of neutral grays, accent stays szept purple.
+// Three background levels matter here: app bars and navigation are
 // DARKER than content — giving a layered feel without shadows, which fyne
 // doesn't draw around containers anyway.
 var (
@@ -160,7 +160,7 @@ func (t szTheme) Size(n fyne.ThemeSizeName) float32 {
 	case theme.SizeNameSubHeadingText:
 		return m(16, 18)
 	// on mobile text field and icon buttons are ~42 px high,
-	// so radius 20 makes them pill-shaped and circular — like Discord composer
+	// so radius 20 makes them pill-shaped and circular
 	case theme.SizeNameInputRadius, theme.SizeNameButtonRadius:
 		return m(10, 20)
 	case theme.SizeNameSelectionRadius:

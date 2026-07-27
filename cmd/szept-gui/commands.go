@@ -1,4 +1,4 @@
-// / commands (like on Discord): text input recognizes entries starting with "/",
+// / commands: text input recognizes entries starting with "/",
 // suggests matching commands above input, and responses return as local
 // system "embeds" in conversation — visible only to us, never sent over network.
 package main
@@ -364,7 +364,7 @@ func (u *ui) dropSys(i int) {
 	u.refresh()
 }
 
-// embedCard: panel with colored strip on the left — like Discord embeds.
+// embedCard: panel with colored strip on the left.
 // Border gives strip its minimum width and full card height.
 func embedCard(tone color.NRGBA, content, right fyne.CanvasObject) fyne.CanvasObject {
 	bg := canvas.NewRectangle(cSurface)
@@ -472,7 +472,7 @@ func (u *ui) buildComposer() fyne.CanvasObject {
 	add := widget.NewButtonWithIcon("", theme.ContentAddIcon(), u.attachPage)
 	add.Importance = widget.LowImportance
 	row := container.NewBorder(nil, nil, add, send, e)
-	// input sits on its own darker bar (like Discord composer) —
+	// input sits on its own darker bar —
 	// previously hung directly on chat background and blended with last bubble
 	return container.NewStack(canvas.NewRectangle(cSurface), container.NewPadded(row))
 }
