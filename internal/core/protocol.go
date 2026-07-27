@@ -560,10 +560,13 @@ func (c *Core) Redeem(code, pin string) error {
 	return nil
 }
 
-// FriendCode: shareable identity card (pubkey + name + connector hint).
+// FriendCode: shareable identity card (pubkey + connector hint). No name —
+// the code travels through screenshots, QR photos and clipboards, so it carries
+// only what is needed to reach the person. The name comes over the encrypted
+// link ("hello") once connected, and every later change is a signed event.
 func (c *Core) FriendCode() string {
 	blob, _ := json.Marshal(map[string]any{
-		"p": []byte(c.ID.Pub), "n": c.ID.Name, "u": c.connURL(),
+		"p": []byte(c.ID.Pub), "u": c.connURL(),
 	})
 	return friendPrefix + base64.RawURLEncoding.EncodeToString(blob)
 }
@@ -591,7 +594,14 @@ func (c *Core) AddFriend(code string) (store.Friend, error) {
 	if bytes.Equal(v.P, c.ID.Pub) {
 		return f, errors.New("to twój własny kod")
 	}
-	f = store.Friend{Pub: v.P, Name: v.N, Connector: v.U}
+	// v.N: only old codes still carry a name; new ones don't. Until "hello"
+	// brings the real one, the fingerprint stands in — an empty row in the
+	// friend list would be unclickable.
+	name := safeName(v.N)
+	if name == "" {
+		name = identity.Fingerprint(v.P)[:9]
+	}
+	f = store.Friend{Pub: v.P, Name: name, Connector: v.U}
 	if err := c.St.PutFriend(f); err != nil {
 		return f, err
 	}

@@ -419,6 +419,66 @@ func (c *Core) memberName(st *event.State, pub []byte) string {
 	return identity.Fingerprint(pub)[:9]
 }
 
+// NickEntry: one name a person announced, with the moment they did it.
+type NickEntry struct {
+	Name string
+	TS   time.Time
+}
+
+// NickHistory: every name a person has announced across chats we share with
+// them. Names live in the signed DAG (genesis carries the creator's, KindNick
+// every later change), so this cannot be quietly rewritten — that is the whole
+// point of showing it: a peer swapping their display name mid-conversation
+// leaves a visible trail for everyone in the chat.
+func (c *Core) NickHistory(pub []byte) []NickEntry {
+	var out []NickEntry
+	for idStr := range c.chatIDs() {
+		chat := []byte(idStr)
+		evs, err := c.St.Events(chat)
+		if err != nil {
+			continue
+		}
+		keys, _ := c.St.ChatKeys(chat)
+		event.SortCanonical(evs) // events within one chat in DAG order
+		for _, e := range evs {
+			if e.Kind != event.KindNick && e.Kind != event.KindCreate {
+				continue
+			}
+			if !bytes.Equal(e.Author, pub) {
+				continue
+			}
+			key, ok := keys[e.Epoch]
+			if !ok {
+				continue
+			}
+			b, err := e.Decrypt(key)
+			if err != nil {
+				continue
+			}
+			name := b.Name
+			if e.Kind == event.KindCreate {
+				name = b.Text // genesis: Name is the chat's, Text the creator's
+			}
+			if name = safeName(name); name != "" {
+				out = append(out, NickEntry{Name: name, TS: time.Unix(b.TS, 0)})
+			}
+		}
+	}
+	// one rename is announced in every chat at once, so the same name shows up
+	// as many times as there are chats — keep the first occurrence of each
+	uniq, seen := out[:0], map[string]bool{}
+	for _, n := range out {
+		if !seen[n.Name] {
+			seen[n.Name] = true
+			uniq = append(uniq, n)
+		}
+	}
+	// stable: renames within one second are common (SetNick writes to every
+	// chat in a loop), and canonical DAG order must survive the sort
+	sort.SliceStable(uniq, func(i, j int) bool { return uniq[i].TS.Before(uniq[j].TS) })
+	return uniq
+}
+
 type Msg struct {
 	ID        []byte // event ID — key for "hide locally"
 	Author    []byte

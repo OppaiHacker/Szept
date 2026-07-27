@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/gif"
@@ -359,6 +360,49 @@ func testImageGIF(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+// Name history comes from the signed DAG: genesis + every KindNick, collapsed
+// so one rename announced in several chats is a single entry.
+func TestNickHistory(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	a := newCore(t, "ala", "ws"+strings.TrimPrefix(srv.URL, "http"))
+
+	if _, err := a.CreateChat("grupa"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CreateChat("druga-grupa"); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"Ala K.", "Alicja"} {
+		if err := a.SetNick(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := a.NickHistory(a.ID.Pub)
+	want := []string{"ala", "Ala K.", "Alicja"}
+	if len(got) != len(want) {
+		t.Fatalf("historia = %+v, chciano %v", got, want)
+	}
+	for i, w := range want {
+		if got[i].Name != w {
+			t.Fatalf("historia[%d] = %q, chciano %q (całość %+v)", i, got[i].Name, w, got)
+		}
+	}
+	// friend code carries no name any more
+	if strings.Contains(string(mustDecodeCode(t, a.FriendCode())), "Alicja") {
+		t.Fatal("kod znajomego niesie nazwę")
+	}
+}
+
+func mustDecodeCode(t *testing.T, code string) []byte {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(code, "SZF-"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestDirectChatViaFriendCode(t *testing.T) {

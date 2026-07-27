@@ -61,6 +61,12 @@ func (u *ui) pushPage(title string, content fyne.CanvasObject, actions ...fyne.C
 // and chatOpen() queries stack state right after return.
 // Animated pop-out would leave page temporarily and cause state mismatch.
 func (u *ui) popPage() bool {
+	// w widoku ustawień „wstecz” to powrót do pustej prawej strony;
+	// false, bo stosu stron tu nie ma — popAllPages nie może się zapętlić
+	if u.setPane != nil {
+		u.settingsHome()
+		return false
+	}
 	if u.root == nil || len(u.root.Objects) <= 1 {
 		return false
 	}
@@ -81,6 +87,14 @@ func (u *ui) popAllPages() {
 func (u *ui) page(title string, content fyne.CanvasObject, actions ...fyne.CanvasObject) {
 	if u.mobile {
 		u.pushPage(title, vscroll(container.NewPadded(content)), actions...)
+		return
+	}
+	// widok ustawień otwarty: sekcja wchodzi w prawą część zamiast w dialog
+	if u.setPane != nil {
+		u.setPane.Objects = []fyne.CanvasObject{container.NewBorder(
+			u.appBar(title, nil, actions...), nil, nil, nil,
+			vscroll(container.NewPadded(content)))}
+		u.setPane.Refresh()
 		return
 	}
 	scr := container.NewVScroll(content)

@@ -197,6 +197,14 @@ type ui struct {
 	cfgFile string
 	mobile  bool
 
+	// konta (profile): baseDir to katalog danych bez profilu (albo ten z
+	// -data / piaskownicy Androida), enter — wejście do aplikacji po
+	// zalogowaniu. Trzymane na ui, bo ekran logowania potrafi się przełączyć
+	// na inne konto i przejść tę samą drogę jeszcze raz (login()).
+	baseDir  string
+	dataFlag string
+	enter    func(*identity.Identity)
+
 	// mobile shell: root is Stack, where [0] is main screen,
 	// and stacked layers are full-screen pages (nav.go)
 	root     *fyne.Container
@@ -210,7 +218,9 @@ type ui struct {
 	sel        int
 	chatBox    *fyne.Container    // touch chat rows (both platforms)
 	friendBox  *fyne.Container    // friend list
-	meBox      *fyne.Container    // "You" tab (profile + settings)
+	meBox      *fyne.Container    // settings list (sidebar on desktop, tab on mobile)
+	setPane    *fyne.Container    // desktop: section shown next to settings list
+	mainRoot   fyne.CanvasObject  // desktop: main screen, restored when settings close
 	nav        *container.AppTabs // desktop: Chats | Friends
 	msgBox     *fyne.Container
 	msgScr     *flingScroll
@@ -321,10 +331,6 @@ func main() {
 	if *connFlag != "" {
 		cfg.Connector = *connFlag
 	}
-	// konta (profile): wybrane konto podmienia katalog danych; -data wygrywa
-	if cfg.Profile != "" && !mobileUI && *dataFlag == "" {
-		dataDir = boot.ProfileDir(cfg.Profile)
-	}
 	cfg.DataDir = dataDir
 	if col, ok := hexColor(cfg.Accent); ok {
 		setAccent(col)
@@ -333,6 +339,7 @@ func main() {
 
 	u := &ui{
 		a: a, w: w, cfg: cfg, cfgFile: cfgFile,
+		baseDir: dataDir, dataFlag: *dataFlag,
 		mobile:  mobileUI,
 		vidImgs: map[string]*canvas.Image{},
 		decoded: map[string]any{},
@@ -341,7 +348,7 @@ func main() {
 		sys:  map[string][]sysMsg{},
 	}
 
-	start := func(id *identity.Identity) {
+	u.enter = func(id *identity.Identity) {
 		c, err := core.Open(*cfg, id)
 		if err != nil {
 			u.fail(err)
@@ -360,19 +367,7 @@ func main() {
 		c.OnVideoFrame = u.onFrame
 	}
 
-	if !boot.HasIdentity(dataDir) {
-		u.setupScreen(cfgFile, start)
-	} else {
-		if id, err := boot.LoadIdentity(dataDir, nil); err == nil {
-			if cfg.Connector == "" {
-				u.askConnector(cfgFile, func() { start(id) })
-			} else {
-				start(id)
-			}
-		} else {
-			u.passScreen(dataDir, start)
-		}
-	}
+	u.login()
 	w.ShowAndRun()
 	if u.c != nil {
 		u.c.Close()
@@ -413,7 +408,11 @@ func (u *ui) startScaffold(content fyne.CanvasObject) fyne.CanvasObject {
 	if u.mobile {
 		return vscroll(container.NewPadded(content))
 	}
-	return container.NewCenter(content)
+	// Center ściska dziecko do MinSize — formularz logowania kurczył się do
+	// szerokości najdłuższego słowa. hspace przypina wygodną szerokość karty
+	// (ta sama sztuczka co w dlgBody).
+	return container.NewCenter(container.NewPadded(
+		container.NewVBox(hspace(460), content)))
 }
 
 func hspace(w float32) fyne.CanvasObject {
@@ -437,9 +436,41 @@ func card(content fyne.CanvasObject) fyne.CanvasObject {
 
 // ---- startup screens ----
 
-func (u *ui) setupScreen(cfgFile string, done func(*identity.Identity)) {
+// profileDir: katalog danych aktywnego konta. -data i Android (piaskownica)
+// wygrywają z wyborem profilu.
+func (u *ui) profileDir() string {
+	if u.mobile || u.dataFlag != "" {
+		return u.baseDir
+	}
+	return boot.ProfileDir(u.cfg.Profile)
+}
+
+// login: ekran startowy aktywnego konta — założenie tożsamości, hasło albo
+// wejście od razu. Wołane też po przełączeniu konta na ekranie logowania,
+// więc musi znosić wielokrotne wywołanie.
+func (u *ui) login() {
+	dir := u.profileDir()
+	u.cfg.DataDir = dir
+	if !boot.HasIdentity(dir) {
+		u.setupScreen()
+		return
+	}
+	id, err := boot.LoadIdentity(dir, nil)
+	if err != nil {
+		u.passScreen(dir)
+		return
+	}
+	if u.cfg.Connector == "" {
+		u.askConnector(func() { u.enter(id) })
+		return
+	}
+	u.enter(id)
+}
+
+func (u *ui) setupScreen() {
 	name := widget.NewEntry()
 	name.PlaceHolder = "np. ala"
+	name.SetText(u.cfg.Profile) // nowe konto: nazwa profilu jako punkt wyjścia
 	conn := widget.NewEntry()
 	conn.PlaceHolder = "ws://1.2.3.4:7777"
 	conn.SetText(u.cfg.Connector)
@@ -462,22 +493,27 @@ func (u *ui) setupScreen(cfgFile string, done func(*identity.Identity)) {
 			u.fail(err)
 			return
 		}
-		boot.SaveConfig(cfgFile, u.cfg)
-		done(id)
+		u.saveCfg()
+		u.enter(id)
+	}
+	title := "Pierwsze uruchomienie"
+	if u.cfg.Profile != "" {
+		title = "Nowe konto „" + u.cfg.Profile + "”"
 	}
 	u.w.SetContent(u.startScaffold(container.NewVBox(
 		container.NewCenter(brand(34)),
 		mutedWrap("szyfrowany komunikator P2P — bez serwera, bez śladów"),
 		vspace(14),
 		card(container.NewVBox(
-			widget.NewLabelWithStyle("Pierwsze uruchomienie", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			form,
 			mutedWrap("Connector to lekki serwer spotkań — np. ws://twoj-vps:7777"),
 		)),
+		u.profileBar(),
 	)))
 }
 
-func (u *ui) passScreen(dataDir string, done func(*identity.Identity)) {
+func (u *ui) passScreen(dataDir string) {
 	pass := widget.NewPasswordEntry()
 	pass.PlaceHolder = "hasło klucza"
 	msg := canvas.NewText("", cRed)
@@ -489,7 +525,7 @@ func (u *ui) passScreen(dataDir string, done func(*identity.Identity)) {
 			msg.Refresh()
 			return
 		}
-		done(id)
+		u.enter(id)
 	}
 	pass.OnSubmitted = func(string) { try() }
 	unlock := bigButton("Odblokuj", theme.LoginIcon(), try)
@@ -500,10 +536,11 @@ func (u *ui) passScreen(dataDir string, done func(*identity.Identity)) {
 			widget.NewLabelWithStyle("Klucz tożsamości jest zaszyfrowany", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			pass, unlock, msg,
 		)),
+		u.profileBar(),
 	)))
 }
 
-func (u *ui) askConnector(cfgFile string, done func()) {
+func (u *ui) askConnector(done func()) {
 	conn := widget.NewEntry()
 	conn.PlaceHolder = "ws://1.2.3.4:7777"
 	save := bigButton("Zapisz i połącz", theme.ConfirmIcon(), func() {
@@ -511,7 +548,7 @@ func (u *ui) askConnector(cfgFile string, done func()) {
 			return
 		}
 		u.cfg.Connector = core.NormalizeWS(conn.Text)
-		boot.SaveConfig(cfgFile, u.cfg)
+		u.saveCfg()
 		done()
 	})
 	conn.OnSubmitted = func(string) { save.OnTapped() }
@@ -551,7 +588,7 @@ func (u *ui) buildMain() {
 	u.a.Lifecycle().SetOnEnteredForeground(func() { fyne.Do(u.checkClipboard) })
 }
 
-// buildMobileShell: bottom tabs Chats | Friends | You and stacked pages above.
+// buildMobileShell: bottom tabs Chats | Friends | Settings and stacked pages above.
 func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 	u.chatBox = container.NewVBox()
 	chatsTab := container.NewBorder(
@@ -565,7 +602,7 @@ func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 	// in from the side instead of swapping view in one frame
 	u.tabBody = slidePage(u.tabViews[0])
 	nav := u.buildBottomNav(
-		[]string{"Czaty", "Znajomi", "Ty"},
+		[]string{"Czaty", "Znajomi", "Ustawienia"},
 		[]fyne.Resource{theme.MailComposeIcon(), theme.AccountIcon(), theme.SettingsIcon()})
 
 	head := container.NewHBox(hspace(4), brand(22), layout.NewSpacer(),
@@ -600,14 +637,23 @@ func (u *ui) buildDesktopShell(friendsTab fyne.CanvasObject) {
 	u.nav = container.NewAppTabs(
 		container.NewTabItemWithIcon("Czaty", theme.ListIcon(), chatsTab),
 		container.NewTabItemWithIcon("Znajomi", theme.AccountIcon(), friendsTab),
-		container.NewTabItemWithIcon("Ty", theme.SettingsIcon(), u.mePage()),
 	)
 	u.nav.OnSelected = func(*container.TabItem) { u.checkClipboard() }
-	head := container.NewHBox(brand(24), layout.NewSpacer())
+	gear := widget.NewButtonWithIcon("", theme.SettingsIcon(), u.openSettings)
+	gear.Importance = widget.LowImportance
+	// przełącznik kont pod ręką — wcześniej siedział cztery kliknięcia głęboko
+	// w ustawieniach i nikt go tam nie znajdował
+	acct := widget.NewButtonWithIcon(profileLabel(u.cfg.Profile), theme.AccountIcon(), func() {
+		u.openSettings()
+		u.accountsPage()
+	})
+	acct.Importance = widget.LowImportance
+	head := container.NewHBox(brand(24), layout.NewSpacer(), acct, gear)
 	left := container.NewBorder(container.NewPadded(head), nil, nil, nil, u.nav)
 	split := container.NewHSplit(left, u.center)
 	split.SetOffset(0.26)
-	u.w.SetContent(container.NewBorder(u.clipBar, u.statusBar, nil, nil, split))
+	u.mainRoot = container.NewBorder(u.clipBar, u.statusBar, nil, nil, split)
+	u.w.SetContent(u.mainRoot)
 }
 
 // buildStatus: connection dot and label. On mobile they sit in header,
