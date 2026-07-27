@@ -1,190 +1,226 @@
 # 🔐 Security Model
 
-> **Szept is designed so that the only party you need to trust is the person you are talking to.**  
-> No server ever holds your keys, your messages, or your friend graph.
+> **The only party you need to trust is the person you're talking to.**
+> No server ever holds your keys, your messages, or your contact list.
 
 ---
 
 ## 🔑 Identity
 
-Every Szept user is an **Ed25519 keypair** — that's their identity, full stop.
+Every user is an **Ed25519 keypair**. That's the entire identity.
 
-- The key file is encrypted with **argon2id** (3 iterations, 64 MiB memory) + **XChaCha20-Poly1305**, stored with `0600` permissions.
-- A human-readable fingerprint is shown in the UI for out-of-band verification.
-- **Friend / invite codes embed the full public key** — adding a contact does not rely on trusting the server or TOFU. A MITM at the invite-code level would require tampering with the code outside the app.
+- Key file at rest: `SZEPT1` magic + 16-byte salt + `crypt.Seal(argon2id(passphrase, salt, 3 iter, 64 MiB, 2 threads), seed || name)`.
+- Stored `0600`. Fingerprint = SHA-256 of pubkey → base32, displayed as `XXXX-XXXX-XXXX-XXXX`.
+- Friend and invite codes **embed the full public key** — no TOFU, no trusting the server. MITM at invite time requires tampering with the code outside the app.
+- Storage key: `HKDF-SHA256(seed, "szept-storage-v1")` — deterministic, never stored directly.
 
 ---
 
 ## 🔒 Cryptographic Architecture
 
-![Szept Security — Cryptographic Architecture Layers](assets/security_crypto_layers.jpg)
+![Szept Security — Cryptographic Layers](assets/security_crypto_layers.jpg)
 
-### Identity Layer
-- **Keypair**: Ed25519 (signing & identity)
-- **Key file at rest**: argon2id KDF → XChaCha20-Poly1305 envelope, `chmod 0600`
+### Layer 1: Identity
 
-### Transport (P2P) Layer
-- Connections: WebRTC **DTLS 1.2+** (via [pion](https://github.com/pion/webrtc)), NAT traversal via ICE/STUN.
-- Signaling (SDP with DTLS certificate fingerprint) relays through the connector but is **Ed25519-signed by the sender and verified against the expected recipient's key** (+ freshness ±2 min, explicit addressee, tie-break for simultaneous offers).
-- The connector **cannot substitute offers or perform MITM** — DTLS is cryptographically bound to the identity.
-- **Result**: every data channel is an authenticated E2E pipe between two known identities. No TURN relay exists, so no intermediary ever touches payload bytes.
+| Primitive | Usage |
+|---|---|
+| Ed25519 | Keypair = identity; signs events, SDP offers, registrations |
+| argon2id | Passphrase → key derivation (3 iterations, 64 MiB, 2 threads) |
+| XChaCha20-Poly1305 | Encrypts key file at rest |
+| HKDF-SHA256 | Derives storage key and metadata keys from identity seed |
 
-### Chat Events (DAG) Layer
-- Chat history = a **DAG of events** (parents = SHA-256 hashes), each event:
-  - **Ed25519-signed** by the author (signature covers ciphertext + full structure),
-  - body encrypted with **XChaCha20-Poly1305** under the chat's **epoch key**, with `(chat, author, parents, epoch)` as AEAD associated data.
-- History is **immutable**: modifying any node changes its hash and invalidates all descendants.
+### Layer 2: Transport (P2P)
+
+- Connections: **WebRTC DTLS 1.2+** via [pion/webrtc](https://github.com/pion/webrtc), NAT traversal via ICE/STUN.
+- SDP offers contain the DTLS certificate fingerprint **and a 32-byte ChaCha20 obfuscation key** (`sigPayload.Obf`).
+- Every offer is **Ed25519-signed by the sender**, and the receiver verifies:
+  1. Signature against sender's known pubkey
+  2. `From` matches the connector's `from` stamp
+  3. `To` matches our own pubkey (explicit addressee)
+  4. Timestamp within ±2 minutes (freshness)
+  5. `kind + from + connID` not seen before (replay filter)
+- **Glare handling**: simultaneous offers → lower pubkey's offer wins, loser abandons.
+- **No TURN relay**. The connector is signaling-only — payload bytes never transit it.
+- Result: every data channel is an authenticated, encrypted E2E pipe between two known identities.
+
+### Layer 3: Chat Events (DAG)
+
+Each event in the chat DAG:
+- Has its body encrypted with **XChaCha20-Poly1305** under the current **epoch key**, using `signable(chat, kind, author, lamport, epoch, parents)` (with empty Box) as AEAD associated data.
+- Is **Ed25519-signed** — signature covers the signable bytes including ciphertext.
+- Has its **ID = SHA-256(signable + signature)** — content-addressed and tamper-evident.
+
+History is **immutable** — modifying any event changes its hash and breaks every descendant.
 
 ---
 
-## 🌐 Transport Security
+## 🧅 Cebulion Network & Connector Security
 
-| Property | Mechanism |
+### Standalone connector
+
+A single connector works as a stateless signaling relay (~200 lines). It maps `pubkey → WebSocket` and forwards opaque blobs. It stamps `from` from the authenticated registration — clients cannot spoof the sender field.
+
+### Cebulion mesh
+
+Connectors can join the **Cebulion Network** — a distributed mesh providing fault tolerance and load balancing:
+
+| Mechanism | Details |
 |---|---|
-| Peer authentication | Ed25519 signature on SDP, DTLS fingerprint binding |
-| Channel confidentiality | DTLS 1.2+ (TLS record layer over UDP) |
-| Signaling freshness | ±2 min timestamp window, replay deduplicated per window |
-| Connector MITM | Impossible — DTLS cert is identity-bound |
-| No TURN relay | Connector is tracker-only; content never transits it |
+| **SNDP Gossip** | Every 15s, connectors exchange neighbor lists, peer counts, RTT latencies, and full topology via `/ndp/neighbors` (JSON, max 128 KB response). |
+| **Topology graph** | BGP-like link-state: `nodeA → nodeB → RTT(ms)`. Max 256 nodes, 64 neighbors. RTT clamped to [1, 100000] ms. |
+| **Dijkstra routing** | When `signal`'s destination is not local, `mesh_signal` is forwarded to the optimal next hop (RTT-weighted shortest path). If no route is known, broadcast to all active neighbors. |
+| **Loop prevention** | Each `mesh_signal` carries a random 16-char hex `TraceID` and `TTL` (default 5, decremented per hop). Seen traces deduplicated for 5 minutes. |
+| **Load shedding** | When `--max-peers` is hit, new clients get a `redirect` message with active neighbor URLs and the connection closes. Client appends these to `FallbackURLs` and retries. |
+| **Client failover** | `Client.Run()` reconnects with exponential backoff (1s → 30s, reset after 15s uptime). Tries primary URL, then all `FallbackURLs` in order. On `redirect`, neighbor URLs are appended. |
+| **DNS resilience** | On `no such host`: fallback to `1.1.1.1:53`. If port 53 blocked: DNS-over-HTTPS to `https://1.1.1.1/dns-query` (Cloudflare cert has IP SAN, so DNS is not required to query DNS). |
 
-### Signaling Replay Protection
+### Registration security
 
-The same signed blob is accepted **only once** within a 2-minute window, so the connector cannot flood a client with copies of a single offer. Registration requires an Ed25519-signed timestamp; one socket handles one pubkey; claiming an occupied slot requires a _fresher_ signature than the one holding it — a replayed frame (possible on plain `ws://`) is insufficient.
+- Registration requires Ed25519 signature over `"szept-register-v1" || pubkey || timestamp(BE64)`.
+- Timestamp must be within ±1 minute.
+- One socket = one pubkey. Claiming an occupied slot requires a **fresher timestamp** — replaying a captured frame is not enough.
+- Per-IP session limit: **64 concurrent WebSockets** per IP address (loopback bypassed for reverse proxy).
+- `ReadLimit`: 256 KB per WebSocket message. `ReadHeaderTimeout`: 10s (Slowloris mitigation).
+
+### What the connector sees (honestly)
+
+![Szept Security — Connector Visibility](assets/security_connector_visibility.jpg)
+
+| Visible | Never visible |
+|---|---|
+| `pubkey ↔ IP` mapping | Message contents |
+| Who signals whom | Chat names & membership |
+| Connection timestamps | Epoch keys |
+| Mesh topology (RTT between connectors) | Attachments & avatars |
+| | Friend relationships |
+| | DAG structure or event history |
 
 ---
 
 ## 💬 Chat Content Security
 
-### DAG Authorization Model
+### Authorization rules
 
-Events are validated **before** being persisted. The fold rules are:
+Events are validated **before** persistence (`ingest` → `Fold`):
 
-| Event type | Who may author it |
+| Event kind | Authorized author |
 |---|---|
-| `genesis` | Chat owner |
+| `create` (genesis) | Chat owner (exactly one per chat) |
 | `add` | Any current member |
 | `remove` / `rekey` | Owner only |
-| `msg` / `react` / `delete` | Any current member |
+| `msg` / `file` / `react` / `delete` | Any current member |
+| `avatar` / `nick` | Any current member (own profile only) |
+| `rename` | Any current member |
 
-### Lamport Counter Ordering
+Validation: signature check → parent presence → `Fold` replays entire DAG with the new event included → authorization failure rejects the event.
 
-DAG ordering derives from the **graph structure**, not from sender-supplied counters. Specifically:
-- `lamport` must equal `max(parents)+1` exactly.
-- A parent must be applied before its child.
+### Lamport ordering
 
-Without this, an attacker-author could self-date an `add` event to appear before someone was removed — surviving a kick by antedating their membership.
+DAG ordering comes from the graph, not from sender-supplied values:
+- `Lamport` must equal `max(parents) + 1` exactly.
+- A parent must be in `seen` (applied) before its child.
+- Genesis event: no parents, no Lamport check.
 
-### Epoch Key Distribution
+This prevents antedating attacks — e.g. inserting an `add` at Lamport 2 that appears before a `remove` at Lamport 3, or a `Lamport = 2^64-1` that rolls the counter and blocks future events.
 
-- Epoch keys travel **exclusively over authenticated E2E DTLS channels** to verified members.
-- Keys are **never overwritten**; a mismatched key produces a detectable AEAD failure.
-- Keys are accepted **only from a current member** (during join — from the member who introduced the chat). A key that fails decryption is treated as absent: content becomes unreadable, but the chat continues operating.
+### Epoch keys
 
-### Member Removal & Key Rotation
+- Epoch keys travel **only over authenticated E2E channels** (DTLS ctrl channel) to verified members.
+- Keys are **never overwritten** in the store: `if _, have := existing[ep]; have { continue }`.
+- A key that fails AEAD decryption is treated as absent: content-kind events (`msg`, `file`, `avatar`, `nick`, `react`, `delete`, `rename`) are tolerated without a key; membership events (`create`, `add`, `remove`, `rekey`) require a valid key or the entire fold fails.
+- Keys are accepted **only from a current member** or, during join, from the inviter / a friend who introduced the chat.
 
-Removing a member triggers automatic epoch rotation:
-- The removed peer cannot decrypt new messages.
-- Existing peers refuse sync with the removed peer.
-- The removed peer's DTLS link is torn down.
-- Removal **cascades** to all members that the removed peer introduced — otherwise an attacker could add a second identity to survive the kick.
+### Member removal & cascade
 
-Manual rotation: `/rekey`.
+Removing a member (`KindRemove`, owner only):
+1. `removeTree(st, pub)` — marks the member `Removed = true`.
+2. **Cascades** to every member whose `AddedBy` is the removed pubkey — recursively.
+3. Triggers epoch rotation (`KindRekey`) — the removed peer can't decrypt new messages.
+4. Existing peers refuse sync/want/events from non-members.
+5. The removed peer's DTLS link is torn down via `Accept()` returning false.
+
+Without the cascade, an attacker adds a second identity before being kicked — that identity survives and keeps receiving epoch keys.
 
 ### Invitations
 
-- The inviter stores only the **hash** of the 128-bit secret; the secret itself is single-use, enforced atomically.
-- PINs have a **5-attempt limit** before the invitation is burned. Without this, 10⁶ combinations are brute-forceable in seconds over an open channel.
+- Invite code = base64 JSON: `{ chat_id, inviter_pubkey, 128-bit_secret, connector_url, expiry }`.
+- PIN = 6 random digits (`crypto/rand`). Inviter stores `SHA-256(secret)` and `SHA-256(pin)`.
+- **5-attempt limit** on PIN before the invite is burned (`TakeInvite` atomic). Without this, 10⁶ combinations are brute-forceable in seconds.
+- Invite TTL: **10 minutes**. Inviter must be online for redemption.
+- Only the **chat owner** can issue invites — preventing members from unilaterally admitting strangers into shared encrypted history.
 
 ---
 
 ## 📎 Attachments & Avatars
 
-![Szept Security — Attachment & Avatar Processing Pipeline](assets/security_attachment_pipeline.jpg)
+![Szept Security — Attachment Processing Pipeline](assets/security_attachment_pipeline.jpg)
 
-### What Goes into the DAG
+### What enters the DAG
 
-Only **metadata** is embedded in the signed, encrypted DAG event:
-`sha256`, MIME type, filename, size, dimensions. Raw bytes travel separately, on demand, over the same E2E channel.
+Only metadata: `sha256(content)`, MIME type, filename, size, dimensions, thumbnail hash — inside the signed, encrypted event body. Raw bytes travel separately, in 16 KB chunks, over the same E2E ctrl channel.
 
-### File Type Detection
+### Processing pipeline
 
-- Type is detected from **magic bytes** (`http.DetectContentType`) — never from the filename or a peer-supplied MIME field.
-- **Allowed**: PNG, JPEG, GIF, WebP, MP4, WebM
-- **Blocked**: HTML, SVG, scripts, archives, ELF, everything else
+| Stage | What happens |
+|---|---|
+| **Type detection** | Magic bytes (`http.DetectContentType`), never filename. Allowed: PNG, JPEG, GIF, WebP, MP4, WebM. Everything else rejected. |
+| **Bomb guards** | Checked before full decode: 32 MiB attachment / 4 MiB avatar input, 8 000 px per side, 20 MPx, GIF frame count limit. |
+| **Avatar transcode** | Decode → center-crop 256 px → re-encode PNG (animated GIF preserved). Strips EXIF, ICC profiles, polyglot payloads — only our encoder's bytes reach the DB. |
+| **Integrity check** | Receiver computes SHA-256 of received bytes vs. the hash in the signed DAG event. Hash is known only from decrypted history — acts as an access token (without it, you can't even request the file). |
+| **Filename** | Generated locally: basename only (no path traversal), control characters stripped, extension **forced by detected MIME**. A network file cannot land as `.sh` or `.exe`. |
+| **Transfer control** | Max 3 concurrent blob transfers per peer (`maxServing`). Total assembly memory capped at 64 MiB (`asmBudget`). Send buffer pauses at 1 MiB high water mark. |
 
-### Decompression Bomb Guards
+Video is never decoded — it's handed to the system player. No decoder attack surface.
 
-Checked **before** full decode:
-- Attachment max: **32 MiB**
-- Avatar input max: **4 MiB**
-- Max dimensions: **8 000 px**, **20 MPx**
-- GIF: frame count limit
-
-Video is never decoded — it is handed directly to the system player, so no decoder attack surface exists here.
-
-### Integrity Verification
-
-The receiver recomputes the SHA-256 of received bytes and compares it to the signed DAG event. The hash is known only from decrypted history, acting as an access token: without it, a peer cannot even request the file. Files are served **only to members of that chat**.
-
-### Filename Sanitization
-
-- Filename is generated by us: stripped to basename (no path traversal), control characters removed, extension **enforced by detected MIME type**.
-- A file from the network cannot land on disk as `.sh` or `.exe`.
-
-### Avatar Transcoding
-
-- Decoded → center-cropped to **256 px square** → re-encoded as PNG (or animated GIF preserved).
-- Only our encoder's bytes reach the database. Appended payloads (polyglot ZIP/HTML/JS), EXIF, ICC profiles, and comments do not survive the round-trip.
+Large files (>10 MB) replicate as a preview thumbnail only. The full payload stays at the sender and travels only when the recipient explicitly requests it.
 
 ---
 
 ## 💾 Data at Rest
 
-- The **entire database is encrypted with a storage key** — not just event bodies. The envelope (author's public key, event kind, epoch, graph links) is also encrypted, because that is conversation metadata. From the database file alone, you cannot reconstruct even the "who talked to whom and how often" graph.
-- Only **record keys are plaintext**: event IDs (hashes), blob content-addresses, and friend public keys — all of which are hashes themselves.
-- Every value is **bound to its location** (bucket + key as AEAD associated data): even with database file access, you cannot rearrange encrypted records — e.g., swap a blob under a given hash, or move an epoch key to a different chat.
+The **entire database is encrypted** — not just message bodies. Event envelopes (author pubkey, event kind, epoch, graph links) are encrypted too, because they are conversation metadata. From the database file alone, you cannot even reconstruct a "who talked to whom" graph.
 
-| Item | Encryption key source |
+| Data | Key source |
 |---|---|
-| Event bodies | Chat epoch key → XChaCha20-Poly1305 |
-| Event envelopes | Storage key (Ed25519 seed-derived) |
-| Epoch keys, chat metadata, contacts | HKDF from identity seed |
-| Blobs (attachments, avatars) | Storage key; content-addressed by SHA-256 |
+| Event bodies | Chat epoch key (XChaCha20-Poly1305) |
+| Event envelopes | Storage key = `HKDF(identity_seed, "szept-storage-v1")` |
+| Epoch keys, chat metadata, contacts | HKDF-derived subkeys from identity seed |
+| Blobs (attachments, avatars) | Storage key; content-addressed by SHA-256 (same image in 5 chats = 1 copy on disk) |
 
-> **⚠️ A password is optional, but without one there is no encryption at rest.**  
-> An `identity.key` without a password can be unpacked by anyone who has the file; the storage key is derived from its seed, meaning the entire database is readable.
+Only **record keys are plaintext**: event IDs (hashes), blob content-addresses, friend pubkeys — all hashes themselves.
 
-Opened attachments land **decrypted in the system temp directory** (the system player requires a plain file) and remain there.
+Every value is **bound to its storage location** (bucket + key as AEAD associated data) — you can't rearrange encrypted records, e.g. swap a blob under a different hash or move an epoch key to another chat.
 
----
+> ⚠️ **A password is optional, but without one there is no encryption at rest.**
+> An unprotected `identity.key` can be read by anyone with file access. The storage key derives from its seed — meaning the entire database becomes readable.
 
-## 🛡️ What the Connector Sees (Honestly)
-
-![Szept Security — Connector Visibility vs Privacy](assets/security_connector_visibility.jpg)
-
-### What it sees
-- **pubkey ↔ IP** pairs of registered clients
-- **Who signals whom** (connection-graph metadata)
-
-### What it never sees
-- Message contents
-- Chat names or membership
-- Epoch keys
-- Attachment bytes or avatars
-
-### Mitigations
-- **Self-host the connector** (~200 lines, fully stateless) — you become your own tracker.
-- Use **`wss://`** (TLS) — prevents passive eavesdropping on the signaling channel.
-- Route through **Tor or a VPN** to decouple your IP from your pubkey at the connector.
+Attachments opened via the "Open" button land **decrypted in the system temp directory** and stay there.
 
 ---
 
-## ⚖️ Known Trade-offs & Upgrade Paths
+## 🔒 DPI-Proof Traffic Obfuscation
 
-| Topic | Current state | Upgrade path |
+Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream:
+
+| Detail | Value |
+|---|---|
+| **Key** | 32-byte random, generated by offerer, embedded in Ed25519-signed SDP (`sigPayload.Obf`) |
+| **Wire format** | `nonce(12B) \|\| ChaCha20(len(2B) \|\| plaintext \|\| random_padding(0–64B))` |
+| **Nonce** | 12-byte random per datagram; safe to ~2⁴⁸ packets/key before birthday risk (session rotates every `Connect()`) |
+| **Authentication** | None at this layer (unauthenticated cipher). DTLS underneath authenticates — tampered datagram decrypts to garbage DTLS drops. |
+| **STUN bypass** | Public STUN server endpoints (discovered via `ResolveUDPAddr`) are stored in a bypass set and pass through unobfuscated. |
+| **mDNS** | Disabled (`MulticastDNSModeDisabled`) — no cleartext `.local` multicast alongside obfuscated flow. |
+
+---
+
+## ⚖️ Known Trade-offs
+
+| Area | Current state | Upgrade path |
 |---|---|---|
-| **Forward secrecy** | Sessions have FS (ephemeral DTLS). Chat history does **not** — epoch keys are retained so new members can read history (intentional product decision). | Frequent `/rekey` narrows the window. Double Ratchet (1:1 chats) is the natural upgrade. |
-| **Offline delivery** | None — P2P by definition; no server means no mailbox. | Sealed-sender store-and-forward relay (opt-in). |
-| **Connector metadata** | Connector sees the connection graph (like a torrent tracker). | Self-host + Tor/VPN (see above). |
-| **Mesh voice/video** | Each participant sees all other streams (mesh). | SFU for large groups. |
-| **Traffic analysis** | Packet size and timing can leak activity to a network observer. | DTLS-level padding (variable-length records). |
+| **Forward secrecy** | Sessions: yes (ephemeral DTLS). Chat history: no — epoch keys retained so new members can read history. Intentional product decision. | Frequent `/rekey` narrows the window. Double Ratchet for 1:1 chats. |
+| **Offline delivery** | None — P2P means no mailbox. | Opt-in sealed-sender store-and-forward relay. |
+| **Connector metadata** | Sees connection graph (like a torrent tracker). | Self-host + Tor/VPN + Cebulion mesh. |
+| **Mesh calls** | Each participant sees all streams (full mesh). | SFU relay for larger groups. |
+| **Traffic analysis** | Packet size/timing can reveal activity. | DTLS-level variable padding (Cebulion already adds 0–64B random pad per datagram). |
+| **Orphan flooding** | Capped at 5000 total orphaned events across all chats. | Per-peer rate limiting. |
+| **Blob assembly memory** | Capped at 64 MiB total across all concurrent transfers. | Disk-backed assembly for large files. |
