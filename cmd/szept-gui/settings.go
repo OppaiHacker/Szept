@@ -1,7 +1,8 @@
 package main
 
-// Ustawienia: strony sekcji z zakładki „Ty” (rebuildMe w profile.go).
-// Każda sekcja to osobna strona (mobile) / dialog (desktop) przez u.page().
+// Ustawienia: strony sekcji z listy ustawień (rebuildMe w profile.go).
+// Każda sekcja idzie przez u.page(): mobile — osobna strona, desktop —
+// prawa część widoku ustawień (openSettings), a poza nim dialog.
 
 import (
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -23,6 +25,39 @@ import (
 	"szept/internal/boot"
 	"szept/internal/core"
 )
+
+// ---- widok ustawień (desktop) ----
+
+// openSettings: ustawienia jako osobny widok na całe okno — lista sekcji
+// z boku, treść sekcji obok. Sekcje w dialogach dusiły się w małym
+// okienku, a formularze (connectory, boty) nie mieściły się na ekranie.
+func (u *ui) openSettings() {
+	u.setPane = container.NewStack()
+	list := u.mePage() // tworzy u.meBox
+	u.rebuildMe()
+	u.settingsHome()
+	split := container.NewHSplit(list,
+		container.NewStack(canvas.NewRectangle(cBg), u.setPane))
+	split.SetOffset(0.28)
+	u.w.SetContent(container.NewBorder(
+		u.appBar("Ustawienia", u.closeSettings), nil, nil, nil, split))
+}
+
+func (u *ui) closeSettings() {
+	u.setPane = nil
+	u.meBox = nil // lista żyje tylko w tym widoku
+	u.w.SetContent(u.mainRoot)
+	u.refresh()
+}
+
+// settingsHome: pusta prawa strona, zanim wybierzesz sekcję.
+func (u *ui) settingsHome() {
+	u.setPane.Objects = []fyne.CanvasObject{container.NewCenter(container.NewVBox(
+		container.NewCenter(widget.NewIcon(theme.SettingsIcon())),
+		container.NewCenter(mutedText("Wybierz sekcję z lewej", 13)),
+	))}
+	u.setPane.Refresh()
+}
 
 // saveCfg: jeden punkt zapisu config.json z komunikatem błędu.
 func (u *ui) saveCfg() {
@@ -91,10 +126,10 @@ func (u *ui) backupPage() {
 					u.fail(err)
 					return
 				}
-				u.cfg.Profile = name
-				u.saveCfg()
-				u.info("Przywrócono", "Kopia wgrana jako konto „"+name+"”. "+
-					"Uruchom aplikację ponownie, żeby się na nie przełączyć.")
+				u.confirm("Kopia wgrana jako konto „"+name+"”. Przełączyć się "+
+					"na nie teraz? Aplikacja uruchomi się od nowa.", func() {
+					u.switchProfile(name)
+				})
 			}, u.w)
 			u.showFileDlg(fd)
 		})
@@ -350,6 +385,87 @@ func (u *ui) passPage() {
 
 var profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
+// profileLabel: pusta nazwa profilu to katalog domyślny.
+func profileLabel(name string) string {
+	if name == "" {
+		return "domyślne"
+	}
+	return name
+}
+
+// switchProfile: zapisuje wybór konta i wchodzi w nie. Na ekranie logowania
+// wystarczy przejść ścieżkę login() jeszcze raz, w działającej aplikacji
+// startujemy proces od nowa.
+//
+// ponytail: restart zamiast wymiany żywego core — zamknięcie bazy, connectora
+// i rozmów w locie zostawia goroutine z Start() dobijające się do zamkniętej
+// bazy. Gdyby przełączanie miało być bezszwowe, trzeba najpierw dać Core
+// prawdziwe zamknięcie (kontekst + WaitGroup w Start).
+func (u *ui) switchProfile(name string) {
+	u.cfg.Profile = name
+	u.saveCfg()
+	if u.c == nil { // ekran logowania — nic jeszcze nie otwarte
+		u.login()
+		return
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		u.c.StopWebhook() // port wolny, zanim nowy proces spróbuje go zająć
+		err = exec.Command(exe, os.Args[1:]...).Start()
+	}
+	if err != nil {
+		u.info("Konto", "Zapisane. Uruchom aplikację ponownie.")
+		return
+	}
+	u.a.Quit()
+}
+
+// newProfile: nazwa nowego konta. Katalog powstaje dopiero przy zakładaniu
+// tożsamości (boot.CreateIdentity), więc pusty profil nigdzie nie zostaje.
+func (u *ui) newProfile(after func(name string)) {
+	e := widget.NewEntry()
+	e.PlaceHolder = "np. praca"
+	dialog.NewForm("Nowe konto", "Utwórz i przełącz", "Anuluj",
+		[]*widget.FormItem{widget.NewFormItem("Nazwa", e)},
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			name := strings.TrimSpace(e.Text)
+			if !profileName.MatchString(name) {
+				u.fail(fmt.Errorf("nazwa: małe litery, cyfry i myślniki (max 32)"))
+				return
+			}
+			after(name)
+		}, u.w).Show()
+}
+
+// profileBar: wybór konta na ekranie logowania. Bez niego jedyne wejście
+// w inne konto prowadziło przez ustawienia — czyli przez zalogowanie się
+// do tego, którego akurat nie chcesz.
+func (u *ui) profileBar() fyne.CanvasObject {
+	if u.mobile || u.dataFlag != "" {
+		return vspace(0)
+	}
+	names := map[string]string{} // etykieta -> nazwa profilu
+	var opts []string
+	for _, p := range boot.Profiles() {
+		names[profileLabel(p)] = p
+		opts = append(opts, profileLabel(p))
+	}
+	sel := widget.NewSelect(opts, func(l string) {
+		if names[l] != u.cfg.Profile {
+			u.switchProfile(names[l])
+		}
+	})
+	sel.Selected = profileLabel(u.cfg.Profile)
+	add := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+		u.newProfile(u.switchProfile)
+	})
+	return container.NewVBox(vspace(8), container.NewBorder(nil, nil,
+		vcenter(mutedText("Konto", 12)), add, sel))
+}
+
 func (u *ui) accountsPage() {
 	if u.mobile {
 		u.page("Konta", container.NewVBox(card(mutedWrap(
@@ -357,18 +473,22 @@ func (u *ui) accountsPage() {
 				"Android trzyma dane w piaskownicy aplikacji."))))
 		return
 	}
+	if u.dataFlag != "" {
+		// z -data wybór konta byłby po cichu ignorowany przy starcie
+		u.page("Konta", container.NewVBox(card(mutedWrap(
+			"Aplikacja działa na katalogu z -data "+u.dataFlag+" — konta z tego "+
+				"ekranu obowiązują dopiero po starcie bez tego przełącznika."))))
+		return
+	}
 	reopen := func() { u.popPage(); u.accountsPage() }
 	rows := container.NewVBox(
 		mutedWrap("Każde konto to osobna baza danych i tożsamość. "+
-			"Przełączenie działa po ponownym uruchomieniu aplikacji."),
+			"Przełączenie uruchamia aplikację od nowa na wybranym koncie."),
 		section("KONTA NA TYM URZĄDZENIU"),
 	)
 	for _, p := range boot.Profiles() {
 		p := p
-		name := p
-		if name == "" {
-			name = "domyślne"
-		}
+		name := profileLabel(p)
 		desc := ""
 		if p == u.cfg.Profile {
 			desc = "aktywne"
@@ -377,10 +497,8 @@ func (u *ui) accountsPage() {
 			if p == u.cfg.Profile {
 				return
 			}
-			u.confirm("Przełączyć na konto „"+name+"”? Zmiana zadziała po restarcie.", func() {
-				u.cfg.Profile = p
-				u.saveCfg()
-				u.info("Konto", "Zapisane. Uruchom aplikację ponownie.")
+			u.confirm("Przełączyć na konto „"+name+"”? Aplikacja uruchomi się od nowa.", func() {
+				u.switchProfile(p)
 			})
 		})
 		if p != "" && p != u.cfg.Profile {
@@ -399,21 +517,12 @@ func (u *ui) accountsPage() {
 		}
 		rows.Add(row)
 	}
-	newName := widget.NewEntry()
-	newName.PlaceHolder = "np. praca"
 	rows.Add(section("NOWE KONTO"))
-	rows.Add(newName)
-	rows.Add(bigButton("Utwórz i przełącz po restarcie", theme.ContentAddIcon(), func() {
-		name := strings.TrimSpace(newName.Text)
-		if !profileName.MatchString(name) {
-			u.fail(fmt.Errorf("nazwa: małe litery, cyfry i myślniki (max 32)"))
-			return
-		}
-		u.cfg.Profile = name
-		u.saveCfg()
-		u.info("Konto", "Zapisane. Po restarcie aplikacja poprowadzi cię przez "+
-			"założenie nowej tożsamości dla „"+name+"”.")
+	rows.Add(bigButton("Nowe konto…", theme.ContentAddIcon(), func() {
+		u.newProfile(u.switchProfile)
 	}))
+	rows.Add(mutedWrap("Aplikacja wystartuje od nowa i poprowadzi cię przez założenie " +
+		"tożsamości dla nowego konta — connector podpowie się z obecnego."))
 	u.page("Konta", rows)
 }
 

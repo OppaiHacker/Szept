@@ -102,7 +102,7 @@ func TestSeedDevice(t *testing.T) {
 	fs, _ := a.St.Friends()
 	var bf = fs[0]
 	for _, f := range fs {
-		if f.Name == "bartek" {
+		if bytes.Equal(f.Pub, b.ID.Pub) {
 			bf = f
 		}
 	}

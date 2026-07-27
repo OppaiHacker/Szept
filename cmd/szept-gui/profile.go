@@ -1,6 +1,6 @@
 package main
 
-// Profiles and settings: "You" tab (own profile + settings), profile
+// Profiles and settings: settings list (own profile + settings), profile
 // of friend/chat member, friend list, QR codes. On mobile all these are
 // full-screen pages (nav.go), on desktop the same content in dialogs.
 
@@ -21,14 +21,16 @@ import (
 	"szept/internal/store"
 )
 
-// ---- "You" tab ----
+// ---- settings list ----
 
+// mePage: profile header + settings sections. Mobile: "Ustawienia" tab.
+// Desktop: sidebar of the settings view (openSettings in settings.go).
 func (u *ui) mePage() fyne.CanvasObject {
 	u.meBox = container.NewVBox()
 	return vscroll(u.meBox)
 }
 
-// rebuildMe: redraws tab on name, avatar, or connector change.
+// rebuildMe: redraws the list on name, avatar, or connector change.
 func (u *ui) rebuildMe() {
 	if u.meBox == nil {
 		return
@@ -97,10 +99,39 @@ func (u *ui) nickPage() {
 		u.toast("Nazwa zmieniona")
 	}
 	e.OnSubmitted = func(string) { save() }
-	u.page("Nazwa", container.NewVBox(e,
+	body := container.NewVBox(e,
 		bigButton("Zapisz", theme.ConfirmIcon(), save),
 		mutedWrap("Nowa nazwa rozejdzie się do wszystkich twoich czatów jako podpisane "+
-			"zdarzenie — zobaczą ją też ci, którzy są teraz offline.")))
+			"zdarzenie — zobaczą ją też ci, którzy są teraz offline. Poprzednie nazwy "+
+			"zostają w historii czatu i widzi je każdy jego członek."))
+	if box := u.nickHistoryBox(u.c.ID.Pub); box != nil {
+		body.Add(box)
+	}
+	u.page("Nazwa", body)
+}
+
+// nickHistoryBox: names a person announced, newest first. Returns nil when
+// there is nothing to show (never renamed, or no shared history yet).
+func (u *ui) nickHistoryBox(pub []byte) fyne.CanvasObject {
+	hist := u.c.NickHistory(pub)
+	if len(hist) < 2 {
+		return nil // only the current name — no story to tell
+	}
+	rows := container.NewVBox()
+	for i := len(hist) - 1; i >= 0; i-- {
+		h := hist[i]
+		tag := "wcześniej"
+		if i == len(hist)-1 {
+			tag = "teraz"
+		}
+		rows.Add(container.NewBorder(nil, nil, nil,
+			container.NewCenter(mutedText(h.TS.Format("02.01.2006"), 11)),
+			widget.NewLabel(h.Name+" · "+tag)))
+	}
+	return container.NewVBox(section("HISTORIA NAZW"),
+		container.NewPadded(card(rows)),
+		mutedWrap("Nazwy są częścią podpisanej historii czatu — tej listy nie da się "+
+			"po cichu zmienić i widzi ją każdy członek."))
 }
 
 func (u *ui) connState() string {
@@ -167,6 +198,9 @@ func (u *ui) profilePage(pub []byte, name string, canKick bool, ch *core.ChatInf
 		}), fp)))
 	rows.Add(mutedWrap("Porównajcie odcisk innym kanałem — jeśli się zgadza, " +
 		"rozmawiacie z właściwą osobą."))
+	if box := u.nickHistoryBox(pub); box != nil {
+		rows.Add(box)
+	}
 
 	if !me {
 		rows.Add(section("AKCJE"))
@@ -297,7 +331,8 @@ func (u *ui) codePage() {
 	u.page("Kody znajomych", container.NewVBox(
 		widget.NewLabelWithStyle("Twój kod", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		mutedWrap("Bezterminowy. Druga osoba może zeskanować QR aparatem telefonu, "+
-			"skopiować kod i wrócić do szeptu — powitamy ją paskiem „wykryto kod”."),
+			"skopiować kod i wrócić do szeptu — powitamy ją paskiem „wykryto kod”. "+
+			"W kodzie nie ma twojej nazwy — ta dojdzie dopiero po połączeniu."),
 		u.codeBox(u.c.FriendCode()),
 		vspace(10),
 		widget.NewSeparator(),

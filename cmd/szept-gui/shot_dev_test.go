@@ -127,6 +127,8 @@ func TestShotsDesktop(t *testing.T) {
 
 	// każda strona ustawień choć raz narysowana — sam zrzut jest testem, bo
 	// ujemny rozmiar w układzie wywraca painter
+	u.openSettings()
+	shot("19-ustawienia")
 	for _, s := range []struct {
 		name string
 		open func()
@@ -143,8 +145,15 @@ func TestShotsDesktop(t *testing.T) {
 	} {
 		s.open()
 		shot(s.name)
-		u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
 	}
+	u.closeSettings()
+
+	// ekrany startowe stoją poza normalnym przepływem aplikacji, więc ich
+	// układ psuje się niezauważony — zrzut jest tu całym testem
+	u.setupScreen()
+	shot("29-pierwsze-uruchomienie")
+	u.passScreen(u.cfg.DataDir)
+	shot("30-logowanie")
 }
 
 func shotSetup(t *testing.T, mobile bool, size fyne.Size) (*ui, func(string), func()) {

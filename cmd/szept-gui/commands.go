@@ -276,13 +276,13 @@ func (u *ui) cmdLang(arg string) {
 
 func (u *ui) cmdSendFile(*core.ChatInfo, string) { u.attachPage() }
 
-// cmdMe: profile and settings — on mobile it's a tab, on desktop a page.
+// cmdMe: profile and settings — on mobile a tab, on desktop the settings view.
 func (u *ui) cmdMe(string) {
 	if u.mobile {
 		u.selectTab(2)
 		return
 	}
-	u.nav.SelectIndex(2)
+	u.openSettings()
 }
 
 func (u *ui) cmdConnector(arg string) {
