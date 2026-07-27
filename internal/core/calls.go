@@ -20,6 +20,7 @@ type Call struct {
 	Chat    []byte
 	Joined  bool
 	Mic     bool
+	Deaf    bool // wyciszone całe wyjście rozmowy
 	Cam     bool
 	Screen  bool
 	Members map[string]bool // remote pubs who announced "join"
@@ -128,8 +129,12 @@ func (c *Core) JoinCall(chat []byte) error {
 	if err != nil {
 		log.Printf("call: player: %v", err)
 	} else {
+		if v := c.Cfg.OutputVol; v > 0 {
+			player.SetMaster(float32(v))
+		}
 		c.mu.Lock()
 		c.voiceOut = player.Push
+		c.player = player
 		c.mu.Unlock()
 	}
 	var seq uint32
@@ -185,6 +190,7 @@ func (c *Core) LeaveCall(chat []byte) {
 	sv, sc, ss := c.stopVoice, c.stopCam, c.stopScreen
 	c.stopVoice, c.stopCam, c.stopScreen = nil, nil, nil
 	c.voiceOut = nil
+	c.player = nil
 	c.mu.Unlock()
 	for _, f := range []func(){sv, sc, ss} {
 		if f != nil {
@@ -221,6 +227,56 @@ func (c *Core) ToggleMic(chat []byte) {
 	}
 	c.mu.Unlock()
 	c.Notify()
+}
+
+// ToggleDeafen wycisza/przywraca całe wyjście rozmowy. Ustawienie głośności
+// zostaje nietknięte.
+func (c *Core) ToggleDeafen(chat []byte) {
+	c.mu.Lock()
+	call := c.calls[string(chat)]
+	var p *media.Player
+	if call != nil {
+		call.Deaf = !call.Deaf
+		p = c.player
+	}
+	deaf := call != nil && call.Deaf
+	c.mu.Unlock()
+	if p != nil {
+		p.SetDeafen(deaf)
+	}
+	c.Notify()
+}
+
+// SetVoiceLevel: przestrzenne ustawienie jednego rozmówcy (scena 3D w GUI).
+func (c *Core) SetVoiceLevel(pub []byte, gain, pan float32) {
+	c.mu.Lock()
+	p := c.player
+	c.mu.Unlock()
+	if p != nil {
+		p.SetSource(string(pub), gain, pan)
+	}
+}
+
+// MuteVoicePeer wycisza jednego rozmówcę lokalnie.
+func (c *Core) MuteVoicePeer(pub []byte, mute bool) {
+	c.mu.Lock()
+	p := c.player
+	c.mu.Unlock()
+	if p != nil {
+		p.MuteSource(string(pub), mute)
+	}
+}
+
+// SetOutputVolume: głośność rozmów 0..2, zapamiętywana w Cfg (zapis pliku
+// konfiguracji robi UI).
+func (c *Core) SetOutputVolume(vol float64) {
+	c.mu.Lock()
+	c.Cfg.OutputVol = vol
+	p := c.player
+	c.mu.Unlock()
+	if p != nil {
+		p.SetMaster(float32(vol))
+	}
 }
 
 // startVideoSource wires a JPEG-producing source into the mesh.

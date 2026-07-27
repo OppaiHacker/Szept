@@ -26,7 +26,7 @@ func TestMatchCommands(t *testing.T) {
 		{"hej", desktop, 0},
 		{"/nowy grupa", desktop, 0}, // suggestions disappear after space
 		{"/", desktop, len(commands)},
-		{"/", phone, len(commands) - 2}, // /cam and /ekran have no source on Android
+		{"/", phone, len(commands) - 3}, // /cam, /ekran and /screen have no source on Android
 		{"/wyczysc", desktop, 1},
 		{"/WYCZ", desktop, 1}, // case insensitive
 		{"/zzz", desktop, 0},

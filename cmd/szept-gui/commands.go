@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 	"time"
@@ -261,7 +262,7 @@ func (u *ui) cmdScreen(ch *core.ChatInfo, _ string) {
 	}
 }
 
-func (u *ui) cmdLang(_ string, arg string) {
+func (u *ui) cmdLang(arg string) {
 	if arg == "" {
 		u.sysInfo("Język / Language", "Aktualny / Current: "+u.c.Lang()+"\nZmiana / Change: /lang pl lub /lang en")
 		return

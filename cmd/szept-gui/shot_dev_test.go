@@ -50,6 +50,45 @@ func TestShots(t *testing.T) {
 	shot("04-znajomi")
 	u.selectTab(2)
 	shot("05-ty")
+
+	// panel rozmowy + scena 3D (dołączenie bez peerów: brak urządzeń audio
+	// tylko loguje błąd, stan Joined i tak się ustawia)
+	if len(u.rows) > 0 {
+		u.selectTab(0)
+		u.sel = 0
+		u.openConv()
+		ch := u.cur()
+		if err := u.c.JoinCall(ch.ID); err == nil {
+			u.refresh()
+			shot("06-panel-rozmowy")
+			u.spatialPage()
+			shot("07-scena-3d-pusta")
+			// pionki innych: prawdziwe dołączenie wymaga drugiego procesu,
+			// więc do zrzutu wstawiamy je wprost na scenę
+			for i, n := range []string{"bob", "kasia-z-drugiej-klatki", "michał", "zosia"} {
+				pub := []byte{byte(i + 7), byte(i)}
+				tok := newToken(u.sp, pub, n, false)
+				u.sp.arrangeOne(tok, i, 4)
+				u.sp.gains[string(pub)] = 1
+				u.sp.toks[string(pub)] = tok
+			}
+			u.sp.panelHint = mutedWrap(u.sp.hintText())
+			u.sp.selectTok(nil)
+			for _, tok := range u.sp.toks {
+				u.sp.applyAudio(tok)
+			}
+			u.sp.Refresh()
+			shot("07-scena-3d")
+			for _, tok := range u.sp.toks {
+				if tok.name == "michał" {
+					u.sp.selectTok(tok)
+				}
+			}
+			shot("08-scena-3d-wybrana-osoba")
+			u.popPage()
+			u.c.LeaveCall(ch.ID)
+		}
+	}
 }
 
 // Desktop shares all building blocks with mobile, so a layout tweak on mobile
@@ -62,6 +101,15 @@ func TestShotsDesktop(t *testing.T) {
 		u.refresh()
 	}
 	shot("10-pulpit")
+
+	if ch := u.cur(); ch != nil {
+		if err := u.c.JoinCall(ch.ID); err == nil {
+			u.refresh()
+			shot("14-pulpit-panel-rozmowy")
+			u.c.LeaveCall(ch.ID)
+			u.refresh()
+		}
+	}
 
 	u.confirm("Usunąć kasia-z-drugiej-klatki z czatu i zrotować klucz?", func() {})
 	shot("11-potwierdzenie")
@@ -76,6 +124,27 @@ func TestShotsDesktop(t *testing.T) {
 		bigButton("Kopiuj", theme.ContentCopyIcon(), nil)))
 	shot("13-strona")
 	u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
+
+	// każda strona ustawień choć raz narysowana — sam zrzut jest testem, bo
+	// ujemny rozmiar w układzie wywraca painter
+	for _, s := range []struct {
+		name string
+		open func()
+	}{
+		{"20-backup", u.backupPage},
+		{"21-connectory", u.connectorsPage},
+		{"22-glos", u.voicePage},
+		{"23-hasla", u.passPage},
+		{"24-konta", u.accountsPage},
+		{"25-system", u.systemPage},
+		{"26-wyglad", u.appearancePage},
+		{"27-boty", u.botsPage},
+		{"28-wkrotce", u.comingSoonPage("Pluginy", "Rozszerzenia pisane przez społeczność.")},
+	} {
+		s.open()
+		shot(s.name)
+		u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
+	}
 }
 
 func shotSetup(t *testing.T, mobile bool, size fyne.Size) (*ui, func(string), func()) {

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -100,6 +101,15 @@ func Open(path string, storageKey []byte) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Snapshot writes a consistent copy of the open database (a bbolt read
+// transaction) — the basis of a working backup without closing the app.
+func (s *Store) Snapshot(w io.Writer) error {
+	return s.db.View(func(tx *bolt.Tx) error {
+		_, err := tx.WriteTo(w)
+		return err
+	})
+}
 
 // ad binds a value to its location in DB (bucket + keys). Without this, possessing
 // the DB file allows swapping encrypted values between records — replacing
