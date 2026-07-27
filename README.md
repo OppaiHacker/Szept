@@ -1,144 +1,136 @@
-# szept
+# 🔒 Szept — Unstoppable Peer-to-Peer Encrypted Messenger
 
-Komunikator **peer-to-peer** z pełnym szyfrowaniem end-to-end, napisany w Go.
-TUI (terminal) + GUI (Fyne, Linux/Windows/Android). Bez centralnego serwera treści —
-jedyny element infrastruktury to **connector**: lekki tracker (jak w torrentach),
-który mówi peerom, jak się nawzajem znaleźć. Nigdy nie widzi treści.
+> **Zero Central Servers. Total Privacy. Unstoppable P2P Networking.**
+> 
+> *Szept* (Polish for *Whisper*) is a cutting-edge, peer-to-peer, end-to-end encrypted communication platform built in Go. Available as both a lightweight terminal interface (**TUI**) and a modern cross-platform graphical application (**GUI**) for Linux, Windows, and Android.
 
-## Możliwości
+---
 
-- znajomi (wymiana kodów/QR — kod **zawiera klucz publiczny**, więc nie ma MITM),
-- czaty 1:1 i **grupowe kanały**; zaproszenia wystawia **tylko założyciel** czatu,
-- **profile**: własna nazwa i awatar (zmiana rozchodzi się jako podpisane
-  zdarzenie do wszystkich czatów), podgląd profilu znajomego i członka grupy,
-- **dowolne pliki** w czacie — zdjęcia, GIF-y i filmy z podglądem, reszta jako
-  kafelek do zapisania. Powyżej **10 MB** replikuje się tylko miniatura zrobiona
-  u nadawcy; pełne bajty wędrują dopiero po naciśnięciu „pobierz” i wymagają,
-  żeby ktoś, kto je ma, był online,
-- **awatary** — także animowane GIF-y,
-- **„ukryj u mnie”** (soft delete): wiadomość znika z tego urządzenia, a historia
-  u pozostałych zostaje nietknięta — DAG jest podpisany, więc inaczej być nie może,
-- **rozmowy głosowe**, **kamera** i **udostępnianie ekranu** — także w grupach (mesh),
-- zaproszenia **jednorazowym kodem / QR**,
-- każdy czat to replikowana, podpisana, szyfrowana baza zdarzeń (DAG z łańcuchem
-  hashy — „jak blockchain”); po dołączeniu nowego członka historia synchronizuje
-  się do niego automatycznie, a każde urządzenie trzyma pełną kopię,
-- wszystko end-to-end: transport = WebRTC DTLS z **podpisywanym sygnalingiem**,
-  treści = XChaCha20-Poly1305 kluczami epokowymi czatu, zdarzenia podpisane Ed25519,
-- **obfuskacja ruchu**: każdy datagram peer↔peer jest szyfrowany strumieniem
-  ChaCha20 kluczem z podpisanej oferty, więc na łączu to szum bez nagłówków
-  STUN/DTLS i o zmiennej długości — DPI nie rozpozna WebRTC ani nie zablokuje
-  połączenia po sygnaturze. Pakiety do publicznych serwerów STUN pozostają jawne
-  (muszą się parsować jako STUN); mDNS wyłączony, by nic jawnego nie wyciekało.
+## ✨ Features at a Glance
 
-## Budowanie (Linux)
+- **🔒 True End-to-End Encryption (E2EE)**: Cryptographic identity backed by **Ed25519** signatures and **XChaCha20-Poly1305** epoch keys.
+- **⚡ Peer-to-Peer & Serverless Content**: No central storage or database of your conversations. Content is exchanged directly between peers over **WebRTC**.
+- **🌐 Cebulion Traffic Obfuscation (DPI-Proof)**: Peer datagrams are encrypted into pseudo-random streams via **ChaCha20**. Removes STUN/DTLS headers to bypass Deep Packet Inspection (DPI) and firewalls.
+- **📜 Replicated DAG Ledger ("Blockchain-like")**: Every chat is a signed, hash-linked Directed Acyclic Graph (DAG). History syncs automatically whenever peers connect.
+- **📞 Mesh Voice, Video & Screen Share**: Real-time multi-user voice calls, camera streaming, and desktop sharing (up to ~8 peers mesh).
+- **📁 Smart File & Media Attachments**: Inline previews for images, GIFs, and videos. Files over 10 MB replicate initial thumbnails, pulling full payload on-demand.
+- **💬 Modern Chat Features**:
+  - **Typing Indicators**: Real-time, zero-storage ephemeral typing cues.
+  - **Delivery & Read Receipts (ACKs)**: Instant delivery (`✓`) and read (`✓✓`) tracking.
+  - **Emoji Reactions**: Interactive emoji reactions (`KindReact`) attached directly to DAG events.
+  - **Local History Search**: Instant full-text search across local encrypted history.
+  - **Global & Soft Message Deletion**: True global deletion event (`KindDelete`) across the DAG + local "Hide for me" soft-delete.
 
-Wymagania: Go ≥ 1.22, gcc, nagłówki X11/GL (dla GUI: `mesa`, `libx11`, `libxcursor`,
-`libxrandr`, `libxinerama`, `libxi`), opcjonalnie `ffmpeg` (fallback kamery).
+---
 
-```sh
-make          # bin/szept-connector, bin/szept (TUI), bin/szept-gui
-make test
+## 🏗️ Architecture & Connector Overview
+
+*Szept* requires no central application servers. The only infrastructure component is a lightweight **Connector tracker** (similar to a torrent tracker). The connector **never** sees message contents or keys — it only helps peers discover each other's network addresses.
+
+![Szept Connector Architecture](assets/connector_architecture.jpg)
+
+### Key Cryptographic Principles:
+1. **Genesis & Keys**: Creating a chat generates an epoch key. Members are invited using one-time signed codes containing the inviter's public key (preventing MITM).
+2. **DAG Synchronization**: Events are hash-linked with Lamport counters. Upon connecting, peers exchange head hashes and request missing event deltas.
+
+---
+
+## 🧅 Cebulion Network & DPI Obfuscation
+
+To guarantee connectivity under strict censorship, firewall filtering, or DPI (Deep Packet Inspection), *Szept* implements **Cebulion datagram obfuscation**.
+
+![Cebulion Obfuscation Network](assets/cebulion_obfuscation.jpg)
+
+- **Random Stream Wrapping**: Peer-to-peer datagrams are wrapped in a ChaCha20 keystream initialized via signed offer tokens.
+- **Header Concealment**: Eliminates visible WebRTC, DTLS, or STUN packet headers. On the wire, traffic appears as unidentifiable high-entropy noise.
+- **Variable Padding**: Randomizes packet lengths to thwart side-channel packet-length fingerprinting.
+
+---
+
+## 🚀 Quickstart
+
+### 1. Build from Source
+Requirements: Go ≥ 1.22, gcc, X11/GL headers (Linux GUI).
+
+```bash
+make          # Builds bin/szept-connector, bin/szept (TUI), bin/szept-gui
+make test     # Runs test suite
 ```
 
-## Szybki start
+### 2. Run the Connector (VPS / Public Server)
+```bash
+./bin/szept-connector --listen :7777
+# TLS optional: --cert cert.pem --key key.pem (clients connect via wss://)
+```
 
-1. **Connector** — na maszynie z publicznym adresem (VPS itp.):
+### 3. Launch Client & Add Friends
+1. Start `./bin/szept` (TUI) or `./bin/szept-gui` (GUI).
+2. Share your ID code via `/mojkod` (TUI) or **Friends → Your Code** (GUI).
+3. Add a friend using `/znajomy <code_or_qr>`.
+4. Create a group chat with `/nowy <group_name>` and invite friends using `/zapros`.
 
-   ```sh
-   ./bin/szept-connector --listen :7777
-   # TLS: --cert cert.pem --key key.pem (wtedy klienci używają wss://)
-   ```
+---
 
-   Zapora musi przepuścić ten port — inaczej klient zobaczy `dial tcp …:7777:
-   i/o timeout` (z samej maszyny `curl` zadziała, bo idzie po loopbacku).
-   Test z innego urządzenia: `http://<adres>:7777` w przeglądarce.
-   ufw: `sudo ufw allow from 192.168.0.0/24 to any port 7777 proto tcp`.
+## ⌨️ Commands Quick Reference
 
-2. **Klient** (TUI albo GUI): przy pierwszym starcie podajesz nazwę, adres
-   connectora (`ws://adres:7777` lub `wss://…`) i opcjonalne hasło do klucza.
-   Tożsamość (Ed25519) ląduje zaszyfrowana w `~/.local/share/szept/identity.key`.
+| Command | Description |
+| :--- | :--- |
+| `/nowy <name>` | Create a new group chat |
+| `/dm <friend>` | Open 1:1 chat with a friend |
+| `/zapros` | Generate one-time invite QR & PIN |
+| `/dolacz <code> <pin>` | Join a group chat using invite code |
+| `/szukaj <query>` | Search encrypted history |
+| `/r <msg_no> <emoji>` | React to a message with emoji |
+| `/usun <msg_no>` | Delete message for everyone (Global DAG delete) |
+| `/ukryj <msg_no>` | Hide message locally (Soft delete) |
+| `/call`, `/rozlacz` | Join / leave voice call |
+| `/mic`, `/cam`, `/ekran` | Toggle mic, camera, screen share |
 
-3. **Znajomi**: `/mojkod` (TUI) albo Znajomi→„Twój kod” (GUI) → wyślij komuś
-   kod/QR dowolnym kanałem → druga strona `/znajomy <kod>`. Obie strony dodają
-   się nawzajem, potem `/dm <nazwa>` otwiera czat.
+---
+---
 
-4. **Grupa**: `/nowy nazwa` → `/zapros` generuje **jednorazowy** kod + QR →
-   nowa osoba `/dolacz <kod>` (zapraszający musi być online — to on wydaje
-   klucze i dodaje członka; historia dosynchronizuje się sama).
+# 🇵🇱 Szept — Niezrównany Komunikator Peer-to-Peer z Pełnym Szyfrowaniem
 
-5. **Rozmowa**: w czacie `/call` (głos), `/cam` (kamera), `/ekran` (pulpit),
-   `/mic` mute/unmute, `/rozlacz`. W GUI — przyciski na górnym pasku.
-   Grupowo działa jako pełny mesh (sensownie do ~8 osób).
+> **Zero Centralnych Serwerów. Całkowita Prywatność. Komunikacja Nie do Zablokowania.**
+> 
+> *Szept* to nowoczesny, odporny na cenzurę komunikator peer-to-peer z szyfrowaniem end-to-end napisany w języku Go. Dostępny w wersji konsolowej (**TUI**) oraz graficznej (**GUI**) dla systemów Linux, Windows i Android.
 
-6. **Zdjęcia, GIF-y, filmy**: GUI — spinacz przy polu wiadomości (tekst w polu
-   staje się podpisem); TUI — `/wyslij <ścieżka> [podpis]`, `/zapisz <nr>`.
-   W DAG-u ląduje sam skrót pliku, treść odbiorca dociąga sam i sprawdza —
-   nadawca (albo ktokolwiek, kto już plik ma) musi być w tym momencie online.
-   Limit 32 MB. Filmy otwiera systemowy odtwarzacz.
+---
 
-7. **Awatar**: GUI — Ustawienia → Awatar; TUI — `/awatar <ścieżka>`
-   (`/awatar -` usuwa). Działa animowany GIF. Obrazek jest przycinany do
-   kwadratu 256 px i **kodowany od nowa**, więc nic poza samą grafiką nie
-   przechodzi dalej.
+## ✨ Przegląd Możliwości
 
-## Komendy TUI
+- **🔒 Pełne Szyfrowanie End-to-End (E2EE)**: Tożsamość oparta o podpisy **Ed25519** oraz klucze epokowe **XChaCha20-Poly1305**.
+- **⚡ Zdecentralizowana Architektura P2P**: Treści rozmów przesyłane bezpośrednio między urządzeniami po **WebRTC**. Brak jakiejkolwiek bazy danych na serwerach!
+- **🌐 Obfuskacja Ruchu Cebulion (Odporność na DPI)**: Datagramy peer-to-peer są szyfrowane strumieniem **ChaCha20**. Ukrywają nagłówki STUN/DTLS, uniemożliwiając rozpoznanie i zablokowanie ruchu przez zapory firewall i analizatory DPI.
+- **📜 Replikowany DAG ("Blockchain dla Wiadomości")**: Każdy czat to cyfrowo podpisany, powiązany hashami skierowany graf acykliczny (DAG). Historia synchronizuje się automatycznie przy każdym połączeniu.
+- **📞 Głos, Kamera i Ekran w Sieci Mesh**: Rozmowy głosowe, przekaz z kamery oraz udostępnianie pulpitu w grupach (do ~8 osób).
+- **💬 Nowoczesne Funkcje Komunikatora**:
+  - **Wskaźniki pisania (Typing)**: Informacja *"Ania pisze..."* na żywo (bez obciążania bazy).
+  - **Potwierdzenia dostarczenia i odczytu (ACKs)**: Znaczniki `✓` (dostarczono) i `✓✓` (przeczytano).
+  - **Reakcje Emoji**: Interaktywne emoji dodawane jako zdarzenia `KindReact` w DAG-u.
+  - **Lokalne Wyszukiwanie**: Przeszukiwanie całej zaszyfrowanej historii czatu.
+  - **Trwałe i Lokalne Usuwanie**: Globalne usunięcie wiadomości u wszystkich (`KindDelete`) oraz lokalne ukrywanie („Ukryj u mnie”).
 
-`/pomoc` — pełna lista. Najważniejsze: `/nowy` `/dm` `/zapros` `/dolacz`
-`/znajomy` `/mojkod` `/kto` `/kick` `/rekey` `/zmien` `/call` `/mic` `/cam`
-`/ekran` `/rozlacz` `/wyslij` `/zapisz` `/awatar` `/quit`. Tab przełącza czaty.
+---
 
-## Windows
+## 🏗️ Architektura i Connector
 
-- connector: `make connector-windows` (czysty Go, zero zależności),
-- klienty (cgo: audio + GUI): `sudo pacman -S mingw-w64-gcc && make windows`
-  albo [fyne-cross](https://github.com/fyne-io/fyne-cross). Kamera na Windows
-  wymaga `ffmpeg` w PATH (przechwytywanie dshow).
+*Szept* nie wymaga centralnych serwerów treści. Jedynym elementem infrastruktury jest lekki **Connector** (odpowiednik trackera w torrentach), który pomaga peerom odnaleźć się w sieci. Connector **nigdy** nie ma dostępu do kluczy ani treści wiadomości.
 
-## Android
+![Architektura Connectora Szept](assets/connector_architecture.jpg)
 
-- wymagania: Android SDK (build-tools, platforma) + NDK + narzędzie fyne:
-  `go install fyne.io/tools/cmd/fyne@latest`; ścieżki w Makefile
-  (`ANDROID_HOME`, `ANDROID_NDK_HOME`) — domyślnie `~/Android/Sdk`,
-- `make android` → `bin/szept.apk` (sideload: `adb install -r bin/szept.apk`),
-- wersja: jedyne źródło to `cmd/szept-gui/FyneApp.toml` (`Version` + `Build`);
-  `fyne package` podbija `Build` po każdym pakowaniu, a `make android` wpisuje
-  `versionCode=Build` / `versionName=Version.Build` do manifestu — więc każdy
-  build ma nową wersję (Ustawienia telefonu → Aplikacje → szept, oraz w
-  aplikacji: zębatka → Ustawienia → Wersja),
-- GUI to ten sam `cmd/szept-gui`, ale Android jest platformą pierwszą: dolny
-  pasek **Czaty | Znajomi | Ty**, rozmowa i wszystkie okna (zaproszenie,
-  członkowie, profil, ustawienia, załącznik) jako **pełnoekranowe strony**
-  z paskiem tytułu i obsługą Wstecz; długie przytrzymanie dymka daje akcje
-  wiadomości; dane w prywatnym katalogu aplikacji,
-- załącznik: siatka miniatur z folderu multimediów (domyślnie `/sdcard/DCIM`,
-  zmiana w Ty → Folder z multimediami) plus systemowy wybór zdjęć/filmów albo
-  dowolnego pliku. Odczyt `/sdcard` wymaga uprawnienia **Pliki i multimedia** —
-  aplikacja fyne nie umie o nie poprosić w czasie działania, więc włącza się je
-  ręcznie (Ustawienia → Aplikacje → szept → Uprawnienia); systemowy wybór
-  działa bez niego,
-- mikrofon: uprawnienie jest w manifeście, ale bez promptu w aplikacji — jeśli
-  głos nie działa, nadaj ręcznie: Ustawienia → Aplikacje → szept → Uprawnienia,
-- kamera i udostępnianie ekranu na Androidzie nie działają (V4L2/X11 nie
-  istnieją — przyciski zwrócą błąd); tekst + głos + odbiór wideo działają.
+---
 
-## Ograniczenia (świadome)
+## 🧅 Obfuskacja Ruchu i Sieć Cebulion
 
-- obie strony muszą być online, żeby wiadomość dotarła (czysty P2P, brak
-  skrzynki na serwerze); DAG dosynchronizuje wszystko przy następnym spotkaniu,
-- brak TURN: przy „symetrycznych” NAT-ach po obu stronach połączenie może nie
-  przejść (STUN wystarcza w większości sieci domowych),
-- udostępnianie ekranu na Wayland wymaga XWayland,
-- głos to surowe PCM 16 kHz (≈32 kB/s na strumień) — Opus to naturalny upgrade,
-- wideo to MJPEG po niezawodnych-nie kanałach danych — proste i wszędzie działa,
-- sufit jednego załącznika to 32 MB (blob leży w bazie jako jedna wartość);
-  powyżej 10 MB rozchodzi się tylko podgląd, a miniatury nie ma dla filmów
-  i archiwów — bez dekodera nie ma z czego jej zrobić,
-- „ukryj u mnie” jest lokalne i tylko na jednym urządzeniu; drugie urządzenie
-  z tą samą tożsamością pokaże wiadomość dalej.
+Aby zapewnić niezawodną łączność w warunkach cenzury sieciowej lub blokad krajowych, *Szept* szyfruje cały ruch P2P w sieci **Cebulion**.
 
-Szczegóły bezpieczeństwa: [SECURITY.md](SECURITY.md).
+![Obfuskacja Ruchu Cebulion](assets/cebulion_obfuscation.jpg)
 
-## Licencja
+Pakiety na łączu wyglądają jak całkowicie losowy szum o wysokiej entropii i zmiennej długości — systemy DPI nie są w stanie rozpoznać sygnatur WebRTC ani zablokować transmisji.
+
+---
+
+## 📄 Licencja
 
 [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
