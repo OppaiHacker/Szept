@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1376 800" width="1376" height="800"
+     font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="1376" height="800" fill="#161a2b"/>
+
+  <text x="688" y="56" fill="#e9edf5" font-size="30" text-anchor="middle">Local attack surface — what sits on your own machine</text>
+  <text x="688" y="88" fill="#98a2ba" font-size="16" text-anchor="middle">the crypto protects the wire; this side is protected by file permissions and one token</text>
+
+  <!-- machine boundary -->
+  <rect x="40" y="116" width="796" height="620" rx="18" fill="#1a1f30" stroke="#3a4058" stroke-dasharray="6 5"/>
+  <text x="68" y="152" fill="#a48cd8" font-size="19">Your machine</text>
+
+  <rect x="64" y="172" width="748" height="76" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="64" y="172" width="6" height="76" rx="3" fill="#a48cd8"/>
+  <text x="92" y="204" fill="#e9edf5" font-size="17">identity.key — mode 0600</text>
+  <text x="92" y="230" fill="#98a2ba" font-size="15">argon2id (3 iter · 64 MiB · 2 threads) + XChaCha20-Poly1305 — only if you set a passphrase</text>
+
+  <rect x="64" y="262" width="748" height="76" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="64" y="262" width="6" height="76" rx="3" fill="#67b3a3"/>
+  <text x="92" y="294" fill="#e9edf5" font-size="17">szept.db — every record encrypted</text>
+  <text x="92" y="320" fill="#98a2ba" font-size="15">storage key = HKDF-SHA256(identity seed) — derived, never written to disk</text>
+
+  <rect x="64" y="352" width="748" height="76" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="64" y="352" width="6" height="76" rx="3" fill="#e0b060"/>
+  <text x="92" y="384" fill="#e9edf5" font-size="17">config.json — mode 0600, plaintext</text>
+  <text x="92" y="410" fill="#e0b060" font-size="15">holds the connector list, UI preferences and the webhook token in the clear</text>
+
+  <rect x="64" y="442" width="748" height="76" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="64" y="442" width="6" height="76" rx="3" fill="#6c9bd6"/>
+  <text x="92" y="474" fill="#e9edf5" font-size="17">profiles/&lt;name&gt;/ — mode 0700, one account each</text>
+  <text x="92" y="500" fill="#98a2ba" font-size="15">separate identity + separate database; deleting an account deletes both, irreversibly</text>
+
+  <rect x="64" y="532" width="748" height="76" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="64" y="532" width="6" height="76" rx="3" fill="#d9707a"/>
+  <text x="92" y="564" fill="#e9edf5" font-size="17">system temp directory</text>
+  <text x="92" y="590" fill="#d9707a" font-size="15">attachments opened with "Open" land there decrypted — and stay after the app exits</text>
+
+  <rect x="64" y="622" width="748" height="94" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="64" y="622" width="6" height="94" rx="3" fill="#6fbf8b"/>
+  <text x="92" y="654" fill="#e9edf5" font-size="17">webhook listener — 127.0.0.1 only, off by default</text>
+  <text x="92" y="680" fill="#98a2ba" font-size="15">32-byte bearer token, constant-time compare, 64 KB body cap, 5 s header timeout</text>
+  <text x="92" y="704" fill="#e0b060" font-size="15">any local process holding the token can send messages as you</text>
+
+  <!-- outside -->
+  <rect x="868" y="116" width="468" height="620" rx="18" fill="#1a1f30" stroke="#3a4058" stroke-dasharray="6 5"/>
+  <text x="896" y="152" fill="#67b3a3" font-size="19">Off the machine</text>
+
+  <rect x="892" y="172" width="420" height="120" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="892" y="172" width="6" height="120" rx="3" fill="#67b3a3"/>
+  <text x="920" y="204" fill="#e9edf5" font-size="17">Connector</text>
+  <text x="920" y="232" fill="#98a2ba" font-size="15">Ed25519-signed signaling blobs.</text>
+  <text x="920" y="256" fill="#98a2ba" font-size="15">Sees pubkey ↔ IP and who signals</text>
+  <text x="920" y="280" fill="#98a2ba" font-size="15">whom. Never content or keys.</text>
+
+  <rect x="892" y="312" width="420" height="120" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="892" y="312" width="6" height="120" rx="3" fill="#6c9bd6"/>
+  <text x="920" y="344" fill="#e9edf5" font-size="17">Peers</text>
+  <text x="920" y="372" fill="#98a2ba" font-size="15">WebRTC DTLS 1.2+, every UDP</text>
+  <text x="920" y="396" fill="#98a2ba" font-size="15">datagram wrapped in ChaCha20.</text>
+  <text x="920" y="420" fill="#98a2ba" font-size="15">Messages, blobs, voice, video.</text>
+
+  <rect x="892" y="452" width="420" height="168" rx="12" fill="#1d2233" stroke="#2e3448"/>
+  <rect x="892" y="452" width="6" height="168" rx="3" fill="#e0b060"/>
+  <text x="920" y="484" fill="#e9edf5" font-size="17">Connector-list host (optional)</text>
+  <text x="920" y="512" fill="#98a2ba" font-size="15">Plain HTTP(S) GET of a text list.</text>
+  <text x="920" y="536" fill="#98a2ba" font-size="15">64 KB cap · 8 s timeout · only</text>
+  <text x="920" y="560" fill="#98a2ba" font-size="15">ws:// and wss:// lines are kept.</text>
+  <text x="920" y="590" fill="#e0b060" font-size="15">Entries are only added to your</text>
+  <text x="920" y="612" fill="#e0b060" font-size="15">switch list — never auto-connected.</text>
+
+  <text x="920" y="676" fill="#7f88a0" font-size="15">Fetching a list reveals your IP to</text>
+  <text x="920" y="698" fill="#7f88a0" font-size="15">its host, like any web request.</text>
+
+  <rect x="40" y="752" width="1296" height="34" rx="10" fill="#1a1f30" stroke="#2e3448"/>
+  <text x="688" y="775" fill="#98a2ba" font-size="15" text-anchor="middle">Without a passphrase there is no encryption at rest: whoever reads identity.key derives the storage key and reads the whole database.</text>
+</svg>

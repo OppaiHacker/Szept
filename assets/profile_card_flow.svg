@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1376 660" width="1376" height="660"
+     font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="1376" height="660" fill="#161a2b"/>
+
+  <text x="688" y="58" fill="#e9edf5" font-size="30" text-anchor="middle">Profile card — status, description, banner</text>
+  <text x="688" y="90" fill="#98a2ba" font-size="16" text-anchor="middle">one signed event carries the whole card</text>
+
+  <!-- panel 1 -->
+  <rect x="48" y="124" width="380" height="416" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="48" y="124" width="7" height="416" rx="3" fill="#a48cd8"/>
+  <text x="80" y="168" fill="#e9edf5" font-size="22">You set it</text>
+  <text x="80" y="212" fill="#c7cee0" font-size="16">Status — one line, max 64 B</text>
+  <text x="80" y="248" fill="#c7cee0" font-size="16">Description — max 400 B, multi-line</text>
+  <text x="80" y="284" fill="#c7cee0" font-size="16">Banner — 720 × 240 strip</text>
+  <text x="80" y="320" fill="#c7cee0" font-size="16">PNG stays PNG, GIF stays animated</text>
+  <text x="80" y="366" fill="#98a2ba" font-size="15">Framing popup hands back a crop</text>
+  <text x="80" y="390" fill="#98a2ba" font-size="15">rectangle — clamped to the source,</text>
+  <text x="80" y="414" fill="#98a2ba" font-size="15">never trusted as given</text>
+  <text x="80" y="458" fill="#98a2ba" font-size="15">Re-encoded by our encoder: EXIF,</text>
+  <text x="80" y="482" fill="#98a2ba" font-size="15">ICC and appended payloads die here</text>
+  <text x="80" y="512" fill="#7f88a0" font-size="14">≤ 48 frames · ≤ 2 MiB after normalization</text>
+
+  <!-- arrow -->
+  <path d="M436 332 h48" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M484 332 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <!-- panel 2 -->
+  <rect x="498" y="124" width="380" height="416" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="498" y="124" width="7" height="416" rx="3" fill="#67b3a3"/>
+  <text x="530" y="168" fill="#e9edf5" font-size="22">One DAG event: kind = profile</text>
+  <text x="530" y="212" fill="#c7cee0" font-size="16">body.Text = status</text>
+  <text x="530" y="244" fill="#c7cee0" font-size="16">body.Bio  = description</text>
+  <text x="530" y="276" fill="#c7cee0" font-size="16">body.Blob = sha256(banner) + mime</text>
+  <text x="530" y="322" fill="#98a2ba" font-size="15">Body encrypted: XChaCha20-Poly1305</text>
+  <text x="530" y="346" fill="#98a2ba" font-size="15">under the chat's epoch key</text>
+  <text x="530" y="382" fill="#98a2ba" font-size="15">Ed25519 signature covers the</text>
+  <text x="530" y="406" fill="#98a2ba" font-size="15">ciphertext and the graph links</text>
+  <text x="530" y="442" fill="#98a2ba" font-size="15">ID = SHA-256(signable ‖ signature)</text>
+  <text x="530" y="490" fill="#7f88a0" font-size="14">Emitted once per shared chat, gossiped</text>
+  <text x="530" y="512" fill="#7f88a0" font-size="14">peer-to-peer — never through a connector</text>
+
+  <!-- arrow -->
+  <path d="M886 332 h48" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M934 332 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <!-- panel 3 -->
+  <rect x="948" y="124" width="380" height="416" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="948" y="124" width="7" height="416" rx="3" fill="#6c9bd6"/>
+  <text x="980" y="168" fill="#e9edf5" font-size="22">Peer applies it</text>
+  <text x="980" y="212" fill="#c7cee0" font-size="16">Signature checked before storage</text>
+  <text x="980" y="248" fill="#c7cee0" font-size="16">Author must be a current member</text>
+  <text x="980" y="284" fill="#c7cee0" font-size="16">Own card only — yours is untouchable</text>
+  <text x="980" y="330" fill="#98a2ba" font-size="15">Text cleansed on arrival: control</text>
+  <text x="980" y="354" fill="#98a2ba" font-size="15">characters stripped, length capped</text>
+  <text x="980" y="390" fill="#98a2ba" font-size="15">Banner bytes fetched by hash in</text>
+  <text x="980" y="414" fill="#98a2ba" font-size="15">16 KB chunks over the E2E channel</text>
+  <text x="980" y="450" fill="#98a2ba" font-size="15">SHA-256 verified against the event</text>
+  <text x="980" y="498" fill="#7f88a0" font-size="14">Cached in the encrypted profile index so</text>
+  <text x="980" y="520" fill="#7f88a0" font-size="14">the member column skips the DAG walk</text>
+
+  <rect x="48" y="570" width="1280" height="58" rx="12" fill="#1a1f30" stroke="#2e3448"/>
+  <text x="688" y="606" fill="#98a2ba" font-size="16" text-anchor="middle">Visibility: everyone who shares a chat with you. The card rides the same signed, encrypted history as messages — an empty field clears it.</text>
+</svg>

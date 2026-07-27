@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1376 700" width="1376" height="700"
+     font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="1376" height="700" fill="#161a2b"/>
+
+  <text x="688" y="56" fill="#e9edf5" font-size="30" text-anchor="middle">Accounts and backups — several identities on one device</text>
+  <text x="688" y="88" fill="#98a2ba" font-size="16" text-anchor="middle">an account is a directory: its own identity, its own encrypted database, nothing shared</text>
+
+  <!-- data layout -->
+  <rect x="40" y="122" width="416" height="486" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="40" y="122" width="7" height="486" rx="3" fill="#a48cd8"/>
+  <text x="72" y="164" fill="#e9edf5" font-size="21">On disk</text>
+  <text x="72" y="204" fill="#c7cee0" font-size="15" font-family="monospace">~/.local/share/szept/</text>
+  <text x="88" y="232" fill="#98a2ba" font-size="15" font-family="monospace">identity.key</text>
+  <text x="272" y="232" fill="#7f88a0" font-size="14">default</text>
+  <text x="88" y="256" fill="#98a2ba" font-size="15" font-family="monospace">szept.db</text>
+  <text x="88" y="288" fill="#98a2ba" font-size="15" font-family="monospace">profiles/praca/</text>
+  <text x="104" y="312" fill="#98a2ba" font-size="15" font-family="monospace">identity.key</text>
+  <text x="288" y="312" fill="#7f88a0" font-size="14">"praca"</text>
+  <text x="104" y="336" fill="#98a2ba" font-size="15" font-family="monospace">szept.db</text>
+  <text x="88" y="368" fill="#98a2ba" font-size="15" font-family="monospace">profiles/kopia-0728/</text>
+  <text x="104" y="392" fill="#98a2ba" font-size="15" font-family="monospace">identity.key</text>
+  <text x="288" y="392" fill="#7f88a0" font-size="14">restored</text>
+  <text x="104" y="416" fill="#98a2ba" font-size="15" font-family="monospace">szept.db</text>
+
+  <text x="72" y="464" fill="#c7cee0" font-size="15" font-family="monospace">~/.config/szept/config.json</text>
+  <text x="72" y="492" fill="#7f88a0" font-size="14">active account name, connector list, UI preferences</text>
+  <text x="72" y="516" fill="#7f88a0" font-size="14">mode 0600 — account directories 0700</text>
+
+  <text x="72" y="558" fill="#98a2ba" font-size="15">Mobile keeps a single account:</text>
+  <text x="72" y="582" fill="#98a2ba" font-size="15">Android already sandboxes the app.</text>
+
+  <path d="M464 340 h44" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M508 340 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <!-- switching -->
+  <rect x="520" y="122" width="380" height="486" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="520" y="122" width="7" height="486" rx="3" fill="#67b3a3"/>
+  <text x="552" y="164" fill="#e9edf5" font-size="21">Switching</text>
+  <text x="552" y="208" fill="#c7cee0" font-size="16">Pick the account on the unlock</text>
+  <text x="552" y="232" fill="#c7cee0" font-size="16">screen, or in Settings → Accounts.</text>
+  <text x="552" y="276" fill="#98a2ba" font-size="15">The app relaunches itself into the</text>
+  <text x="552" y="300" fill="#98a2ba" font-size="15">chosen directory — a live swap would</text>
+  <text x="552" y="324" fill="#98a2ba" font-size="15">leave goroutines on a closed database.</text>
+  <text x="552" y="368" fill="#98a2ba" font-size="15">The webhook port is released before</text>
+  <text x="552" y="392" fill="#98a2ba" font-size="15">the new process starts.</text>
+  <text x="552" y="436" fill="#98a2ba" font-size="15">A -data flag overrides the choice, and</text>
+  <text x="552" y="460" fill="#98a2ba" font-size="15">the settings page says so out loud.</text>
+  <text x="552" y="512" fill="#7f88a0" font-size="14">Deleting an account removes its identity</text>
+  <text x="552" y="534" fill="#7f88a0" font-size="14">and its database. There is no undo and</text>
+  <text x="552" y="556" fill="#7f88a0" font-size="14">no copy anywhere else.</text>
+
+  <path d="M908 340 h44" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M952 340 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <!-- backup -->
+  <rect x="964" y="122" width="372" height="486" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="964" y="122" width="7" height="486" rx="3" fill="#6c9bd6"/>
+  <text x="996" y="164" fill="#e9edf5" font-size="21">Backup → restore</text>
+  <text x="996" y="206" fill="#c7cee0" font-size="16">1 · zip = identity.key + a live,</text>
+  <text x="996" y="230" fill="#c7cee0" font-size="16">consistent bbolt snapshot</text>
+  <text x="996" y="272" fill="#c7cee0" font-size="16">2 · the copy is exactly as safe as</text>
+  <text x="996" y="296" fill="#c7cee0" font-size="16">your passphrase — no passphrase,</text>
+  <text x="996" y="320" fill="#c7cee0" font-size="16">no encryption at rest</text>
+  <text x="996" y="362" fill="#c7cee0" font-size="16">3 · restore reads exactly two</text>
+  <text x="996" y="386" fill="#c7cee0" font-size="16">entry names; anything else in the</text>
+  <text x="996" y="410" fill="#c7cee0" font-size="16">archive (incl. ../ paths) is ignored</text>
+  <text x="996" y="452" fill="#c7cee0" font-size="16">4 · it lands in a NEW account —</text>
+  <text x="996" y="476" fill="#c7cee0" font-size="16">the open database is never</text>
+  <text x="996" y="500" fill="#c7cee0" font-size="16">overwritten</text>
+  <text x="996" y="546" fill="#7f88a0" font-size="14">5 · switch to it, the app relaunches</text>
+  <text x="996" y="574" fill="#6fbf8b" font-size="15">Losing the passphrase loses the account.</text>
+  <text x="996" y="596" fill="#6fbf8b" font-size="15">There is no reset, by design.</text>
+
+  <rect x="40" y="638" width="1296" height="40" rx="10" fill="#1a1f30" stroke="#2e3448"/>
+  <text x="688" y="664" fill="#98a2ba" font-size="15" text-anchor="middle">Accounts share nothing: separate contacts, separate history, separate keys — and each identity file has its own passphrase.</text>
+</svg>

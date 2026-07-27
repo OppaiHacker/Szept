@@ -5,6 +5,8 @@
 > *Szept* (Polish for *whisper*) is a peer-to-peer, end-to-end encrypted messenger written in Go.
 > Available as a terminal client (**TUI**), a desktop GUI (**Linux / Windows**), and a mobile app (**Android**).
 
+![Szept — desktop client](assets/shots/desktop-main.png)
+
 ---
 
 ## ✨ Features
@@ -16,9 +18,40 @@
 | **Cebulion Network** | Distributed mesh of connectors with SNDP gossip discovery, Dijkstra-routed signaling, and automatic failover — if any connector goes down, the network keeps running. |
 | **DPI-Proof Obfuscation** | Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream with variable random padding — STUN/DTLS headers vanish, leaving only high-entropy noise. |
 | **DAG History** | Every chat is a signed, SHA-256 hash-linked DAG with Lamport-ordered events. History syncs automatically when peers reconnect. |
-| **Voice, Video & Screen** | Real-time mesh calls with camera and desktop sharing (up to ~8 peers). |
+| **Voice, Video & Screen** | Real-time mesh calls with camera and desktop sharing (up to ~8 peers), an in-call control panel, per-person volume, deafen, and a **3D scene** where position drives the mix. |
+| **Profiles** | Avatar, animated banner, status line and description — one signed event, framed in-app before it is sent. |
 | **File Attachments** | Inline previews for images, GIFs, video. Large files (>10 MB) replicate a thumbnail first; full payload pulled on demand in 16 KB chunks. |
-| **Modern Chat UX** | Typing indicators · delivery & read receipts (`✓` / `✓✓`) · emoji reactions · full-text search · global & local message deletion |
+| **Multiple Accounts** | Several identities on one device, each with its own database — switch from the unlock screen. Backup and restore as a zip. |
+| **Bots** | A local, token-guarded webhook: any script on your machine can post a message that Szept signs and encrypts as if you typed it. |
+| **Modern Chat UX** | Member column with presence · typing indicators · delivery & read receipts (`✓` / `✓✓`) · emoji reactions · full-text search · global & local message deletion |
+
+---
+
+## 📸 Screenshots
+
+| Conversation with member column | In-call control panel |
+|---|---|
+| ![Conversation](assets/shots/desktop-main.png) | ![Call panel](assets/shots/desktop-call.png) |
+
+| Profile card | Framing a banner |
+|---|---|
+| ![Profile card](assets/shots/profile-card.png) | ![Banner framing](assets/shots/crop-banner.png) |
+
+| Settings — accounts | Settings — bots / webhooks |
+|---|---|
+| ![Accounts](assets/shots/settings-accounts.png) | ![Bots](assets/shots/settings-bots.png) |
+
+| 3D voice scene | Scene, person selected |
+|---|---|
+| ![3D scene](assets/shots/spatial-scene.png) | ![Scene selection](assets/shots/spatial-selected.png) |
+
+Mobile (same code, different shell):
+
+| Chats | Conversation | Friends | Call |
+|---|---|---|---|
+| ![Chats](assets/shots/mobile-chats.png) | ![Conversation](assets/shots/mobile-conversation.png) | ![Friends](assets/shots/mobile-friends.png) | ![Call](assets/shots/mobile-call.png) |
+
+> These are generated from the app itself, not mockups — see [Development](#-development).
 
 ---
 
@@ -61,6 +94,12 @@ A single connector works fine, but connectors can also join the **Cebulion Netwo
   --seeds ws://c2.example.com:7777,ws://c3.example.com:7777
 ```
 
+### Switching connectors from the app
+
+![Settings — connectors](assets/shots/settings-connectors.png)
+
+Settings → **Connectory** keeps a saved list of connectors to switch between, plus optional **dynamic lists**: an HTTP(S) address returning one `ws://` URL per line. A refresh appends new entries to your saved list — it never connects you anywhere by itself. Guards: 64 KB per list, 8 s timeout, `ws://` / `wss://` lines only. See [SECURITY.md](SECURITY.md#switching-connectors-and-dynamic-connector-lists) for what a list host does and does not learn.
+
 ---
 
 ## 🔒 DPI-Proof Traffic Obfuscation
@@ -78,6 +117,122 @@ Under strict firewalls or deep packet inspection, Szept wraps all peer-to-peer U
 
 ---
 
+## 🪪 Identity, Friends & the Profile Card
+
+### Your code carries a key, not a name
+
+A friend code is `{public key, connector hint}` — **nothing else**. Codes end up in screenshots, photographed QR codes and clipboards, so they carry only what is needed to reach you. Your display name arrives later, over the already-encrypted link, and only for people who already have you on their list.
+
+Because names are announced rather than proven, Szept keeps the receipts: every name a person has used lives in the signed DAG (`nick` events), and the profile screen lists them oldest-first. Someone renaming themselves to impersonate a friend leaves a trail everybody in the chat can read. The fingerprint (`VHGH-S7W3-LAUJ-OIKH`) is the thing worth comparing out of band.
+
+### The profile card
+
+![Szept — Profile Card Flow](assets/profile_card_flow.svg)
+
+Status, description and banner travel as **one signed event**, so a peer who missed an update never ends up with half a card. Limits: status ≤ 64 B, description ≤ 400 B, banner normalized to 720 × 240 (animated GIF kept, ≤ 48 frames, ≤ 2 MiB).
+
+Avatars and banners are framed in-app before they are sent — drag to pan, slider or wheel to zoom, and what the frame shows is exactly what lands on the profile:
+
+![Framing a banner](assets/shots/crop-banner.png)
+
+Everything is re-encoded by our own encoder, which is also the cheapest possible EXIF/ICC/polyglot stripper. The card is visible to everyone who shares a chat with you — see [SECURITY.md](SECURITY.md#-profile-card-status-description-banner).
+
+---
+
+## 📞 Calls — mesh audio, in-call panel, 3D scene
+
+![Szept — Call Audio Pipeline](assets/call_audio_pipeline.svg)
+
+Voice is raw PCM (16 kHz mono, 20 ms frames), camera and screen share are JPEG frames, and all of it rides the same DTLS mesh as messages. No media server — which is why ~8 participants is the sensible ceiling.
+
+The in-call panel sits under the conversation: camera, screen share, fullscreen, pause, deafen, scene, and a live output slider.
+
+![In-call panel](assets/shots/desktop-call.png)
+
+### 3D scene
+
+![3D scene](assets/shots/spatial-scene.png)
+
+Drag participants around the room. Distance quiets them, sideways position pans them:
+
+```
+dist = √(0.35·dx² + depth²)      (capped at 1)
+gain = 1 − 0.85·dist             pan = 0.8·dx
+```
+
+Tapping a person opens their own volume slider and mute. All of it is **local** — your arrangement of the room is never transmitted, and muting someone tells them nothing.
+
+---
+
+## ⚙️ Settings
+
+Settings is a full-window view: sections on the left, content on the right.
+
+![Settings](assets/shots/settings-home.png)
+
+| Section | What's in it |
+|---|---|
+| **Nazwa / Awatar / Status i opis / Baner** | Your profile card, each with its own page; images go through the framing popup |
+| **Mój kod / QR** | Your friend code as text and QR, plus a field for someone else's |
+| **Backup & restore** | Save a zip (identity + live database snapshot); restore lands as a **new** account |
+| **Connectory** | Active connector, saved list, dynamic lists |
+| **Głos i wideo** | Output volume (live, 0–200 %), camera device (V4L2 path on Linux) |
+| **Hasła i szyfrowanie** | Change the identity passphrase (old one verified first — a typo must not lock you out) |
+| **Konta** | Multiple identities on one device |
+| **System** | Notifications, media folder, image cache |
+| **Wygląd** | Accent colour — applied live, remembered in `config.json` |
+| **Boty / webhooki** | Local webhook bridge |
+
+![Settings — voice](assets/shots/settings-voice.png)
+![Settings — passwords](assets/shots/settings-pass.png)
+
+---
+
+## 👥 Accounts & Backups
+
+![Szept — Accounts and Backups](assets/accounts_backup.svg)
+
+An account is a directory with its own identity and its own encrypted database. Nothing is shared between accounts — separate contacts, separate history, separate keys.
+
+![Unlock screen with account picker](assets/shots/login-accounts.png)
+
+- Pick the account **on the unlock screen** (before typing any passphrase) or in Settings → Konta.
+- Switching relaunches the app into the chosen directory — a live swap would leave goroutines writing to a closed database.
+- Backup = zip of `identity.key` + a consistent bbolt snapshot, taken without closing the app.
+- Restore reads exactly two entry names and unpacks into a **new** account — the open database is never overwritten.
+- Backups are exactly as protected as your passphrase. Without one, they are plaintext to anyone who finds them.
+
+![Settings — backup](assets/shots/settings-backup.png)
+
+Android keeps a single account: the platform already sandboxes the app per install.
+
+---
+
+## 🤖 Bots — local webhook bridge
+
+![Szept — Local Webhook Bridge](assets/webhook_bridge.svg)
+
+Enable it in Settings → **Boty / webhooki**, copy the token, and any script on the same machine can speak:
+
+```bash
+curl -X POST http://127.0.0.1:7780/send \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"chat":"chat name","text":"hello from a bot"}'
+```
+
+| Response | Meaning |
+|---|---|
+| `204` | Sent — signed and encrypted like anything you type |
+| `400` | Body isn't `{"chat":…,"text":…}` |
+| `401` | Bad token |
+| `404` | No chat with that name |
+
+Bound to `127.0.0.1` only, off by default, 32-byte token compared in constant time, 64 KB body cap. Anything on your machine that can read `config.json` can send as you — that is the feature and the risk in one sentence.
+
+![Settings — bots](assets/shots/settings-bots.png)
+
+---
+
 ## 🚀 Quickstart
 
 ### Build from source
@@ -86,7 +241,16 @@ Requirements: **Go ≥ 1.22**, gcc, X11/GL headers (Linux GUI).
 
 ```bash
 make          # builds bin/szept-connector, bin/szept (TUI), bin/szept-gui
-make test     # runs the test suite
+make test     # go vet + full test suite
+make install  # desktop entry + icon into ~/.local (re-run to update)
+```
+
+Cross builds:
+
+```bash
+make connector-windows   # pure Go, no cgo
+make windows             # clients, needs mingw-w64
+make android             # APK, needs Android SDK/NDK + the fyne tool
 ```
 
 ### Run a standalone connector
@@ -94,6 +258,14 @@ make test     # runs the test suite
 ./bin/szept-connector --listen :7777
 # TLS: --cert cert.pem --key key.pem → clients connect via wss://
 ```
+
+| Flag | Meaning |
+|---|---|
+| `--listen` | Listen address (`:7777`, `host:port`) |
+| `--cert` / `--key` | TLS certificate — clients then use `wss://` |
+| `--public-url` | This connector's public URL, announced over SNDP |
+| `--seeds` | Comma-separated seed connectors to gossip with |
+| `--max-peers` | Peer cap; over it, clients get a `redirect` to a neighbour |
 
 ### Join the Cebulion mesh
 ```bash
@@ -105,35 +277,123 @@ make test     # runs the test suite
 ### Launch & add friends
 
 1. Start `./bin/szept` (TUI) or `./bin/szept-gui` (GUI).
-2. Share your ID — `/mycode` in TUI or **Friends → Your Code** in GUI.
-3. Add a friend — `/friend <code>`.
-4. Create a group — `/new <name>`, then invite with `/invite`.
+2. First run asks for a name, a connector and an optional passphrase.
+
+   ![First run](assets/shots/first-run.png)
+3. Share your ID — `/mycode` in TUI, `/kod` or **Mój kod / QR** in GUI.
+4. Add a friend — `/friend <code>`.
+5. Create a group — `/new <name>`, then invite with `/invite` (code + 6-digit PIN, valid 10 minutes, 5 attempts).
+
+Both clients take `-data <dir>` and `-connector <url>`.
 
 ---
 
-## ⌨️ Commands (English / Polish aliases)
+## 🗂️ Files & Configuration
 
-| Command | Description |
+| Path | Contents |
 |---|---|
-| `/new <name>` · `/nowy` | Create group chat |
-| `/dm <friend>` | Open 1:1 chat |
-| `/invite` · `/zapros` | Generate one-time invite (QR + PIN) |
-| `/join <code> <pin>` · `/dolacz` | Join group from invite |
-| `/friend <code>` · `/znajomy` | Add friend |
-| `/search <q>` · `/szukaj` | Search encrypted history |
-| `/react <n> <emoji>` · `/r` | Emoji reaction |
-| `/delete <n>` · `/usun` | Delete for everyone (DAG event) |
-| `/hide <n>` · `/ukryj` | Hide locally |
-| `/send <path>` · `/wyslij` | Send file |
-| `/save <n>` · `/zapisz` | Save attachment to disk |
-| `/avatar <path>` · `/awatar` | Set profile picture |
-| `/mycode` · `/mojkod` | Show your friend code |
-| `/who` · `/kto` | List chat members |
-| `/rename <name>` · `/zmien` | Rename chat |
-| `/rekey` | Manual epoch key rotation |
-| `/call` · `/leave` · `/rozlacz` | Join / leave voice call |
-| `/mic` · `/cam` · `/screen` · `/ekran` | Toggle mic / camera / screen share |
-| `/help` · `/pomoc` | Command list |
+| `~/.config/szept/config.json` | Configuration, mode `0600` |
+| `~/.local/share/szept/identity.key` | Ed25519 seed, encrypted if you set a passphrase, mode `0600` |
+| `~/.local/share/szept/szept.db` | Fully encrypted bbolt database |
+| `~/.local/share/szept/profiles/<name>/` | A second account: same two files, mode `0700` |
+
+`XDG_DATA_HOME` is honoured if set.
+
+`config.json` fields:
+
+| Field | Meaning |
+|---|---|
+| `connector` | Active connector URL |
+| `connectors` | Saved connectors you switch between |
+| `connector_lists` | HTTP(S) addresses of dynamic connector lists |
+| `stun` | STUN servers (defaults are used when empty) |
+| `media_dir` | Folder browsed by the built-in gallery |
+| `profile` | Active account; empty = the default one |
+| `accent` | Accent colour, hex `RRGGBB` |
+| `output_vol` | Call volume, `0..2` (0 = default 1) |
+| `cam_device` | Camera device, e.g. `/dev/video1` |
+| `no_notify` | Silence system notifications |
+| `webhook_on` / `webhook_port` / `webhook_token` | Local bot bridge |
+
+---
+
+## ⌨️ Commands
+
+Both clients accept English and Polish aliases. Availability differs where the UI already covers it — reactions, delete and hide are context-menu actions in the GUI, and slash commands in the TUI.
+
+| Command | Description | TUI | GUI |
+|---|---|:--:|:--:|
+| `/new <name>` · `/nowy` | Create group chat | ✅ | ✅ |
+| `/dm <friend>` | Open 1:1 chat | ✅ | ✅ |
+| `/invite` · `/zapros` | One-time invite (code + PIN) | ✅ | ✅ |
+| `/join <code> <pin>` · `/dolacz` | Join group from invite | ✅ | ✅ |
+| `/friend <code>` · `/znajomy` | Add friend | ✅ | ✅ |
+| `/mycode` · `/mojkod` · `/code` | Show your friend code | ✅ | — |
+| `/kod` · `/code` | Your QR + field for someone else's code | — | ✅ |
+| `/search <q>` · `/szukaj` | Search encrypted history | ✅ | ✅ |
+| `/who` · `/kto` | List chat members | ✅ | ✅ |
+| `/kick <name>` | Remove member (rotates the epoch key) | ✅ | ✅ |
+| `/rekey` | Manual epoch key rotation | ✅ | ✅ |
+| `/rename <name>` · `/zmien` | Rename chat | ✅ | ✅ |
+| `/send <path>` · `/wyslij` | Send file (GUI opens the picker) | ✅ | ✅ |
+| `/save <n>` · `/zapisz` | Save attachment to disk | ✅ | — |
+| `/react <n> <emoji>` · `/r` | Emoji reaction | ✅ | menu |
+| `/delete <n>` · `/usun` | Delete for everyone (DAG event) | ✅ | menu |
+| `/hide <n>` · `/ukryj` | Hide locally | ✅ | menu |
+| `/avatar <path>` · `/awatar` | Set profile picture | ✅ | ✅ |
+| `/call` | Join voice call | ✅ | ✅ |
+| `/leave` · `/rozlacz` · `/hangup` | Leave call | ✅ | ✅ |
+| `/mic` · `/cam` · `/screen` · `/ekran` | Toggle mic / camera / screen share | ✅ | ✅ |
+| `/connector [url]` | Show or change connector | ✅ | ✅ |
+| `/lang <pl\|en>` · `/jezyk` | Interface language | ✅ | ✅ |
+| `/me` · `/ja` | Profile and settings | — | ✅ |
+| `/clear` · `/wyczysc` | Hide local system messages | — | ✅ |
+| `/help` · `/pomoc` | Command list | ✅ | ✅ |
+| `/quit` | Exit | ✅ | — |
+
+---
+
+## 🧩 Project Layout
+
+```
+cmd/connector     the rendezvous relay (pure Go, cross-compiles anywhere)
+cmd/szept         terminal client (bubbletea)
+cmd/szept-gui     desktop + Android client (fyne)
+internal/core     the brain: identity, store, connector link, sync, invites, calls
+internal/event    the chat DAG — signed, hash-linked, epoch-encrypted events
+internal/store    bbolt persistence; every value encrypted and location-bound
+internal/p2p      WebRTC data channels + the ChaCha20 obfuscation layer
+internal/connector  connector implementation and the Cebulion mesh
+internal/attach   attachment/avatar/banner validation and normalization
+internal/crypt    XChaCha20-Poly1305, argon2id, HKDF
+internal/identity Ed25519 keypair, encrypted at rest, fingerprints
+internal/media    capture and playback: PCM voice, camera, screen
+internal/boot     config + identity plumbing, accounts, backup/restore
+internal/i18n     interface strings (pl/en)
+```
+
+---
+
+## 🛠️ Development
+
+```bash
+make test    # go vet ./... && go test ./... -timeout 180s
+```
+
+The screenshots in this README are produced by the app's own renderer, so they cannot drift from the UI:
+
+```bash
+SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots \
+  go test ./cmd/szept-gui -run TestShots -v
+```
+
+It builds a throwaway data directory with sample chats, renders every screen through fyne's software canvas (no X11, no GL) and writes PNGs. Layout regressions fail there before anyone sees them on a phone.
+
+---
+
+## 🔐 Security
+
+The threat model, the guarantees and the honest limits are in **[SECURITY.md](SECURITY.md)** — including what the connector can see, what lands on your own disk, and the known trade-offs.
 
 ---
 ---
@@ -143,6 +403,8 @@ make test     # runs the test suite
 > **Brak centralnych serwerów. Całkowita prywatność. Komunikacja odporna na cenzurę.**
 >
 > *Szept* to komunikator peer-to-peer z pełnym szyfrowaniem end-to-end, napisany w Go. Dostępny w wersji konsolowej (**TUI**), graficznej (**GUI**) na Linuksa i Windowsa, oraz mobilnej na **Androida**.
+
+![Szept — klient na pulpicie](assets/shots/desktop-main.png)
 
 ---
 
@@ -155,9 +417,40 @@ make test     # runs the test suite
 | **Sieć Cebulion** | Rozproszona siatka connectorów z gossipem SNDP, routingiem Dijkstry i automatycznym failoverem — padnięcie dowolnego connectora nie zatrzymuje komunikatora. |
 | **Obfuskacja DPI** | Każdy datagram UDP owinięty ChaCha20 ze zmiennym paddingiem — nagłówki STUN/DTLS znikają, ruch wygląda jak losowy szum. |
 | **DAG** | Każdy czat to podpisany, powiązany hashami SHA-256 graf acykliczny z porządkiem Lamporta. Historia synchronizuje się automatycznie. |
-| **Głos i wideo** | Rozmowy głosowe, kamera i udostępnianie ekranu w meshu (do ~8 osób). |
+| **Głos i wideo** | Rozmowy w siatce P2P (do ~8 osób), panel sterowania w rozmowie, głośność i wyciszanie pojedynczych osób, **scena 3D** sterująca miksem. |
+| **Profil** | Awatar, animowany baner, status i opis — jedno podpisane zdarzenie, kadrowane w aplikacji przed wysyłką. |
 | **Pliki** | Podgląd inline dla grafik, GIF-ów i wideo. Duże pliki ładowane na żądanie fragmentami po 16 KB. |
-| **UX** | Wskaźniki pisania · potwierdzenia dostarczenia (`✓` / `✓✓`) · reakcje emoji · wyszukiwanie · usuwanie globalne i lokalne |
+| **Wiele kont** | Kilka tożsamości na jednym urządzeniu, każda z własną bazą — przełączanie z ekranu logowania. Kopia zapasowa i przywracanie z zipa. |
+| **Boty** | Lokalny webhook z tokenem: dowolny skrypt na twoim komputerze wysyła wiadomość, którą szept podpisuje i szyfruje jak twoją. |
+| **UX** | Kolumna członków z obecnością · wskaźniki pisania · potwierdzenia dostarczenia (`✓` / `✓✓`) · reakcje emoji · wyszukiwanie · usuwanie globalne i lokalne |
+
+---
+
+## 📸 Zrzuty ekranu
+
+| Rozmowa z kolumną członków | Panel rozmowy |
+|---|---|
+| ![Rozmowa](assets/shots/desktop-main.png) | ![Panel rozmowy](assets/shots/desktop-call.png) |
+
+| Karta profilu | Kadrowanie baneru |
+|---|---|
+| ![Profil](assets/shots/profile-card.png) | ![Kadrowanie](assets/shots/crop-banner.png) |
+
+| Ustawienia — konta | Ustawienia — boty |
+|---|---|
+| ![Konta](assets/shots/settings-accounts.png) | ![Boty](assets/shots/settings-bots.png) |
+
+| Scena 3D | Scena z wybraną osobą |
+|---|---|
+| ![Scena 3D](assets/shots/spatial-scene.png) | ![Wybrana osoba](assets/shots/spatial-selected.png) |
+
+Wersja mobilna (ten sam kod, inna powłoka):
+
+| Czaty | Rozmowa | Znajomi | Połączenie |
+|---|---|---|---|
+| ![Czaty](assets/shots/mobile-chats.png) | ![Rozmowa](assets/shots/mobile-conversation.png) | ![Znajomi](assets/shots/mobile-friends.png) | ![Połączenie](assets/shots/mobile-call.png) |
+
+> Zrzuty generuje sama aplikacja, to nie makiety — patrz [Rozwój](#-rozwój).
 
 ---
 
@@ -166,6 +459,12 @@ make test     # runs the test suite
 Jedynym elementem infrastruktury jest **Connector** — ~200-liniowy, stateless relay. Mapuje `pubkey → gniazdo` i przekazuje podpisane SDP. **Nigdy** nie widzi treści, kluczy ani członkostwa.
 
 ![Szept — Architektura Connectora](assets/connector_architecture.jpg)
+
+**Przebieg połączenia:**
+1. **Rejestracja** — klient wysyła podpisany Ed25519 znacznik czasu; connector mapuje pubkey na WebSocket.
+2. **Sygnalizacja** — oferta SDP (odcisk certyfikatu DTLS + 32-bajtowy klucz obfuskacji) podpisana Ed25519, okno świeżości ±2 minuty, jawny adresat, rozstrzyganie kolizji (wygrywa niższy pubkey).
+3. **Połączenie** — handshake DTLS 1.2+ bezpośrednio między peerami. Certyfikat związany z tożsamością — connector nie zrobi MITM.
+4. **Synchronizacja** — peery wymieniają hashe czół DAG i dociągają brakujące zdarzenia szyfrowanym kanałem.
 
 ---
 
@@ -176,47 +475,312 @@ Connector może działać sam lub dołączyć do **Sieci Cebulion** — rozprosz
 ![Szept — Sieć Cebulion](assets/cebulion_network.jpg)
 
 **Jak działa:**
-- **SNDP Gossip** — connektory co 15 sekund wymieniają listę sąsiadów i topologię (RTT)
-- **Dijkstra Routing** — sygnał trafia do celu najszybszą ścieżką przez siatkę
+- **SNDP Gossip** — connectory co 15 sekund wymieniają listę sąsiadów i topologię (RTT)
+- **Routing Dijkstry** — sygnał trafia do celu najszybszą ścieżką przez siatkę
 - **Failover** — padnięcie węzła = automatyczny rerouting; klient próbuje fallback URL-i
-- **Load Balancing** — przeciążony connector odsyła klienta do sąsiada z wolnymi slotami
+- **Load balancing** — przeciążony connector odsyła klienta do sąsiada z wolnymi slotami
+
+**Uruchomienie connectora w siatce:**
+```bash
+./bin/szept-connector --listen :7777 \
+  --public-url ws://c1.example.com:7777 \
+  --seeds ws://c2.example.com:7777,ws://c3.example.com:7777
+```
+
+### Przełączanie connectorów w aplikacji
+
+![Ustawienia — connectory](assets/shots/settings-connectors.png)
+
+Ustawienia → **Connectory** trzymają listę adresów do przełączania oraz opcjonalne **dynamiczne listy**: adres HTTP(S) zwracający jeden `ws://` na linię. „Odśwież” dopisuje nowe wpisy do listy — sam z siebie nigdzie nie łączy. Limity: 64 KB na listę, 8 s timeout, tylko linie `ws://` i `wss://`. Co host listy widzi, a czego nie — [SECURITY.md](SECURITY.md#switching-connectors-and-dynamic-connector-lists).
 
 ---
 
 ## 🔒 Obfuskacja Ruchu
 
-Pod restrykcyjnymi firewallami *Szept* owija cały ruch P2P w warstwę obfuskacji ChaCha20. Pakiety na łączu wyglądają jak losowy szum o zmiennej długości — systemy DPI nie są w stanie rozpoznać sygnatur WebRTC.
+Pod restrykcyjnymi firewallami *Szept* owija cały ruch P2P w warstwę obfuskacji ChaCha20. Pakiety na łączu wyglądają jak losowy szum o zmiennej długości — systemy DPI nie rozpoznają sygnatur WebRTC.
 
 ![Szept — Obfuskacja Ruchu](assets/cebulion_obfuscation.jpg)
 
+- **Klucz na połączenie** — 32 bajty od strony ofertującej, w podpisanej Ed25519 ofercie SDP.
+- **Format** — `nonce(12B) || ChaCha20(len(2B) || dane || padding(0–64B))`. Bez MAC — uwierzytelnia DTLS pod spodem.
+- **Omijanie STUN** — ruch do publicznych serwerów STUN idzie bez obfuskacji, żeby ICE działało.
+- **mDNS wyłączony** — żadnego multicastu `.local` obok zaszyfrowanego strumienia.
+
 ---
 
-## ⌨️ Komendy (polskie / angielskie aliasy)
+## 🪪 Tożsamość, znajomi i karta profilu
 
-| Komenda | Opis |
+### Kod zawiera klucz, nie imię
+
+Kod znajomego to `{klucz publiczny, podpowiedź connectora}` — **nic więcej**. Kody trafiają na zrzuty ekranu, zdjęcia QR i do schowka, więc niosą tylko to, co potrzebne, żeby cię znaleźć. Nazwa dociera później, już szyfrowanym łączem, i tylko dla osób, które mają cię na liście.
+
+Skoro nazwa jest ogłaszana, a nie dowodzona, szept zachowuje ślad: każda nazwa siedzi w podpisanym DAG (zdarzenia `nick`), a ekran profilu wypisuje je od najstarszej. Ktoś, kto przemianuje się na znajomego, zostawia widoczny dla wszystkich ślad. Odcisk klucza (`VHGH-S7W3-LAUJ-OIKH`) to jedyna rzecz warta porównania poza aplikacją.
+
+### Karta profilu
+
+![Szept — Przepływ karty profilu](assets/profile_card_flow.svg)
+
+Status, opis i baner idą w **jednym podpisanym zdarzeniu**, więc peer, który przegapił aktualizację, nigdy nie ma pół karty. Limity: status ≤ 64 B, opis ≤ 400 B, baner normalizowany do 720 × 240 (animowany GIF zachowany, ≤ 48 klatek, ≤ 2 MiB).
+
+Awatary i banery kadrujesz w aplikacji — przeciąganie przesuwa, suwak (albo kółko myszy) przybliża, a ramka pokazuje dokładnie to, co wyląduje na profilu:
+
+![Kadrowanie baneru](assets/shots/crop-banner.png)
+
+Wszystko jest przekodowane naszym enkoderem, co przy okazji jest najtańszym możliwym usuwaniem EXIF, ICC i doklejonych ładunków. Kartę widzi każdy, z kim dzielisz czat — szczegóły w [SECURITY.md](SECURITY.md#-profile-card-status-description-banner).
+
+---
+
+## 📞 Rozmowy — siatka, panel i scena 3D
+
+![Szept — Ścieżka dźwięku w rozmowie](assets/call_audio_pipeline.svg)
+
+Głos to surowe PCM (16 kHz mono, ramki 20 ms), kamera i ekran to klatki JPEG. Wszystko idzie tą samą siatką DTLS co wiadomości. Bez serwera mediów — dlatego ~8 uczestników to rozsądny sufit.
+
+Panel rozmowy siedzi pod konwersacją: kamera, ekran, pełny ekran, pauza, wyciszenie wyjścia, scena i suwak głośności.
+
+![Panel rozmowy](assets/shots/desktop-call.png)
+
+### Scena 3D
+
+![Scena 3D](assets/shots/spatial-scene.png)
+
+Przeciągasz uczestników po pokoju. Odległość ścisza, pozycja w bok panoramuje:
+
+```
+dist = √(0.35·dx² + depth²)      (obcięte do 1)
+gain = 1 − 0.85·dist             pan = 0.8·dx
+```
+
+Dotknięcie osoby otwiera jej suwak głośności i wyciszenie. Całość jest **lokalna** — twoje ustawienie pokoju nigdzie nie leci, a wyciszenie kogoś nie mówi mu o tym nic.
+
+---
+
+## ⚙️ Ustawienia
+
+Ustawienia to widok na całe okno: sekcje po lewej, treść po prawej.
+
+![Ustawienia](assets/shots/settings-home.png)
+
+| Sekcja | Co w niej jest |
 |---|---|
-| `/nowy <nazwa>` · `/new` | Utwórz grupę |
-| `/dm <znajomy>` | Otwórz czat 1:1 |
-| `/zapros` · `/invite` | Generuj jednorazowe zaproszenie (QR + PIN) |
-| `/dolacz <kod>` · `/join` | Dołącz do grupy |
-| `/znajomy <kod>` · `/friend` | Dodaj znajomego |
-| `/szukaj <fraza>` · `/search` | Szukaj w historii |
-| `/r <nr> <emoji>` · `/react` | Reakcja emoji |
-| `/usun <nr>` · `/delete` | Usuń u wszystkich |
-| `/ukryj <nr>` · `/hide` | Ukryj lokalnie |
-| `/wyslij <ścieżka>` · `/send` | Wyślij plik |
-| `/zapisz <nr>` · `/save` | Zapisz załącznik |
-| `/awatar <ścieżka>` · `/avatar` | Ustaw awatar |
-| `/mojkod` · `/mycode` | Twój kod znajomego |
-| `/kto` · `/who` | Członkowie czatu |
-| `/zmien <nazwa>` · `/rename` | Zmień nazwę czatu |
-| `/rekey` | Ręczna rotacja klucza epoki |
-| `/call` · `/rozlacz` | Dołącz / wyjdź z rozmowy |
-| `/mic` · `/cam` · `/ekran` | Mikrofon / kamera / ekran |
-| `/pomoc` · `/help` | Lista komend |
+| **Nazwa / Awatar / Status i opis / Baner** | Karta profilu, każdy element ma swoją stronę; obrazy przechodzą przez kadrowanie |
+| **Mój kod / QR** | Twój kod znajomego tekstem i jako QR, plus pole na cudzy |
+| **Backup & restore** | Zapis zipa (tożsamość + migawka bazy); przywracanie ląduje jako **nowe** konto |
+| **Connectory** | Aktywny connector, zapisana lista, dynamiczne listy |
+| **Głos i wideo** | Głośność wyjścia (na żywo, 0–200 %), urządzenie kamery (ścieżka V4L2) |
+| **Hasła i szyfrowanie** | Zmiana hasła tożsamości (stare weryfikowane — literówka nie może odciąć konta) |
+| **Konta** | Wiele tożsamości na jednym urządzeniu |
+| **System** | Powiadomienia, folder multimediów, cache obrazków |
+| **Wygląd** | Kolor akcentu — działa od razu, zapamiętany w `config.json` |
+| **Boty / webhooki** | Lokalny most webhooka |
+
+![Ustawienia — głos](assets/shots/settings-voice.png)
+![Ustawienia — hasła](assets/shots/settings-pass.png)
 
 ---
 
-## 📄 License
+## 👥 Konta i kopie zapasowe
+
+![Szept — Konta i kopie](assets/accounts_backup.svg)
+
+Konto to katalog z własną tożsamością i własną zaszyfrowaną bazą. Konta nie dzielą niczego — osobne kontakty, osobna historia, osobne klucze.
+
+![Ekran logowania z wyborem konta](assets/shots/login-accounts.png)
+
+- Konto wybierasz **na ekranie logowania** (zanim wpiszesz jakiekolwiek hasło) albo w Ustawieniach → Konta.
+- Przełączenie uruchamia aplikację od nowa na wybranym katalogu — podmiana na żywo zostawiłaby gorutyny piszące do zamkniętej bazy.
+- Kopia = zip z `identity.key` i spójną migawką bazy, robioną bez zamykania aplikacji.
+- Przywracanie czyta dokładnie dwie nazwy wpisów i rozpakowuje je do **nowego** konta — otwarta baza nigdy nie jest nadpisywana.
+- Kopia jest dokładnie tak chroniona jak twoje hasło. Bez hasła to jawny plik dla każdego, kto go znajdzie.
+
+![Ustawienia — kopia zapasowa](assets/shots/settings-backup.png)
+
+Android trzyma jedno konto — system i tak izoluje aplikację.
+
+---
+
+## 🤖 Boty — lokalny webhook
+
+![Szept — Most webhooka](assets/webhook_bridge.svg)
+
+Włącz w Ustawieniach → **Boty / webhooki**, skopiuj token, i dowolny skrypt na tym komputerze może pisać:
+
+```bash
+curl -X POST http://127.0.0.1:7780/send \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"chat":"nazwa czatu","text":"cześć z bota"}'
+```
+
+| Odpowiedź | Znaczenie |
+|---|---|
+| `204` | Wysłane — podpisane i zaszyfrowane jak każda twoja wiadomość |
+| `400` | Ciało nie jest `{"chat":…,"text":…}` |
+| `401` | Zły token |
+| `404` | Nie ma czatu o tej nazwie |
+
+Nasłuch tylko na `127.0.0.1`, domyślnie wyłączony, 32-bajtowy token porównywany w stałym czasie, limit ciała 64 KB. Wszystko na twoim komputerze, co przeczyta `config.json`, może wysyłać jako ty — to jednocześnie cała funkcja i całe ryzyko.
+
+![Ustawienia — boty](assets/shots/settings-bots.png)
+
+---
+
+## 🚀 Szybki start
+
+### Budowanie ze źródeł
+
+Wymagania: **Go ≥ 1.22**, gcc, nagłówki X11/GL (GUI na Linuksie).
+
+```bash
+make          # bin/szept-connector, bin/szept (TUI), bin/szept-gui
+make test     # go vet + testy
+make install  # wpis w menu aplikacji i ikona w ~/.local
+```
+
+Budowanie skrośne:
+
+```bash
+make connector-windows   # czysty Go, bez cgo
+make windows             # klienci, wymaga mingw-w64
+make android             # APK, wymaga Android SDK/NDK i narzędzia fyne
+```
+
+### Samodzielny connector
+```bash
+./bin/szept-connector --listen :7777
+# TLS: --cert cert.pem --key key.pem → klienci łączą się przez wss://
+```
+
+| Flaga | Znaczenie |
+|---|---|
+| `--listen` | Adres nasłuchu (`:7777`, `host:port`) |
+| `--cert` / `--key` | Certyfikat TLS — wtedy klienci używają `wss://` |
+| `--public-url` | Publiczny adres tego connectora, ogłaszany po SNDP |
+| `--seeds` | Lista connectorów startowych (po przecinku) |
+| `--max-peers` | Limit peerów; powyżej klient dostaje `redirect` do sąsiada |
+
+### Start i dodawanie znajomych
+
+1. Uruchom `./bin/szept` (TUI) albo `./bin/szept-gui` (GUI).
+2. Pierwsze uruchomienie pyta o nazwę, connector i opcjonalne hasło.
+
+   ![Pierwsze uruchomienie](assets/shots/first-run.png)
+3. Pokaż swój kod — `/mojkod` w TUI, `/kod` albo **Mój kod / QR** w GUI.
+4. Dodaj znajomego — `/znajomy <kod>`.
+5. Załóż grupę — `/nowy <nazwa>`, zaproś przez `/zapros` (kod + 6-cyfrowy PIN, ważny 10 minut, 5 prób).
+
+Oba klienty przyjmują `-data <katalog>` i `-connector <adres>`.
+
+---
+
+## 🗂️ Pliki i konfiguracja
+
+| Ścieżka | Zawartość |
+|---|---|
+| `~/.config/szept/config.json` | Konfiguracja, tryb `0600` |
+| `~/.local/share/szept/identity.key` | Ziarno Ed25519, zaszyfrowane jeśli ustawisz hasło, tryb `0600` |
+| `~/.local/share/szept/szept.db` | W całości zaszyfrowana baza bbolt |
+| `~/.local/share/szept/profiles/<nazwa>/` | Drugie konto: te same dwa pliki, tryb `0700` |
+
+`XDG_DATA_HOME` jest respektowane.
+
+Pola `config.json`:
+
+| Pole | Znaczenie |
+|---|---|
+| `connector` | Aktywny adres connectora |
+| `connectors` | Zapisane connectory do przełączania |
+| `connector_lists` | Adresy HTTP(S) dynamicznych list |
+| `stun` | Serwery STUN (puste = domyślne) |
+| `media_dir` | Folder przeglądany przez wbudowaną galerię |
+| `profile` | Aktywne konto; puste = domyślne |
+| `accent` | Kolor akcentu, hex `RRGGBB` |
+| `output_vol` | Głośność rozmów, `0..2` (0 = domyślne 1) |
+| `cam_device` | Urządzenie kamery, np. `/dev/video1` |
+| `no_notify` | Wyciszenie powiadomień systemowych |
+| `webhook_on` / `webhook_port` / `webhook_token` | Lokalny most dla botów |
+
+---
+
+## ⌨️ Komendy
+
+Oba klienty przyjmują polskie i angielskie aliasy. Dostępność różni się tam, gdzie interfejs robi to sam — reakcje, usuwanie i ukrywanie są w GUI pozycjami menu, a w TUI komendami.
+
+| Komenda | Opis | TUI | GUI |
+|---|---|:--:|:--:|
+| `/nowy <nazwa>` · `/new` | Utwórz grupę | ✅ | ✅ |
+| `/dm <znajomy>` | Czat na dwoje | ✅ | ✅ |
+| `/zapros` · `/invite` | Jednorazowe zaproszenie (kod + PIN) | ✅ | ✅ |
+| `/dolacz <kod> <pin>` · `/join` | Dołącz do grupy | ✅ | ✅ |
+| `/znajomy <kod>` · `/friend` | Dodaj znajomego | ✅ | ✅ |
+| `/mojkod` · `/mycode` · `/code` | Pokaż swój kod | ✅ | — |
+| `/kod` · `/code` | Twój QR i pole na cudzy kod | — | ✅ |
+| `/szukaj <fraza>` · `/search` | Szukaj w historii | ✅ | ✅ |
+| `/kto` · `/who` | Członkowie czatu | ✅ | ✅ |
+| `/kick <nazwa>` | Usuń członka (rotuje klucz epoki) | ✅ | ✅ |
+| `/rekey` | Ręczna rotacja klucza epoki | ✅ | ✅ |
+| `/zmien <nazwa>` · `/rename` | Zmień nazwę czatu | ✅ | ✅ |
+| `/wyslij <ścieżka>` · `/send` | Wyślij plik (GUI otwiera wybierak) | ✅ | ✅ |
+| `/zapisz <nr>` · `/save` | Zapisz załącznik na dysk | ✅ | — |
+| `/r <nr> <emoji>` · `/react` | Reakcja emoji | ✅ | menu |
+| `/usun <nr>` · `/delete` | Usuń u wszystkich (zdarzenie DAG) | ✅ | menu |
+| `/ukryj <nr>` · `/hide` | Ukryj lokalnie | ✅ | menu |
+| `/awatar <ścieżka>` · `/avatar` | Ustaw awatar | ✅ | ✅ |
+| `/call` | Dołącz do rozmowy | ✅ | ✅ |
+| `/rozlacz` · `/leave` · `/hangup` | Wyjdź z rozmowy | ✅ | ✅ |
+| `/mic` · `/cam` · `/ekran` · `/screen` | Mikrofon / kamera / ekran | ✅ | ✅ |
+| `/connector [adres]` | Pokaż albo zmień connector | ✅ | ✅ |
+| `/lang <pl\|en>` · `/jezyk` | Język interfejsu | ✅ | ✅ |
+| `/ja` · `/me` | Profil i ustawienia | — | ✅ |
+| `/wyczysc` · `/clear` | Schowaj komunikaty systemowe | — | ✅ |
+| `/pomoc` · `/help` | Lista komend | ✅ | ✅ |
+| `/quit` | Wyjście | ✅ | — |
+
+---
+
+## 🧩 Układ projektu
+
+```
+cmd/connector     relay spotkań (czysty Go, kompiluje się wszędzie)
+cmd/szept         klient terminalowy (bubbletea)
+cmd/szept-gui     klient pulpitowy i Android (fyne)
+internal/core     mózg: tożsamość, baza, łącze do connectora, sync, zaproszenia, rozmowy
+internal/event    DAG czatu — podpisane, powiązane hashami, szyfrowane zdarzenia
+internal/store    trwałość bbolt; każda wartość szyfrowana i związana z miejscem
+internal/p2p      kanały danych WebRTC + warstwa obfuskacji ChaCha20
+internal/connector  implementacja connectora i siatki Cebulion
+internal/attach   walidacja i normalizacja załączników, awatarów i banerów
+internal/crypt    XChaCha20-Poly1305, argon2id, HKDF
+internal/identity para kluczy Ed25519, szyfrowana na dysku, odciski
+internal/media    nagrywanie i odtwarzanie: PCM, kamera, ekran
+internal/boot     konfiguracja i tożsamość, konta, kopie zapasowe
+internal/i18n     teksty interfejsu (pl/en)
+```
+
+---
+
+## 🛠️ Rozwój
+
+```bash
+make test    # go vet ./... && go test ./... -timeout 180s
+```
+
+Zrzuty ekranu w tym README renderuje sama aplikacja, więc nie mogą się rozjechać z interfejsem:
+
+```bash
+SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots \
+  go test ./cmd/szept-gui -run TestShots -v
+```
+
+Test buduje jednorazowy katalog danych z przykładowymi czatami, rysuje każdy ekran programowym płótnem fyne (bez X11 i GL) i zapisuje PNG-i. Zepsuty układ wywala się tam, zanim ktokolwiek zobaczy go na telefonie.
+
+---
+
+## 🔐 Bezpieczeństwo
+
+Model zagrożeń, gwarancje i uczciwie wypisane ograniczenia siedzą w **[SECURITY.md](SECURITY.md)** — łącznie z tym, co widzi connector, co ląduje na twoim dysku i jakie kompromisy są świadome.
+
+---
+
+## 📄 Licencja
 
 [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
