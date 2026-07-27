@@ -14,6 +14,13 @@ Every user is an **Ed25519 keypair**. That's the entire identity.
 - Friend and invite codes **embed the full public key** — no TOFU, no trusting the server. MITM at invite time requires tampering with the code outside the app.
 - Storage key: `HKDF-SHA256(seed, "szept-storage-v1")` — deterministic, never stored directly.
 
+### Names are hints; the key is the identity
+
+- **A friend code carries no name.** It is `{pubkey, connector hint}` only. Codes travel through screenshots, QR photos and clipboards, and a name in there is free metadata for anyone who sees the picture. Until a name arrives, the contact shows as the first 9 characters of the fingerprint.
+- The display name arrives over the **already-authenticated E2E link** (`hello`), and is accepted **only for someone already on your friend list**, after `safeName()` (control characters stripped, ≤ 64 B, single line). A stranger cannot rename anybody.
+- Inside a chat, names live in the **signed DAG**: the genesis event carries the creator's, every later change is a `nick` event. `NickHistory()` replays them, so a peer who swaps their display name mid-conversation leaves a visible trail — the profile screen lists every name that person has announced, oldest first.
+- The fingerprint is always one tap away and is the only thing worth comparing out of band.
+
 ---
 
 ## 🔒 Cryptographic Architecture
@@ -82,6 +89,19 @@ Connectors can join the **Cebulion Network** — a distributed mesh providing fa
 - Per-IP session limit: **64 concurrent WebSockets** per IP address (loopback bypassed for reverse proxy).
 - `ReadLimit`: 256 KB per WebSocket message. `ReadHeaderTimeout`: 10s (Slowloris mitigation).
 
+### Switching connectors, and dynamic connector lists
+
+Settings keeps a **saved list of connector URLs** to switch between, and optionally a set of **list endpoints** — plain HTTP(S) addresses returning one `ws://`/`wss://` URL per line.
+
+| Guard | Value |
+|---|---|
+| Response size | 64 KB per list, hard cap |
+| Timeout | 8 s per request |
+| Accepted lines | Only those starting `ws://` or `wss://`; everything else dropped |
+| Effect of a refresh | New URLs are **appended to your saved list — never connected automatically** |
+
+What a list host learns: your IP and the fact that a Szept client asked, exactly like any web request. What it can do: offer connectors it controls, which — if you then pick one — puts it in the same position as any connector (`pubkey ↔ IP` and who signals whom). What it cannot do: read messages, keys, membership, or impersonate anybody. Use lists you'd trust with your IP, or don't use them at all — the feature is opt-in and empty by default.
+
 ### What the connector sees (honestly)
 
 ![Szept Security — Connector Visibility](assets/security_connector_visibility.jpg)
@@ -91,8 +111,9 @@ Connectors can join the **Cebulion Network** — a distributed mesh providing fa
 | `pubkey ↔ IP` mapping | Message contents |
 | Who signals whom | Chat names & membership |
 | Connection timestamps | Epoch keys |
-| Mesh topology (RTT between connectors) | Attachments & avatars |
+| Mesh topology (RTT between connectors) | Attachments, avatars & banners |
 | | Friend relationships |
+| | Profile status / description |
 | | DAG structure or event history |
 
 ---
@@ -109,10 +130,12 @@ Events are validated **before** persistence (`ingest` → `Fold`):
 | `add` | Any current member |
 | `remove` / `rekey` | Owner only |
 | `msg` / `file` / `react` / `delete` | Any current member |
-| `avatar` / `nick` | Any current member (own profile only) |
+| `avatar` / `nick` / `profile` | Any current member — **own profile only** |
 | `rename` | Any current member |
 
 Validation: signature check → parent presence → `Fold` replays entire DAG with the new event included → authorization failure rejects the event.
+
+`Fold` applies profile-shaped events by looking up `st.Members[e.Author]` — the author's own row and nothing else. There is no addressing field to point one somewhere else, so "change someone else's status" is not an operation the protocol can express.
 
 ### Lamport ordering
 
@@ -127,7 +150,7 @@ This prevents antedating attacks — e.g. inserting an `add` at Lamport 2 that a
 
 - Epoch keys travel **only over authenticated E2E channels** (DTLS ctrl channel) to verified members.
 - Keys are **never overwritten** in the store: `if _, have := existing[ep]; have { continue }`.
-- A key that fails AEAD decryption is treated as absent: content-kind events (`msg`, `file`, `avatar`, `nick`, `react`, `delete`, `rename`) are tolerated without a key; membership events (`create`, `add`, `remove`, `rekey`) require a valid key or the entire fold fails.
+- A key that fails AEAD decryption is treated as absent: content-kind events (`msg`, `file`, `avatar`, `nick`, `profile`, `react`, `delete`, `rename`) are tolerated without a key; membership events (`create`, `add`, `remove`, `rekey`) require a valid key or the entire fold fails.
 - Keys are accepted **only from a current member** or, during join, from the inviter / a friend who introduced the chat.
 
 ### Member removal & cascade
@@ -151,7 +174,27 @@ Without the cascade, an attacker adds a second identity before being kicked — 
 
 ---
 
-## 📎 Attachments & Avatars
+## 🪪 Profile Card (status, description, banner)
+
+![Szept Security — Profile Card Flow](assets/profile_card_flow.svg)
+
+A profile card is a `profile` event: status line, description and banner travel **together**, so a peer who missed an earlier event still ends up with a consistent card instead of a half-updated one. An empty field clears that field.
+
+| Guard | Value |
+|---|---|
+| Status | `safeName()` — single line, control characters stripped, ≤ 64 B |
+| Description | `safeBio()` — newlines kept, other control characters stripped, ≤ 400 B |
+| Banner | Full attachment pipeline (below): magic-byte sniff, bomb guards, re-encode |
+| Author | Applied to the author's own member row only — never to anyone else's |
+| On arrival | Text is cleansed **again on ingest**, before it reaches the database or a widget |
+
+Cleansing happens on both ends deliberately: `SetStatus`/`SetBio` protect other clients from us, `noteAttachment` protects us from every other client. Text arriving from the network is never trusted because it was checked by whoever sent it.
+
+**Visibility, stated plainly:** the card is emitted into **every chat you are a member of**. Anyone sharing a group with you sees your status, description and banner — including people you never added as friends. It is a profile, not a secret; treat it like one. The connector still sees none of it: the card is encrypted under each chat's epoch key like any message.
+
+---
+
+## 📎 Attachments, Avatars & Banners
 
 ![Szept Security — Attachment Processing Pipeline](assets/security_attachment_pipeline.jpg)
 
@@ -164,15 +207,81 @@ Only metadata: `sha256(content)`, MIME type, filename, size, dimensions, thumbna
 | Stage | What happens |
 |---|---|
 | **Type detection** | Magic bytes (`http.DetectContentType`), never filename. Allowed: PNG, JPEG, GIF, WebP, MP4, WebM. Everything else rejected. |
-| **Bomb guards** | Checked before full decode: 32 MiB attachment / 4 MiB avatar input, 8 000 px per side, 20 MPx, GIF frame count limit. |
-| **Avatar transcode** | Decode → center-crop 256 px → re-encode PNG (animated GIF preserved). Strips EXIF, ICC profiles, polyglot payloads — only our encoder's bytes reach the DB. |
+| **Bomb guards** | Checked before full decode: 32 MiB attachment / 4 MiB avatar and banner input, 8 000 px per side, 20 MPx, GIF frame count limit. |
+| **Avatar transcode** | Decode → crop → 256 × 256 → re-encode PNG (animated GIF preserved, ≤ 1 MiB out). |
+| **Banner transcode** | Decode → crop → 720 × 240 → re-encode PNG, or GIF for an animated one: ≤ 48 frames, ≤ 2 MiB out, frames decimated until it fits. |
+| **Crop rectangle** | Comes from the UI, therefore from the user: intersected with the source bounds, degenerate values fall back to the whole image, aspect trimmed rather than stretched. Never used as given. |
+| **Re-encode, always** | Only our encoder's bytes reach the database — EXIF, ICC profiles and polyglot payloads appended after the image data do not survive the round trip. |
 | **Integrity check** | Receiver computes SHA-256 of received bytes vs. the hash in the signed DAG event. Hash is known only from decrypted history — acts as an access token (without it, you can't even request the file). |
 | **Filename** | Generated locally: basename only (no path traversal), control characters stripped, extension **forced by detected MIME**. A network file cannot land as `.sh` or `.exe`. |
 | **Transfer control** | Max 3 concurrent blob transfers per peer (`maxServing`). Total assembly memory capped at 64 MiB (`asmBudget`). Send buffer pauses at 1 MiB high water mark. |
 
+An animated banner is also a **memory** decision, not only a size one: every frame is held unpacked while it plays (720 × 240 RGBA ≈ 700 kB), which is why the frame cap exists and is low.
+
 Video is never decoded — it's handed to the system player. No decoder attack surface.
 
 Large files (>10 MB) replicate as a preview thumbnail only. The full payload stays at the sender and travels only when the recipient explicitly requests it.
+
+---
+
+## 🖥️ Local Surface
+
+Everything above defends the wire. This section is about the machine the app runs on — where the defence is file permissions and one token.
+
+![Szept Security — Local Attack Surface](assets/security_local_surface.svg)
+
+### Webhook bridge for bots
+
+![Szept Security — Local Webhook Bridge](assets/webhook_bridge.svg)
+
+Off by default. When enabled it binds **`127.0.0.1` only** and accepts one route:
+
+```
+POST /send   Authorization: Bearer <token>   {"chat": "...", "text": "..."}
+```
+
+| Guard | Value |
+|---|---|
+| Bind address | `127.0.0.1:<port>` — never `0.0.0.0`, so it is not reachable off the machine |
+| Token | 32 bytes from `crypto/rand`, base64url, compared with `crypto/subtle.ConstantTimeCompare` |
+| Body | `http.MaxBytesReader`, 64 KB |
+| Headers | `ReadHeaderTimeout` 5 s |
+| Lifecycle | Stopped on `Core.Close()` and before an account switch, so the port is free for the next process |
+
+**What this genuinely means:** any process on your computer that can read `config.json` can send messages that are signed by your key and indistinguishable from ones you typed. That is the intended feature (that's how you write a bot), and it is also its whole risk. Leave it off unless you use it; "New token" invalidates the old one immediately.
+
+### Files
+
+| Path | Mode | Contents |
+|---|---|---|
+| `~/.local/share/szept/identity.key` | `0600` | Seed + name, encrypted **only if you set a passphrase** |
+| `~/.local/share/szept/szept.db` | `0600` | Fully encrypted database (key derived from the seed) |
+| `~/.local/share/szept/profiles/<name>/` | `0700` | A second account: its own identity + database |
+| `~/.config/szept/config.json` | `0600` | Connector list, UI preferences, **webhook token in plaintext** |
+| System temp directory | OS default | Attachments opened with "Open" are written there **decrypted**, and stay |
+
+---
+
+## 👥 Accounts & Backups
+
+![Szept Security — Accounts and Backups](assets/accounts_backup.svg)
+
+### Accounts (profiles)
+
+- An account is a directory. Separate identity, separate database, separate contacts and history — nothing is shared between them.
+- The active account is recorded in `config.json`; the unlock screen and Settings → Accounts both switch it.
+- Switching **relaunches the process** rather than swapping a live `Core`. A live swap would leave background goroutines writing to a closed database; a restart is boring and correct.
+- A `-data` flag overrides the account choice, and the settings page says so instead of silently ignoring your click.
+- Deleting an account deletes its identity file and its database. Irreversible, no copy elsewhere.
+- Android keeps a single account — the platform already sandboxes the app per install.
+
+### Backup & restore
+
+- Backup writes a zip with `identity.key` and a **live bbolt snapshot** (taken inside a read transaction, so it is consistent without closing the app).
+- The backup is exactly as protected as your identity passphrase: the database key is derived from the seed, and the seed is what the passphrase encrypts. **No passphrase means a backup anyone can open.**
+- Restore reads **exactly two entry names** (`identity.key`, `szept.db`). Every other entry — including anything with `../` in its path — is skipped in full, so a hand-crafted archive cannot write outside the destination.
+- Restore never touches the running database: it unpacks into a **new account directory**, which you then switch to.
+- Entry size is bounded on read (`io.LimitReader`).
 
 ---
 
@@ -185,7 +294,8 @@ The **entire database is encrypted** — not just message bodies. Event envelope
 | Event bodies | Chat epoch key (XChaCha20-Poly1305) |
 | Event envelopes | Storage key = `HKDF(identity_seed, "szept-storage-v1")` |
 | Epoch keys, chat metadata, contacts | HKDF-derived subkeys from identity seed |
-| Blobs (attachments, avatars) | Storage key; content-addressed by SHA-256 (same image in 5 chats = 1 copy on disk) |
+| Profile index (avatar, banner, status, description) | Storage key — a cache of what the signed DAG already says |
+| Blobs (attachments, avatars, banners) | Storage key; content-addressed by SHA-256 (same image in 5 chats = 1 copy on disk) |
 
 Only **record keys are plaintext**: event IDs (hashes), blob content-addresses, friend pubkeys — all hashes themselves.
 
@@ -193,6 +303,8 @@ Every value is **bound to its storage location** (bucket + key as AEAD associate
 
 > ⚠️ **A password is optional, but without one there is no encryption at rest.**
 > An unprotected `identity.key` can be read by anyone with file access. The storage key derives from its seed — meaning the entire database becomes readable.
+
+Changing the passphrase re-encrypts **only the identity file** — the database key comes from the seed, which does not change. The old passphrase is verified first, on purpose: without that check a typo would lock the account out permanently.
 
 Attachments opened via the "Open" button land **decrypted in the system temp directory** and stay there.
 
@@ -213,6 +325,16 @@ Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream:
 
 ---
 
+## 📞 Calls
+
+![Szept — Call Audio Pipeline](assets/call_audio_pipeline.svg)
+
+- Voice is raw PCM (16 kHz mono, 20 ms frames); camera and screen share are JPEG frames. Everything rides the **same DTLS mesh** as messages — announced only to members already online, never relayed by a connector.
+- The mixer's per-person gain, pan and mute, the master volume and deafen, and the 3D scene positions are **entirely local**. Nothing about how you arranged the room is transmitted; muting someone is your setting, not a message to them.
+- Full mesh means every participant sees every stream — fine for a handful of people, and the reason there is no large-group mode.
+
+---
+
 ## ⚖️ Known Trade-offs
 
 | Area | Current state | Upgrade path |
@@ -220,6 +342,10 @@ Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream:
 | **Forward secrecy** | Sessions: yes (ephemeral DTLS). Chat history: no — epoch keys retained so new members can read history. Intentional product decision. | Frequent `/rekey` narrows the window. Double Ratchet for 1:1 chats. |
 | **Offline delivery** | None — P2P means no mailbox. | Opt-in sealed-sender store-and-forward relay. |
 | **Connector metadata** | Sees connection graph (like a torrent tracker). | Self-host + Tor/VPN + Cebulion mesh. |
+| **Webhook token** | Plaintext in `config.json` (`0600`). Any local process that reads it can send as you. | OS keyring, or a per-caller token with a scope. |
+| **Connector lists** | Fetching one reveals your IP to its host, and its entries land in your switch list. | Pin the connectors you trust and skip lists entirely. |
+| **Profile card** | Status, description and banner are visible to everyone sharing any chat with you. | Per-chat visibility, if it ever proves worth the complexity. |
+| **Temp files** | "Open" writes a decrypted copy into the system temp directory and leaves it. | Open into a private directory wiped on exit. |
 | **Mesh calls** | Each participant sees all streams (full mesh). | SFU relay for larger groups. |
 | **Traffic analysis** | Packet size/timing can reveal activity. | DTLS-level variable padding (Cebulion already adds 0–64B random pad per datagram). |
 | **Orphan flooding** | Capped at 5000 total orphaned events across all chats. | Per-peer rate limiting. |

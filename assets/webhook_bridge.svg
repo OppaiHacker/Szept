@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1376 440" width="1376" height="440"
+     font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="1376" height="440" fill="#161a2b"/>
+
+  <text x="688" y="52" fill="#e9edf5" font-size="28" text-anchor="middle">Local webhook — how a bot speaks through Szept</text>
+
+  <rect x="40" y="90" width="330" height="216" rx="14" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="40" y="90" width="6" height="216" rx="3" fill="#a48cd8"/>
+  <text x="68" y="126" fill="#e9edf5" font-size="19">Your script</text>
+  <text x="68" y="160" fill="#98a2ba" font-size="15">cron job, CI hook, home</text>
+  <text x="68" y="184" fill="#98a2ba" font-size="15">automation — anything that</text>
+  <text x="68" y="208" fill="#98a2ba" font-size="15">can make an HTTP request</text>
+  <text x="68" y="248" fill="#7f88a0" font-size="14">POST /send with a bearer token</text>
+  <text x="68" y="272" fill="#7f88a0" font-size="14">and {"chat": …, "text": …}</text>
+
+  <path d="M378 190 h44" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M422 190 l-11 -6 v12 z" fill="#6c9bd6"/>
+  <text x="400" y="172" fill="#7f88a0" font-size="13" text-anchor="middle">loopback</text>
+
+  <rect x="432" y="90" width="410" height="216" rx="14" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="432" y="90" width="6" height="216" rx="3" fill="#6fbf8b"/>
+  <text x="460" y="126" fill="#e9edf5" font-size="19">Listener on 127.0.0.1</text>
+  <text x="460" y="160" fill="#98a2ba" font-size="15">Constant-time token compare</text>
+  <text x="460" y="184" fill="#98a2ba" font-size="15">64 KB body cap · 5 s header timeout</text>
+  <text x="460" y="208" fill="#98a2ba" font-size="15">Chat matched by its display name</text>
+  <text x="460" y="248" fill="#7f88a0" font-size="14">204 sent · 401 bad token</text>
+  <text x="460" y="272" fill="#7f88a0" font-size="14">400 malformed · 404 no such chat</text>
+
+  <path d="M850 190 h44" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M894 190 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <rect x="904" y="90" width="432" height="216" rx="14" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="904" y="90" width="6" height="216" rx="3" fill="#67b3a3"/>
+  <text x="932" y="126" fill="#e9edf5" font-size="19">Ordinary message path</text>
+  <text x="932" y="160" fill="#98a2ba" font-size="15">Encrypted under the chat's epoch key,</text>
+  <text x="932" y="184" fill="#98a2ba" font-size="15">Ed25519-signed, appended to the DAG,</text>
+  <text x="932" y="208" fill="#98a2ba" font-size="15">gossiped to members who are online</text>
+  <text x="932" y="248" fill="#7f88a0" font-size="14">A bot message is indistinguishable from</text>
+  <text x="932" y="272" fill="#7f88a0" font-size="14">one you typed — it is signed by your key</text>
+
+  <rect x="40" y="336" width="1296" height="76" rx="12" fill="#1a1f30" stroke="#2e3448"/>
+  <text x="68" y="368" fill="#e0b060" font-size="16">Trust boundary: the listener never leaves loopback, but it has no idea which local process is calling it.</text>
+  <text x="68" y="394" fill="#98a2ba" font-size="15">Everyone on the machine who can read config.json holds the token. It is off by default, and "New token" invalidates the old one instantly.</text>
+</svg>

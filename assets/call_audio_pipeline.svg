@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1376 660" width="1376" height="660"
+     font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="1376" height="660" fill="#161a2b"/>
+
+  <text x="688" y="52" fill="#e9edf5" font-size="30" text-anchor="middle">Calls — full mesh audio, per-person mix, 3D scene</text>
+  <text x="688" y="84" fill="#98a2ba" font-size="16" text-anchor="middle">no media server: every participant sends to every other participant over their own DTLS link</text>
+
+  <rect x="40" y="116" width="290" height="176" rx="14" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="40" y="116" width="6" height="176" rx="3" fill="#a48cd8"/>
+  <text x="68" y="152" fill="#e9edf5" font-size="19">Microphone</text>
+  <text x="68" y="186" fill="#98a2ba" font-size="15">Raw PCM, 16 kHz mono</text>
+  <text x="68" y="212" fill="#98a2ba" font-size="15">20 ms frames, sequenced</text>
+  <text x="68" y="248" fill="#7f88a0" font-size="14">Mic toggle stops the capture</text>
+  <text x="68" y="270" fill="#7f88a0" font-size="14">device, not just the stream</text>
+
+  <path d="M338 204 h32" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M370 204 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <rect x="378" y="116" width="290" height="176" rx="14" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="378" y="116" width="6" height="176" rx="3" fill="#67b3a3"/>
+  <text x="406" y="152" fill="#e9edf5" font-size="19">Mesh transport</text>
+  <text x="406" y="186" fill="#98a2ba" font-size="15">One DTLS link per peer,</text>
+  <text x="406" y="212" fill="#98a2ba" font-size="15">UDP wrapped in ChaCha20</text>
+  <text x="406" y="248" fill="#7f88a0" font-size="14">Nothing transits the connector,</text>
+  <text x="406" y="270" fill="#7f88a0" font-size="14">so ~8 peers is the ceiling</text>
+
+  <path d="M676 204 h32" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M708 204 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <rect x="716" y="116" width="290" height="176" rx="14" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="716" y="116" width="6" height="176" rx="3" fill="#6c9bd6"/>
+  <text x="744" y="152" fill="#e9edf5" font-size="19">Mixer, per source</text>
+  <text x="744" y="186" fill="#98a2ba" font-size="15">gain 0–2 · pan −1…+1 · mute</text>
+  <text x="744" y="212" fill="#98a2ba" font-size="15">kept even before first frame</text>
+  <text x="744" y="248" fill="#7f88a0" font-size="14">One buffer per speaker, summed</text>
+  <text x="744" y="270" fill="#7f88a0" font-size="14">into the output device</text>
+
+  <path d="M1014 204 h32" stroke="#6c9bd6" stroke-width="2" fill="none"/>
+  <path d="M1046 204 l-11 -6 v12 z" fill="#6c9bd6"/>
+
+  <rect x="1054" y="116" width="282" height="176" rx="14" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="1054" y="116" width="6" height="176" rx="3" fill="#6fbf8b"/>
+  <text x="1082" y="152" fill="#e9edf5" font-size="19">Output</text>
+  <text x="1082" y="186" fill="#98a2ba" font-size="15">Master volume 0–200 %</text>
+  <text x="1082" y="212" fill="#98a2ba" font-size="15">Deafen mutes the whole mix</text>
+  <text x="1082" y="248" fill="#7f88a0" font-size="14">Volume survives deafen and</text>
+  <text x="1082" y="270" fill="#7f88a0" font-size="14">is remembered in config.json</text>
+
+  <rect x="40" y="324" width="640" height="256" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="40" y="324" width="7" height="256" rx="3" fill="#a48cd8"/>
+  <text x="72" y="362" fill="#e9edf5" font-size="21">3D scene — position drives the mix</text>
+  <text x="72" y="400" fill="#c7cee0" font-size="16">Drag people around the room. You stand at the front and never move.</text>
+  <text x="72" y="436" fill="#98a2ba" font-size="15" font-family="monospace">dist = √(0.35·dx² + depth²)</text>
+  <text x="380" y="436" fill="#7f88a0" font-size="15" font-family="monospace">capped at 1</text>
+  <text x="72" y="464" fill="#98a2ba" font-size="15" font-family="monospace">gain = 1 − 0.85·dist</text>
+  <text x="380" y="464" fill="#98a2ba" font-size="15" font-family="monospace">pan = 0.8·dx</text>
+  <text x="72" y="502" fill="#98a2ba" font-size="15">Sideways mostly pans, distance mostly quiets — moving left should not</text>
+  <text x="72" y="526" fill="#98a2ba" font-size="15">silence someone. Tapping a token opens their own slider and mute.</text>
+  <text x="72" y="558" fill="#6fbf8b" font-size="15">Entirely local: the layout is yours alone, nothing about it is sent anywhere.</text>
+
+  <rect x="712" y="324" width="624" height="256" rx="16" fill="#1d2233" stroke="#3a4058"/>
+  <rect x="712" y="324" width="7" height="256" rx="3" fill="#67b3a3"/>
+  <text x="744" y="362" fill="#e9edf5" font-size="21">Video and screen share</text>
+  <text x="744" y="400" fill="#c7cee0" font-size="16">JPEG frames over the reliable data channels of the same mesh.</text>
+  <text x="744" y="436" fill="#98a2ba" font-size="15">Camera device is configurable (V4L2 path on Linux); screen share is a</text>
+  <text x="744" y="460" fill="#98a2ba" font-size="15">desktop-only source. Received video is decoded, never executed.</text>
+  <text x="744" y="498" fill="#98a2ba" font-size="15">The in-call panel carries camera, screen, fullscreen, pause, deafen,</text>
+  <text x="744" y="522" fill="#98a2ba" font-size="15">scene and the volume slider — no dialog to hunt for mid-conversation.</text>
+  <text x="744" y="558" fill="#7f88a0" font-size="14">Calls are announced as control messages to members already online.</text>
+
+  <rect x="40" y="606" width="1296" height="38" rx="10" fill="#1a1f30" stroke="#2e3448"/>
+  <text x="688" y="631" fill="#98a2ba" font-size="15" text-anchor="middle">Everyone sees everyone: a full mesh is simple and serverless, and it is also why large calls need an SFU that Szept deliberately does not have.</text>
+</svg>
