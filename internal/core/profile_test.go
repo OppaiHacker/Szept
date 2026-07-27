@@ -1,6 +1,7 @@
 package core
 
 import (
+	"image"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestProfileCard(t *testing.T) {
 	if err := c.SetBio("dwie linie\no mnie"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetBanner(testImagePNG(t)); err != nil {
+	if err := c.SetBanner(testImagePNG(t), image.Rectangle{}); err != nil {
 		t.Fatal(err)
 	}
 

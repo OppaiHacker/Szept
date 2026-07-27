@@ -84,7 +84,7 @@ func buildSeed(t *testing.T, dir string) {
 	if err := c.SetBio("Piszę szepta po godzinach.\nNajchętniej offline, ale kod sam się nie napisze."); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetBanner(seedBanner(t)); err != nil {
+	if err := c.SetBanner(seedBanner(t), image.Rectangle{}); err != nil {
 		t.Fatal(err)
 	}
 	putEvent(t, c, dm, bob.priv, event.KindProfile,
