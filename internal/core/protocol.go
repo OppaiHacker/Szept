@@ -289,8 +289,8 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 			c.St.PutChat(chat, store.ChatMeta{Name: st.Name})
 		}
 	}
-	// attachment or avatar: request missing content
-	if e.Kind == event.KindFile || e.Kind == event.KindAvatar {
+	// attachment, avatar or banner: request missing content
+	if blobKind(e.Kind) {
 		c.noteAttachment(chat, e)
 	}
 	var skip []byte

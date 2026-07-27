@@ -64,16 +64,16 @@ func TestStoreRoundtrip(t *testing.T) {
 	if s.HasBlob(crypt.RandBytes(32)) {
 		t.Fatal("HasBlob on random hash")
 	}
-	if _, ok := s.Avatar(priv.Public().(ed25519.PublicKey)); ok {
+	if _, ok := s.Profile(priv.Public().(ed25519.PublicKey)); ok {
 		t.Fatal("avatar found without put")
 	}
 	pub := priv.Public().(ed25519.PublicKey)
-	s.PutAvatar(pub, AvatarMeta{Blob: hash, Mime: "image/gif"})
-	if a, ok := s.Avatar(pub); !ok || a.Mime != "image/gif" || string(a.Blob) != string(hash) {
+	s.PutProfile(pub, ProfileMeta{Blob: hash, Mime: "image/gif"})
+	if a, ok := s.Profile(pub); !ok || a.Mime != "image/gif" || string(a.Blob) != string(hash) {
 		t.Fatalf("avatar roundtrip: %+v %v", a, ok)
 	}
-	s.PutAvatar(pub, AvatarMeta{}) // empty = delete
-	if _, ok := s.Avatar(pub); ok {
+	s.PutProfile(pub, ProfileMeta{}) // empty = delete
+	if _, ok := s.Profile(pub); ok {
 		t.Fatal("avatar survived deletion")
 	}
 

@@ -140,6 +140,8 @@ func TestShotsDesktop(t *testing.T) {
 		{"24-konta", u.accountsPage},
 		{"25-system", u.systemPage},
 		{"26-wyglad", u.appearancePage},
+		{"26b-status", u.statusPage},
+		{"26c-baner", u.bannerPage},
 		{"27-boty", u.botsPage},
 		{"28-wkrotce", u.comingSoonPage("Pluginy", "Rozszerzenia pisane przez społeczność.")},
 	} {
@@ -147,6 +149,12 @@ func TestShotsDesktop(t *testing.T) {
 		shot(s.name)
 	}
 	u.closeSettings()
+
+	// karta profilu (baner + status + opis) — pionowy układ łatwo psuje się
+	// przy zmianach w nagłówku, więc zrzut zostaje jako test
+	u.profilePage(u.c.ID.Pub, u.c.ID.Name, false, u.cur())
+	shot("31-profil")
+	u.w.Canvas().Overlays().Remove(u.w.Canvas().Overlays().Top())
 
 	// ekrany startowe stoją poza normalnym przepływem aplikacji, więc ich
 	// układ psuje się niezauważony — zrzut jest tu całym testem

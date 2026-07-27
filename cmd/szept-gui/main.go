@@ -227,6 +227,8 @@ type ui struct {
 	center     *fyne.Container   // desktop: toggles welcome <-> conversation
 	convRoot   fyne.CanvasObject // conversation view
 	convBottom *fyne.Container   // conversation bottom bar: hints, call panel, composer
+	memberBox  *fyne.Container   // desktop: member column next to the conversation
+	memberHead *clipText
 
 	title      *clipText
 	subtitle   *clipText
@@ -267,6 +269,7 @@ type ui struct {
 	shown     int    // how many messages rendered in open chat
 	grew      bool   // just loaded older — scroll should stay in place
 	msgSig    string // fingerprint of rendered conversation — skip scroll if unchanged
+	memSig    string // same for the member column
 	lastCount int    // messages in selected chat (new message animation)
 	lastChat  string // detect chat change (prevent false flash)
 	booted    bool
@@ -807,6 +810,7 @@ func (u *ui) refresh() {
 	if open {
 		u.updateConvHeader(ch)
 		u.renderMessages(ch)
+		u.renderMembers(ch)
 	}
 	u.renderCallState(ch)
 	u.spatialSync()

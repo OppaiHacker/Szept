@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -47,18 +48,27 @@ func (u *ui) rebuildMe() {
 	}
 	dot := canvas.NewText("●", tone)
 	dot.TextSize = fs(11)
+	status, bio := u.c.StatusOf(u.c.ID.Pub)
 
-	head := container.NewHBox(
-		container.NewCenter(u.avatarView(u.c.ID.Pub, u.c.ID.Name, avatarHuge)), hspace(12),
-		container.NewVBox(name, fp,
-			container.NewHBox(container.NewCenter(dot), hspace(4),
-				container.NewCenter(mutedText(state, 11)))))
+	col := container.NewVBox(name, fp,
+		container.NewHBox(container.NewCenter(dot), hspace(4),
+			container.NewCenter(mutedText(state, 11))))
+	if status != "" {
+		col.Add(mutedText(status, 12))
+	}
+	head := fyne.CanvasObject(container.NewHBox(
+		container.NewCenter(u.avatarView(u.c.ID.Pub, u.c.ID.Name, avatarHuge)), hspace(12), col))
+	if b := u.bannerView(u.c.ID.Pub, u.bannerW()); b != nil {
+		head = container.NewVBox(b, head)
+	}
 
 	u.meBox.RemoveAll()
 	u.meBox.Add(container.NewPadded(card(head)))
 	u.meBox.Add(section("KONTO"))
 	u.meBox.Add(navRow(theme.DocumentCreateIcon(), "Nazwa", u.c.ID.Name, u.nickPage))
 	u.meBox.Add(navRow(theme.AccountIcon(), "Awatar", "Zdjęcie widoczne przy twoich wiadomościach", u.avatarPage))
+	u.meBox.Add(navRow(theme.InfoIcon(), "Status i opis", statusDesc(status, bio), u.statusPage))
+	u.meBox.Add(navRow(theme.ColorPaletteIcon(), "Baner", "Pasek na górze twojego profilu", u.bannerPage))
 	u.meBox.Add(navRow(theme.VisibilityIcon(), "Mój kod / QR", "Pokaż go, żeby ktoś dodał cię do znajomych", u.codePage))
 	u.meBox.Add(section("USTAWIENIA"))
 	u.meBox.Add(navRow(theme.MenuExpandIcon(), "Pluginy", "wkrótce",
@@ -108,6 +118,52 @@ func (u *ui) nickPage() {
 		body.Add(box)
 	}
 	u.page("Nazwa", body)
+}
+
+// statusDesc: one-line summary of the card for the settings row.
+func statusDesc(status, bio string) string {
+	switch {
+	case status != "":
+		return status
+	case bio != "":
+		return trunc(strings.ReplaceAll(bio, "\n", " "), 48)
+	}
+	return "Krótki status i opis widoczne w twoim profilu"
+}
+
+func (u *ui) statusPage() {
+	status, bio := u.c.StatusOf(u.c.ID.Pub)
+	st := widget.NewEntry()
+	st.PlaceHolder = "np. gram, wrócę wieczorem"
+	st.SetText(status)
+	desc := widget.NewMultiLineEntry()
+	desc.PlaceHolder = "kilka zdań o sobie"
+	desc.Wrapping = fyne.TextWrapWord
+	desc.SetText(bio)
+	desc.SetMinRowsVisible(4)
+	save := func() {
+		if err := u.c.SetStatus(st.Text); err != nil {
+			u.fail(err)
+			return
+		}
+		if err := u.c.SetBio(desc.Text); err != nil {
+			u.fail(err)
+			return
+		}
+		u.popPage()
+		u.refresh()
+		u.toast("Profil zapisany")
+	}
+	st.OnSubmitted = func(string) { save() }
+	u.page("Status i opis", container.NewVBox(
+		section("STATUS"), st,
+		mutedWrap(fmt.Sprintf("Jedna linia pod nazwą, najwyżej %d znaków.", core.MaxStatus)),
+		vspace(6), section("O MNIE"), desc,
+		mutedWrap(fmt.Sprintf("Najwyżej %d znaków.", core.MaxBio)),
+		vspace(6), bigButton("Zapisz", theme.ConfirmIcon(), save),
+		mutedWrap("Status, opis i baner rozchodzą się do wszystkich twoich czatów jako "+
+			"podpisane zdarzenie — widzą je członkowie tych czatów, nikt więcej."),
+	))
 }
 
 // nickHistoryBox: names a person announced, newest first. Returns nil when
@@ -184,12 +240,23 @@ func (u *ui) profilePage(pub []byte, name string, canKick bool, ch *core.ChatInf
 	fp := widget.NewLabel(identity.Fingerprint(pub))
 	fp.TextStyle = fyne.TextStyle{Monospace: true}
 
-	rows := container.NewVBox(container.NewPadded(card(container.NewVBox(
-		container.NewCenter(u.avatarView(pub, name, avatarHuge)),
-		container.NewCenter(title),
-		container.NewCenter(container.NewHBox(container.NewCenter(dot), hspace(4),
-			container.NewCenter(mutedText(state, 11)))),
-	))))
+	status, bio := u.c.StatusOf(pub)
+	head := container.NewVBox()
+	if b := u.bannerView(pub, u.bannerW()); b != nil {
+		head.Add(b)
+	}
+	head.Add(container.NewCenter(u.avatarView(pub, name, avatarHuge)))
+	head.Add(container.NewCenter(title))
+	head.Add(container.NewCenter(container.NewHBox(container.NewCenter(dot), hspace(4),
+		container.NewCenter(mutedText(state, 11)))))
+	if status != "" {
+		head.Add(container.NewCenter(mutedText(status, 12)))
+	}
+	rows := container.NewVBox(container.NewPadded(card(head)))
+	if bio != "" {
+		rows.Add(section("O MNIE"))
+		rows.Add(container.NewPadded(card(mutedWrap(bio))))
+	}
 	rows.Add(section("ODCISK KLUCZA"))
 	rows.Add(container.NewPadded(container.NewBorder(nil, nil, nil,
 		widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
@@ -272,7 +339,8 @@ func (u *ui) rebuildFriends() {
 	u.friendBox.RemoveAll()
 	for _, f := range friends {
 		f := f
-		u.friendBox.Add(u.personRow(f.Pub, f.Name, "", u.c.Online(f.Pub), func() {
+		status, _ := u.c.StatusOf(f.Pub)
+		u.friendBox.Add(u.personRow(f.Pub, f.Name, status, u.c.Online(f.Pub), func() {
 			u.profilePage(f.Pub, f.Name, false, nil)
 		}))
 	}

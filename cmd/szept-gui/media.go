@@ -225,6 +225,86 @@ func (u *ui) avatarView(pub []byte, name string, size float32) fyne.CanvasObject
 	return container.NewGridWrap(sz, container.NewStack(circle, container.NewCenter(t)))
 }
 
+// bannerW: banner spans the card it sits on — full width on a phone,
+// card width on desktop.
+func (u *ui) bannerW() float32 {
+	if u.mobile {
+		if cw := u.w.Canvas().Size().Width; cw > 120 {
+			return cw - 56
+		}
+	}
+	return 260
+}
+
+// bannerView: wide strip above a profile, w px across (height follows the
+// fixed banner ratio). nil when the person has no banner or its bytes have
+// not arrived yet — caller then simply skips the header.
+func (u *ui) bannerView(pub []byte, w float32) fyne.CanvasObject {
+	data, _, hash := u.c.BannerOf(pub)
+	if len(data) == 0 {
+		return nil
+	}
+	img := u.still(fmt.Sprintf("%x", hash), data, false)
+	if img == nil {
+		return nil
+	}
+	ci := canvas.NewImageFromImage(img)
+	ci.FillMode = canvas.ImageFillContain
+	ci.SetMinSize(fyne.NewSize(w, w*float32(attach.BannerH)/float32(attach.BannerW)))
+	return ci
+}
+
+// bannerPage: same flow as avatarPage — core normalizes the image, here we
+// only hand over bytes.
+func (u *ui) bannerPage() {
+	preview := container.NewStack()
+	redraw := func() {
+		if b := u.bannerView(u.c.ID.Pub, u.bannerW()*1.3); b != nil {
+			preview.Objects = []fyne.CanvasObject{b}
+		} else {
+			preview.Objects = []fyne.CanvasObject{
+				container.NewCenter(mutedText("(brak baneru)", 12))}
+		}
+		preview.Refresh()
+		u.refresh()
+	}
+	redraw()
+	set := func(data []byte) {
+		if err := u.c.SetBanner(data); err != nil {
+			u.fail(err)
+			return
+		}
+		redraw()
+		u.toast("Baner zmieniony")
+	}
+	pickSys := bigButton("Wybierz z galerii", theme.FolderOpenIcon(), func() {
+		u.pickImage(attach.MaxAvatarBytes, func(_ string, data []byte) { set(data) })
+	})
+	del := widget.NewButtonWithIcon("Usuń baner", theme.DeleteIcon(), func() {
+		if err := u.c.ClearBanner(); err != nil {
+			u.fail(err)
+			return
+		}
+		redraw()
+	})
+	grid := u.galleryGrid(true, func(path string) {
+		data, err := readLimit(path, attach.MaxAvatarBytes)
+		if err != nil {
+			u.fail(err)
+			return
+		}
+		set(data)
+	})
+	u.page("Baner", container.NewVBox(
+		preview, vspace(8), pickSys, del,
+		mutedWrap(fmt.Sprintf("Obrazek jest przycinany do paska %d×%d px i kodowany od nowa "+
+			"jako PNG. Animacja nie przechodzi — zostaje pierwsza klatka. Baner rozchodzi "+
+			"się do twoich czatów jak awatar: podpisanym zdarzeniem.",
+			attach.BannerW, attach.BannerH)),
+		vspace(6), section("Z FOLDERU "+strings.ToUpper(filepath.Base(u.mediaDir()))), grid,
+	))
+}
+
 // avatarPage: preview + file selection. Image is normalized in core
 // (re-encoding), so here we only provide bytes.
 func (u *ui) avatarPage() {

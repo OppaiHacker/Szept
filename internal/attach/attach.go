@@ -48,6 +48,8 @@ const (
 	MaxAvatarOut = 1 << 20
 	// AvatarSide: avatar is square, center-cropped.
 	AvatarSide = 256
+	// BannerW/BannerH: profile banner is a wide strip, center-cropped.
+	BannerW, BannerH = 720, 240
 
 	maxGifFrames = 300
 	maxDim       = 8000
@@ -336,6 +338,37 @@ func Avatar(data []byte) ([]byte, string, error) {
 	return buf.Bytes(), "image/png", nil
 }
 
+// Banner normalizes image into a profile banner: BannerW×BannerH strip,
+// re-encoded as PNG.
+// Banner is a still — an animated GIF keeps its first frame only.
+func Banner(data []byte) ([]byte, string, error) {
+	if len(data) == 0 {
+		return nil, "", errors.New("pusty plik")
+	}
+	if len(data) > MaxAvatarBytes {
+		return nil, "", fmt.Errorf("baner ma %s — limit to %s",
+			HumanSize(int64(len(data))), HumanSize(MaxAvatarBytes))
+	}
+	if !IsImage(Sniff(data)) {
+		return nil, "", errors.New("baner musi być obrazem: PNG, JPEG, GIF albo WebP")
+	}
+	if _, _, _, err := imageDims(data); err != nil {
+		return nil, "", err
+	}
+	src, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, "", fmt.Errorf("to nie jest poprawny obraz: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, cropScale(src, BannerW, BannerH)); err != nil {
+		return nil, "", err
+	}
+	if buf.Len() > MaxAvatarOut {
+		return nil, "", errors.New("baner po przeskalowaniu wciąż za duży — użyj prostszego obrazka")
+	}
+	return buf.Bytes(), "image/png", nil
+}
+
 // avatarGIF: decodes all frames, compositing diffs (GIF stores diffs, not
 // full images), scales and re-encodes. If output exceeds limit,
 // drops every second frame and retries.
@@ -387,17 +420,22 @@ func decimate(frames []image.Image, delays []time.Duration) ([]image.Image, []ti
 }
 
 // square crops image to center square and scales to side px.
-func square(src image.Image, side int) image.Image {
+func square(src image.Image, side int) image.Image { return cropScale(src, side, side) }
+
+// cropScale: center-crop to the target aspect ratio, then scale to w×h.
+func cropScale(src image.Image, w, h int) image.Image {
 	b := src.Bounds()
-	n := b.Dx()
-	if b.Dy() < n {
-		n = b.Dy()
+	cw, chh := b.Dx(), b.Dy()
+	if cw*h > chh*w { // source wider than target — trim the sides
+		cw = chh * w / h
+	} else {
+		chh = cw * h / w
 	}
-	crop := image.Rect(0, 0, n, n).Add(image.Point{
-		X: b.Min.X + (b.Dx()-n)/2,
-		Y: b.Min.Y + (b.Dy()-n)/2,
+	crop := image.Rect(0, 0, cw, chh).Add(image.Point{
+		X: b.Min.X + (b.Dx()-cw)/2,
+		Y: b.Min.Y + (b.Dy()-chh)/2,
 	})
-	dst := image.NewRGBA(image.Rect(0, 0, side, side))
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, crop, xdraw.Over, nil)
 	return dst
 }

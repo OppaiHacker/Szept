@@ -6,8 +6,12 @@ package main
 // real sync would require connector and second process.
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"image"
+	"image/color"
+	"image/png"
 	"testing"
 	"time"
 
@@ -73,6 +77,19 @@ func buildSeed(t *testing.T, dir string) {
 		{&bob, "👍", 5 * time.Minute},
 	})
 
+	// karta profilu: status, opis i baner — żeby zrzuty pokazywały je wypełnione
+	if err := c.SetStatus("gram, wrócę wieczorem"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetBio("Piszę szepta po godzinach.\nNajchętniej offline, ale kod sam się nie napisze."); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetBanner(seedBanner(t)); err != nil {
+		t.Fatal(err)
+	}
+	putEvent(t, c, dm, bob.priv, event.KindProfile,
+		event.Body{Text: "na rowerze", Bio: "bob, sąsiad z 3 piętra", TS: time.Now().Unix()})
+
 	grp, err := c.CreateChat("ekipa-z-osiedla")
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +104,22 @@ func buildSeed(t *testing.T, dir string) {
 		{&kasia, "to do zobaczenia", 30 * time.Minute},
 		{nil, "spoko", 2 * time.Minute},
 	})
+}
+
+// seedBanner: pasek gradientu — realny obrazek, bez pliku na dysku.
+func seedBanner(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 720, 240))
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 720; x++ {
+			img.Set(x, y, color.RGBA{uint8(60 + x/8), uint8(40 + y/3), 0xb0, 0xff})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func addMember(t *testing.T, c *core.Core, id *identity.Identity, chat []byte, p seedPerson) {
