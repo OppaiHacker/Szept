@@ -330,7 +330,7 @@ func readLimit(path string, limit int64) ([]byte, error) {
 
 // attachPage: user view after tapping paperclip. Thumbnail grid
 // from media folder at top, system picker below. Caption is taken
-// from message field to allow sending image with comment like Discord.
+// from message field to allow sending image with a comment.
 func (u *ui) attachPage() {
 	ch := u.cur()
 	if ch == nil {

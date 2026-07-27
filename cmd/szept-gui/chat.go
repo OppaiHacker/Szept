@@ -1,6 +1,6 @@
 package main
 
-// Chat list and conversation view. Layout inspired by mobile Discord:
+// Chat list and conversation view. Usual mobile messenger layout:
 // chat row = avatar + name + preview of last message + badge,
 // conversation = separate full-screen page with app bar, bubbles, and text input.
 
@@ -31,7 +31,7 @@ import (
 const msgPage = 30
 
 // grouping: consecutive messages from the same person within this window merge
-// into one block (single header, single avatar) — just like Discord.
+// into one block (single header, single avatar).
 const groupWindow = 5 * time.Minute
 
 // ---- chat list ----
@@ -584,7 +584,7 @@ func bubbleMargin(mobile bool) float32 {
 
 // bubbleRow: single bubble with header and avatar (or without when grouped).
 // Timestamp appears only on first message of series — subsequent bubbles
-// from same author are bare, just like Discord. Not just visual: bubble without
+// from same author are bare. Not just visual: bubble without
 // footer saves 5 widgets, and we scroll hundreds here.
 func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 	lastBubble **canvas.Rectangle, lastOwn *bool) fyne.CanvasObject {
