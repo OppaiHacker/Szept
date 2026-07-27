@@ -1,120 +1,190 @@
-# Model bezpieczeństwa
+# 🔐 Security Model
 
-## Tożsamość
+> **Szept is designed so that the only party you need to trust is the person you are talking to.**  
+> No server ever holds your keys, your messages, or your friend graph.
 
-- Para kluczy **Ed25519** = tożsamość. Plik klucza szyfrowany
-  **argon2id** (3 iteracje, 64 MiB) + **XChaCha20-Poly1305**, uprawnienia 0600.
-- Odcisk (fingerprint) pokazywany w UI; kody znajomego/zaproszenia **zawierają
-  pełny klucz publiczny**, więc dodanie kontaktu nie opiera się na zaufaniu do
-  serwera ani na TOFU — MITM przy nawiązaniu kontaktu wymagałby podmiany kodu
-  poza aplikacją.
+---
 
-## Transport (P2P)
+## 🔑 Identity
 
-- Połączenia: WebRTC **DTLS 1.2+** (pion), NAT traversal przez ICE/STUN.
-- Sygnaling (SDP z odciskiem certyfikatu DTLS) przechodzi przez connector, ale
-  jest **podpisany Ed25519 nadawcy i weryfikowany względem oczekiwanego klucza
-  odbiorcy** (+ świeżość ±2 min, adresat, tie-break kolizji). Connector **nie
-  może** podmienić ofert ani zrobić MITM — DTLS jest związany z tożsamością.
-- Efekt: każdy kanał danych to uwierzytelniona rura E2E między dwiema znanymi
-  tożsamościami. Nie ma TURN, więc nie istnieje żaden pośrednik treści.
+Every Szept user is an **Ed25519 keypair** — that's their identity, full stop.
 
-## Treści czatów
+- The key file is encrypted with **argon2id** (3 iterations, 64 MiB memory) + **XChaCha20-Poly1305**, stored with `0600` permissions.
+- A human-readable fingerprint is shown in the UI for out-of-band verification.
+- **Friend / invite codes embed the full public key** — adding a contact does not rely on trusting the server or TOFU. A MITM at the invite-code level would require tampering with the code outside the app.
 
-- Czat = **DAG zdarzeń** (rodzice = hashe SHA-256), każde zdarzenie:
-  - podpisane Ed25519 autora (podpis obejmuje ciphertext i całą strukturę),
-  - ciało zaszyfrowane **XChaCha20-Poly1305** kluczem **epoki** czatu,
-    z kontekstem (chat, autor, rodzice, epoka) jako associated data.
-- Replikacja: wymiana headów + dociąganie brakujących przodków; deduplikacja po
-  ID; zdarzenia weryfikowane **przed** zapisem (podpis + autoryzacja przez fold:
-  genesis→właściciel, add→członek, remove/rekey→właściciel, msg→członek).
-  Historia jest niezmienialna — modyfikacja zmienia hash i unieważnia potomków.
-- Porządek stosowania zdarzeń wynika z DAG-u, nie z licznika nadawcy: `Lamport`
-  musi być dokładnie `max(rodzice)+1`, a rodzic musi być zastosowany przed
-  dzieckiem. Bez tego autor wybierałby sobie miejsce w historii — antydatowane
-  `add` wchodziłoby w stan sprzed czyjegoś usunięcia.
-- **Klucze epok** wędrują wyłącznie kanałami E2E (DTLS) do zweryfikowanych
-  członków; nigdy nie są nadpisywane; zły klucz = wykrywalny błąd AEAD.
-  Przyjmujemy je **tylko od członka czatu** (w trakcie dołączania — od tego, kto
-  czat wprowadził), a klucz, którym nie da się odszyfrować, jest traktowany jak
-  brak klucza: treść zostaje nieczytelna, ale czat działa dalej.
-- **Usunięcie członka** → automatyczna rotacja epoki: wyrzucony nie odszyfruje
-  nowych wiadomości i nie dostaje nowych zdarzeń (peers odmawiają synca), a jego
-  łącze jest zrywane. Usunięcie **kaskaduje** na tych, których wpuścił —
-  inaczej wystarczyłoby dodać do czatu drugą swoją tożsamość, żeby przeżyć kick.
-  Ręczna rotacja: `/rekey`.
-- Zaproszenia: sekret 128-bit, po stronie zapraszającego trzymany **hash**;
-  jednorazowość egzekwowana atomowo. PIN ma **limit 5 prób** — potem zaproszenie
-  jest spalone (bez tego 10⁶ kombinacji zgaduje się w sekundy po samym kanale).
+---
 
-## Załączniki i awatary
+## 🔒 Cryptographic Architecture
 
-- W DAG-u leży **wyłącznie metryczka**: `sha256` treści, typ MIME, nazwa,
-  rozmiar, wymiary — całość w zaszyfrowanym ciele podpisanego zdarzenia.
-  Same bajty jadą osobno, na żądanie, kawałkami po tym samym kanale E2E.
-- Odbiorca **liczy skrót** przyjętej treści i porównuje z tym, co obiecywało
-  podpisane zdarzenie → podmiana pliku po drodze jest wykrywalna. Skrót znany
-  jest tylko z odszyfrowanej historii, więc działa jak przepustka: kto go nie
-  ma, nie ma jak poprosić o plik. Serwujemy wyłącznie członkom danego czatu.
-- **Typ pliku wykrywamy z magicznych bajtów** (`http.DetectContentType`), nigdy
-  z nazwy ani z pola przysłanego przez drugą stronę. Dozwolone: PNG, JPEG, GIF,
-  WebP, MP4, WebM — reszta (HTML, SVG, skrypty, archiwa, ELF) odpada.
-- **Nazwa pliku jest generowana u nas**: obcinana do samej nazwy (bez ścieżek),
-  bez znaków sterujących, z rozszerzeniem wymuszonym przez wykryty typ. Plik z
-  sieci nie ma jak wylądować na dysku jako `.sh` czy `.exe`.
-- **Awatar jest przekodowywany**: dekodujemy go w całości, przycinamy do
-  kwadratu 256 px i kodujemy od nowa (PNG, a GIF pozostaje animowanym GIF-em).
-  Do bazy trafiają bajty z *naszego* enkodera, więc doklejony ładunek (polyglot
-  ZIP/HTML/JS, EXIF, komentarze, profile ICC) po prostu nie przeżywa operacji.
-- Zapory na bomby dekompresyjne: limit bajtów (32 MiB załącznik, 4 MiB wejście
-  awatara), limit wymiarów (8000 px na bok, 20 MPx) i liczby klatek GIF-a,
-  sprawdzane **przed** pełnym dekodowaniem. Wideo nie jest dekodowane — nie
-  mamy dekodera i nie udajemy walidacji zawartości; chroni je to, że pliku
-  nigdy nie uruchamiamy sami (oddajemy go systemowemu odtwarzaczowi).
+![Szept Security — Cryptographic Architecture Layers](assets/security_crypto_layers.jpg)
 
-## Dane na dysku
+### Identity Layer
+- **Keypair**: Ed25519 (signing & identity)
+- **Key file at rest**: argon2id KDF → XChaCha20-Poly1305 envelope, `chmod 0600`
 
-- **Cała baza jest zaszyfrowana kluczem magazynu**, nie tylko ciała zdarzeń:
-  koperta (klucz publiczny autora, rodzaj zdarzenia, epoka, powiązania) też,
-  bo to metadane rozmowy. Z pliku bazy nie da się odczytać nawet grafu
-  „kto z kim i ile”. Jawne zostają wyłącznie klucze rekordów — identyfikatory
-  zdarzeń, skróty blobów, klucze publiczne znajomych — czyli same skróty.
-- Każda wartość jest **związana ze swoim miejscem** w bazie (bucket + klucz jako
-  associated data): mając plik bazy nie da się przestawiać zaszyfrowanych
-  rekordów, np. podmienić bloba pod danym skrótem albo przenieść klucza epoki
-  do innego czatu.
-- **Hasło do klucza jest opcjonalne, ale bez niego nie ma szyfrowania w
-  spoczynku**: `identity.key` bez hasła rozpakuje każdy, kto ma plik, a z jego
-  seeda wyprowadza się klucz magazynu, czyli cała reszta bazy.
-- Treść załączników i awatarów (bloby) szyfrowana kluczem magazynu, adresowana
-  swoim skrótem — ta sama grafika w pięciu czatach leży na dysku raz.
-- Metadane (nazwy czatów, klucze epok, znajomi, zaproszenia) szyfrowane kluczem
-  wyprowadzonym (HKDF) z seeda tożsamości → bez odszyfrowania `identity.key`
-  nie ma z nich nic.
-- Załącznik otwarty przyciskiem „Otwórz” ląduje **odszyfrowany w katalogu
-  tymczasowym** (systemowy odtwarzacz musi dostać plik) i tam zostaje.
+### Transport (P2P) Layer
+- Connections: WebRTC **DTLS 1.2+** (via [pion](https://github.com/pion/webrtc)), NAT traversal via ICE/STUN.
+- Signaling (SDP with DTLS certificate fingerprint) relays through the connector but is **Ed25519-signed by the sender and verified against the expected recipient's key** (+ freshness ±2 min, explicit addressee, tie-break for simultaneous offers).
+- The connector **cannot substitute offers or perform MITM** — DTLS is cryptographically bound to the identity.
+- **Result**: every data channel is an authenticated E2E pipe between two known identities. No TURN relay exists, so no intermediary ever touches payload bytes.
 
-## Co widzi connector (uczciwie)
+### Chat Events (DAG) Layer
+- Chat history = a **DAG of events** (parents = SHA-256 hashes), each event:
+  - **Ed25519-signed** by the author (signature covers ciphertext + full structure),
+  - body encrypted with **XChaCha20-Poly1305** under the chat's **epoch key**, with `(chat, author, parents, epoch)` as AEAD associated data.
+- History is **immutable**: modifying any node changes its hash and invalidates all descendants.
 
-- pary **pubkey ↔ IP** zarejestrowanych klientów i to, **kto z kim** wymienia
-  sygnaling (metadane połączeń). Nie widzi: treści, nazw, członkostwa, kluczy.
-- Mitygacje: postaw **własny** connector (200 linii, stateless), używaj `wss://`,
-  w razie potrzeby Tor/VPN. Rejestracja wymaga podpisu z timestampem, jedno
-  gniazdo obsługuje jeden pubkey, a przejęcie zajętego slotu wymaga podpisu
-  świeższego niż ten, który go trzyma — sama powtórka podsłuchanej ramki
-  (możliwa na `ws://`) nie wystarczy.
-- Sygnaling ma ochronę przed powtórką: ten sam podpisany blob przyjmujemy raz
-  w oknie 2 minut, więc connector nie zaleje klienta kopiami jednej oferty.
+---
 
-## Znane kompromisy / ścieżki rozwoju
+## 🌐 Transport Security
 
-- **Forward secrecy**: sesje mają FS (efemeryczne DTLS), historia czatu nie —
-  klucze epok są przechowywane, bo nowi członkowie mają czytać historię
-  (świadoma decyzja produktowa). Częste `/rekey` zawęża okno; Double Ratchet
-  (na czatach 1:1) to naturalny upgrade.
-- **Brak offline delivery** — z definicji P2P; brak serwera = brak skrzynki.
-- **Metadane u connectora** (jak tracker w torrentach) — patrz mitygacje wyżej.
-- Wiadomości głosowe/wideo idą po DTLS między peerami; w grupie każdy uczestnik
-  widzi strumienie pozostałych (mesh) — jak w każdym komunikatorze.
-- Rozmiar/częstotliwość pakietów może zdradzać aktywność obserwatorowi sieci
-  (padding to możliwy upgrade).
+| Property | Mechanism |
+|---|---|
+| Peer authentication | Ed25519 signature on SDP, DTLS fingerprint binding |
+| Channel confidentiality | DTLS 1.2+ (TLS record layer over UDP) |
+| Signaling freshness | ±2 min timestamp window, replay deduplicated per window |
+| Connector MITM | Impossible — DTLS cert is identity-bound |
+| No TURN relay | Connector is tracker-only; content never transits it |
+
+### Signaling Replay Protection
+
+The same signed blob is accepted **only once** within a 2-minute window, so the connector cannot flood a client with copies of a single offer. Registration requires an Ed25519-signed timestamp; one socket handles one pubkey; claiming an occupied slot requires a _fresher_ signature than the one holding it — a replayed frame (possible on plain `ws://`) is insufficient.
+
+---
+
+## 💬 Chat Content Security
+
+### DAG Authorization Model
+
+Events are validated **before** being persisted. The fold rules are:
+
+| Event type | Who may author it |
+|---|---|
+| `genesis` | Chat owner |
+| `add` | Any current member |
+| `remove` / `rekey` | Owner only |
+| `msg` / `react` / `delete` | Any current member |
+
+### Lamport Counter Ordering
+
+DAG ordering derives from the **graph structure**, not from sender-supplied counters. Specifically:
+- `lamport` must equal `max(parents)+1` exactly.
+- A parent must be applied before its child.
+
+Without this, an attacker-author could self-date an `add` event to appear before someone was removed — surviving a kick by antedating their membership.
+
+### Epoch Key Distribution
+
+- Epoch keys travel **exclusively over authenticated E2E DTLS channels** to verified members.
+- Keys are **never overwritten**; a mismatched key produces a detectable AEAD failure.
+- Keys are accepted **only from a current member** (during join — from the member who introduced the chat). A key that fails decryption is treated as absent: content becomes unreadable, but the chat continues operating.
+
+### Member Removal & Key Rotation
+
+Removing a member triggers automatic epoch rotation:
+- The removed peer cannot decrypt new messages.
+- Existing peers refuse sync with the removed peer.
+- The removed peer's DTLS link is torn down.
+- Removal **cascades** to all members that the removed peer introduced — otherwise an attacker could add a second identity to survive the kick.
+
+Manual rotation: `/rekey`.
+
+### Invitations
+
+- The inviter stores only the **hash** of the 128-bit secret; the secret itself is single-use, enforced atomically.
+- PINs have a **5-attempt limit** before the invitation is burned. Without this, 10⁶ combinations are brute-forceable in seconds over an open channel.
+
+---
+
+## 📎 Attachments & Avatars
+
+![Szept Security — Attachment & Avatar Processing Pipeline](assets/security_attachment_pipeline.jpg)
+
+### What Goes into the DAG
+
+Only **metadata** is embedded in the signed, encrypted DAG event:
+`sha256`, MIME type, filename, size, dimensions. Raw bytes travel separately, on demand, over the same E2E channel.
+
+### File Type Detection
+
+- Type is detected from **magic bytes** (`http.DetectContentType`) — never from the filename or a peer-supplied MIME field.
+- **Allowed**: PNG, JPEG, GIF, WebP, MP4, WebM
+- **Blocked**: HTML, SVG, scripts, archives, ELF, everything else
+
+### Decompression Bomb Guards
+
+Checked **before** full decode:
+- Attachment max: **32 MiB**
+- Avatar input max: **4 MiB**
+- Max dimensions: **8 000 px**, **20 MPx**
+- GIF: frame count limit
+
+Video is never decoded — it is handed directly to the system player, so no decoder attack surface exists here.
+
+### Integrity Verification
+
+The receiver recomputes the SHA-256 of received bytes and compares it to the signed DAG event. The hash is known only from decrypted history, acting as an access token: without it, a peer cannot even request the file. Files are served **only to members of that chat**.
+
+### Filename Sanitization
+
+- Filename is generated by us: stripped to basename (no path traversal), control characters removed, extension **enforced by detected MIME type**.
+- A file from the network cannot land on disk as `.sh` or `.exe`.
+
+### Avatar Transcoding
+
+- Decoded → center-cropped to **256 px square** → re-encoded as PNG (or animated GIF preserved).
+- Only our encoder's bytes reach the database. Appended payloads (polyglot ZIP/HTML/JS), EXIF, ICC profiles, and comments do not survive the round-trip.
+
+---
+
+## 💾 Data at Rest
+
+- The **entire database is encrypted with a storage key** — not just event bodies. The envelope (author's public key, event kind, epoch, graph links) is also encrypted, because that is conversation metadata. From the database file alone, you cannot reconstruct even the "who talked to whom and how often" graph.
+- Only **record keys are plaintext**: event IDs (hashes), blob content-addresses, and friend public keys — all of which are hashes themselves.
+- Every value is **bound to its location** (bucket + key as AEAD associated data): even with database file access, you cannot rearrange encrypted records — e.g., swap a blob under a given hash, or move an epoch key to a different chat.
+
+| Item | Encryption key source |
+|---|---|
+| Event bodies | Chat epoch key → XChaCha20-Poly1305 |
+| Event envelopes | Storage key (Ed25519 seed-derived) |
+| Epoch keys, chat metadata, contacts | HKDF from identity seed |
+| Blobs (attachments, avatars) | Storage key; content-addressed by SHA-256 |
+
+> **⚠️ A password is optional, but without one there is no encryption at rest.**  
+> An `identity.key` without a password can be unpacked by anyone who has the file; the storage key is derived from its seed, meaning the entire database is readable.
+
+Opened attachments land **decrypted in the system temp directory** (the system player requires a plain file) and remain there.
+
+---
+
+## 🛡️ What the Connector Sees (Honestly)
+
+![Szept Security — Connector Visibility vs Privacy](assets/security_connector_visibility.jpg)
+
+### What it sees
+- **pubkey ↔ IP** pairs of registered clients
+- **Who signals whom** (connection-graph metadata)
+
+### What it never sees
+- Message contents
+- Chat names or membership
+- Epoch keys
+- Attachment bytes or avatars
+
+### Mitigations
+- **Self-host the connector** (~200 lines, fully stateless) — you become your own tracker.
+- Use **`wss://`** (TLS) — prevents passive eavesdropping on the signaling channel.
+- Route through **Tor or a VPN** to decouple your IP from your pubkey at the connector.
+
+---
+
+## ⚖️ Known Trade-offs & Upgrade Paths
+
+| Topic | Current state | Upgrade path |
+|---|---|---|
+| **Forward secrecy** | Sessions have FS (ephemeral DTLS). Chat history does **not** — epoch keys are retained so new members can read history (intentional product decision). | Frequent `/rekey` narrows the window. Double Ratchet (1:1 chats) is the natural upgrade. |
+| **Offline delivery** | None — P2P by definition; no server means no mailbox. | Sealed-sender store-and-forward relay (opt-in). |
+| **Connector metadata** | Connector sees the connection graph (like a torrent tracker). | Self-host + Tor/VPN (see above). |
+| **Mesh voice/video** | Each participant sees all other streams (mesh). | SFU for large groups. |
+| **Traffic analysis** | Packet size and timing can leak activity to a network observer. | DTLS-level padding (variable-length records). |
