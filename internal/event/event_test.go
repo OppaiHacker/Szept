@@ -110,3 +110,30 @@ func mustNew(t *testing.T, priv ed25519.PrivateKey, chat []byte, kind string, b 
 	}
 	return e
 }
+
+func TestReactAndDeleteEvents(t *testing.T) {
+	_, owner, _ := ed25519.GenerateKey(nil)
+	alicePub, alice, _ := ed25519.GenerateKey(nil)
+	key := crypt.NewKey()
+	keys := map[uint32][]byte{1: key}
+
+	gen, _ := New(owner, make([]byte, 32), KindCreate, Body{Name: "grupa", Text: "szef"}, 1, nil, 1, key)
+	chatID := gen.ID()
+	add, _ := New(owner, chatID, KindAdd, Body{Pub: alicePub, Name: "alice"}, 2, [][]byte{chatID}, 1, key)
+	msg, _ := New(alice, chatID, KindMsg, Body{Text: "hejka"}, 3, [][]byte{add.ID()}, 1, key)
+
+	msgID := msg.ID()
+	react, _ := New(alice, chatID, KindReact, Body{Target: msgID, Text: "👍"}, 4, [][]byte{msgID}, 1, key)
+	del, _ := New(alice, chatID, KindDelete, Body{Target: msgID}, 5, [][]byte{react.ID()}, 1, key)
+
+	st, err := Fold([]*Event{gen, add, msg, react, del}, chatID, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Reactions[string(msgID)][string(alicePub)] != "👍" {
+		t.Fatalf("brak reakcji w stanie: %v", st.Reactions)
+	}
+	if !st.Deleted[string(msgID)] {
+		t.Fatalf("brak oznaczenia usunięcia w stanie: %v", st.Deleted)
+	}
+}

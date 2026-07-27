@@ -35,17 +35,20 @@ type Config struct {
 
 // Ctrl is the JSON message format on the reliable "ctrl" data channel.
 type Ctrl struct {
-	T      string            `json:"t"` // hello|sync|want|events|keyreq|keys|redeem|call|blobreq|blobpart
-	Chat   []byte            `json:"chat,omitempty"`
-	Heads  [][]byte          `json:"heads,omitempty"`
-	IDs    [][]byte          `json:"ids,omitempty"`
-	Events [][]byte          `json:"events,omitempty"`
-	Epochs map[uint32][]byte `json:"epochs,omitempty"`
-	Secret []byte            `json:"secret,omitempty"`
-	Pin    string            `json:"pin,omitempty"` // redeem: one-time PIN
-	Name   string            `json:"name,omitempty"`
-	Action string            `json:"action,omitempty"` // call: join|leave
-	Reply  bool              `json:"reply,omitempty"`  // sync: suppress re-reply
+	T       string            `json:"t"` // hello|sync|want|events|keyreq|keys|redeem|call|blobreq|blobpart|typing|ack
+	Chat    []byte            `json:"chat,omitempty"`
+	Heads   [][]byte          `json:"heads,omitempty"`
+	IDs     [][]byte          `json:"ids,omitempty"`
+	Events  [][]byte          `json:"events,omitempty"`
+	Epochs  map[uint32][]byte `json:"epochs,omitempty"`
+	Secret  []byte            `json:"secret,omitempty"`
+	Pin     string            `json:"pin,omitempty"` // redeem: one-time PIN
+	Name    string            `json:"name,omitempty"`
+	Action  string            `json:"action,omitempty"` // call: join|leave
+	Reply   bool              `json:"reply,omitempty"`  // sync: suppress re-reply
+	Typing  bool              `json:"typing,omitempty"`
+	EventID []byte            `json:"event_id,omitempty"`
+	Status  string            `json:"status,omitempty"`
 
 	// blobreq/blobpart: attachment content, chunked (see blob.go)
 	Blob  []byte `json:"blob,omitempty"` // sha256 of the content
@@ -78,6 +81,8 @@ type Core struct {
 	incoming   map[string]*blobAsm             // blob hash -> chunks arriving now
 	serving    map[string]int                  // peer -> blob sends in flight
 	assemblers map[string]map[uint32]*assembly // peer+label -> frame -> video parts
+	typing     map[string]map[string]time.Time // chatKey -> pubKeyStr -> lastTyping
+	acks       map[string]map[string]string    // eventIDStr -> pubKeyStr -> status ("delivered"|"read")
 
 	// media hooks (set by calls.go / UIs)
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
@@ -98,14 +103,15 @@ func Open(cfg Config, id *identity.Identity) (*Core, error) {
 	conn := connector.NewClient(cfg.Connector, id.Priv)
 	c := &Core{
 		ID: id, St: st, Conn: conn, Cfg: cfg,
-		orphans:  map[string]map[string]*event.Event{},
-		states:   map[string]*foldedState{},
-		calls:    map[string]*Call{},
-		wants:    map[string]*blobWant{},
-		incoming: map[string]*blobAsm{},
-		serving:  map[string]int{},
-
+		orphans:    map[string]map[string]*event.Event{},
+		states:     map[string]*foldedState{},
+		calls:      map[string]*Call{},
+		wants:      map[string]*blobWant{},
+		incoming:   map[string]*blobAsm{},
+		serving:    map[string]int{},
 		assemblers: map[string]map[uint32]*assembly{},
+		typing:     map[string]map[string]time.Time{},
+		acks:       map[string]map[string]string{},
 	}
 	c.P2P = p2p.NewManager(id.Priv, conn, cfg.STUN)
 	c.P2P.Accept = c.acceptPeer
@@ -387,13 +393,16 @@ func (c *Core) memberName(st *event.State, pub []byte) string {
 }
 
 type Msg struct {
-	ID     []byte // ID zdarzenia — klucz do „ukryj u mnie”
-	Author []byte
-	Name   string
-	Text   string
-	TS     time.Time
-	Kind   string // msg | info | file
-	Info   string // dla Kind == "info": event.Kind* — klient dobiera ikonę i kolor
+	ID        []byte // ID zdarzenia — klucz do „ukryj u mnie”
+	Author    []byte
+	Name      string
+	Text      string
+	TS        time.Time
+	Kind      string // msg | info | file
+	Info      string // dla Kind == "info": event.Kind* — klient dobiera ikonę i kolor
+	Deleted   bool   // usunięte u wszystkich w DAG
+	Reactions map[string]string // pubKeyStr -> emoji
+	ACK       string // "" | "delivered" | "read"
 
 	// tylko dla Kind == "file"
 	Blob []byte // sha256 treści
@@ -418,7 +427,7 @@ func (c *Core) Messages(chat []byte) []Msg {
 	keys, _ := c.St.ChatKeys(chat)
 	st, errFold := c.ChatState(chat)
 	if errFold != nil {
-		st = &event.State{Members: map[string]*event.Member{}}
+		st = &event.State{Members: map[string]*event.Member{}, Reactions: map[string]map[string]string{}, Deleted: map[string]bool{}}
 	}
 	event.SortCanonical(evs)
 	hidden := c.St.Hidden(chat)
@@ -457,11 +466,130 @@ func (c *Core) Messages(chat []byte) []Msg {
 		case event.KindRekey:
 			m.Kind, m.Info, m.Text = "info", e.Kind, "rotacja klucza (nowa epoka)"
 		default:
-			continue // awatar, nick, rename — nie są treścią rozmowy
+			continue // awatar, nick, rename, react, delete — nie są osobną treścią rozmowy
+		}
+		if st.Deleted != nil && st.Deleted[string(id)] {
+			m.Deleted = true
+			m.Text = "[Wiadomość usunięta]"
+		}
+		if st.Reactions != nil && st.Reactions[string(id)] != nil {
+			m.Reactions = st.Reactions[string(id)]
+		}
+		if bytes.Equal(e.Author, c.ID.Pub) {
+			m.ACK = c.AckStatus(id)
 		}
 		out = append(out, m)
 	}
 	return out
+}
+
+// ---- Typing, ACKs, Reactions, Delete, Search ----
+
+func (c *Core) SendTyping(chat []byte, active bool) {
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return
+	}
+	for _, m := range st.Members {
+		if !m.Removed && !bytes.Equal(m.Pub, c.ID.Pub) {
+			if p := c.P2P.Peer(m.Pub); p != nil {
+				p.SendCtrl(Ctrl{T: "typing", Chat: chat, Typing: active})
+			}
+		}
+	}
+}
+
+func (c *Core) TypingPeers(chat []byte) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.typing[string(chat)]
+	if m == nil {
+		return nil
+	}
+	st, _ := c.foldChat(chat)
+	var names []string
+	now := time.Now()
+	for pubStr, t := range m {
+		if now.Sub(t) < 4*time.Second {
+			names = append(names, c.memberName(st, []byte(pubStr)))
+		}
+	}
+	return names
+}
+
+func (c *Core) SendAck(chat []byte, eventID []byte, status string) {
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return
+	}
+	for _, m := range st.Members {
+		if !m.Removed && !bytes.Equal(m.Pub, c.ID.Pub) {
+			if p := c.P2P.Peer(m.Pub); p != nil {
+				p.SendCtrl(Ctrl{T: "ack", Chat: chat, EventID: eventID, Status: status})
+			}
+		}
+	}
+}
+
+func (c *Core) AckStatus(eventID []byte) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.acks[string(eventID)]
+	if m == nil {
+		return ""
+	}
+	hasRead, hasDelivered := false, false
+	for _, s := range m {
+		if s == "read" {
+			hasRead = true
+		} else if s == "delivered" {
+			hasDelivered = true
+		}
+	}
+	if hasRead {
+		return "read"
+	}
+	if hasDelivered {
+		return "delivered"
+	}
+	return ""
+}
+
+func (c *Core) MarkChatRead(chat []byte) {
+	evs, err := c.St.Events(chat)
+	if err != nil {
+		return
+	}
+	for _, e := range evs {
+		if !bytes.Equal(e.Author, c.ID.Pub) {
+			c.SendAck(chat, e.ID(), "read")
+		}
+	}
+}
+
+func (c *Core) ReactMsg(chat []byte, targetID []byte, emoji string) error {
+	_, err := c.appendEvent(chat, event.KindReact, event.Body{Target: targetID, Text: emoji, TS: time.Now().Unix()})
+	return err
+}
+
+func (c *Core) DeleteMsg(chat []byte, targetID []byte) error {
+	_, err := c.appendEvent(chat, event.KindDelete, event.Body{Target: targetID, TS: time.Now().Unix()})
+	return err
+}
+
+func (c *Core) SearchChat(chat []byte, query string) ([]Msg, error) {
+	msgs := c.Messages(chat)
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return msgs, nil
+	}
+	var res []Msg
+	for _, m := range msgs {
+		if !m.Deleted && strings.Contains(strings.ToLower(m.Text), q) {
+			res = append(res, m)
+		}
+	}
+	return res, nil
 }
 
 // ---- soft delete: „usuń u mnie” ----

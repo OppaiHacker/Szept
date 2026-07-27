@@ -47,6 +47,7 @@ func init() {
 		{name: "/znajomy", args: "<kod SZF->", desc: "dodaj znajomego z kodu", run: (*ui).cmdApply},
 		{name: "/dolacz", args: "<kod SZC->", desc: "wejdź do grupy z zaproszenia", run: (*ui).cmdApply},
 		{name: "/zapros", desc: "kod zaproszenia + PIN do tego czatu", run: needChat((*ui).cmdInvite)},
+		{name: "/szukaj", args: "<fraza>", desc: "szukaj w historii czatu", run: needChat((*ui).cmdSearch)},
 		{name: "/kto", desc: "członkowie czatu", run: needChat((*ui).cmdWho)},
 		{name: "/kick", args: "<nazwa>", desc: "usuń członka (rotuje klucz)", run: needChat((*ui).cmdKick)},
 		{name: "/rekey", desc: "rotacja klucza — nowa epoka", run: needChat((*ui).cmdRekey)},
@@ -146,6 +147,23 @@ func (u *ui) cmdApply(arg string) {
 }
 
 func (u *ui) cmdInvite(*core.ChatInfo, string) { u.invitePage() }
+
+func (u *ui) cmdSearch(ch *core.ChatInfo, arg string) {
+	if arg == "" {
+		u.sysErr("Podaj frazę: /szukaj <fraza>")
+		return
+	}
+	res, err := u.c.SearchChat(ch.ID, arg)
+	if err != nil {
+		u.sysErr(err.Error())
+		return
+	}
+	var b strings.Builder
+	for _, m := range res {
+		b.WriteString("[" + m.TS.Format("15:04") + "] " + m.Name + ": " + m.Text + "\n")
+	}
+	u.sysInfo(fmt.Sprintf("Wyniki dla „%s” (%d)", arg, len(res)), strings.TrimRight(b.String(), "\n"))
+}
 
 func (u *ui) cmdWho(ch *core.ChatInfo, _ string) {
 	var b strings.Builder
@@ -406,7 +424,12 @@ func (u *ui) buildComposer() fyne.CanvasObject {
 	u.hintBox = container.NewVBox()
 	u.hintBox.Hide()
 
-	e.OnChanged = func(string) { u.updateHints() }
+	e.OnChanged = func(s string) {
+		if ch := u.cur(); ch != nil {
+			u.c.SendTyping(ch.ID, len(s) > 0 && !strings.HasPrefix(s, "/"))
+		}
+		u.updateHints()
+	}
 	e.OnSubmitted = func(s string) { u.submit(s) }
 	e.keys = u.hintKey
 	e.wantTab = func() bool { return u.hintBox.Visible() }
@@ -425,6 +448,9 @@ func (u *ui) buildComposer() fyne.CanvasObject {
 
 func (u *ui) submit(s string) {
 	s = strings.TrimSpace(s)
+	if ch := u.cur(); ch != nil {
+		u.c.SendTyping(ch.ID, false)
+	}
 	if s == "" {
 		return
 	}

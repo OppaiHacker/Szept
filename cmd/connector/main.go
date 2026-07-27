@@ -32,6 +32,9 @@ func main() {
 	listen := flag.String("listen", ":7777", "adres nasłuchu (port, :port lub host:port)")
 	cert := flag.String("cert", "", "ścieżka do cert TLS (opcjonalnie)")
 	key := flag.String("key", "", "ścieżka do klucza TLS (opcjonalnie)")
+	seedsFlag := flag.String("seeds", "", "lista URL-i connectorów startowych rozdzielona przecinkami (np. ws://c2.szept.io:7777)")
+	publicURLFlag := flag.String("public-url", "", "publiczny URL tego connectora do protokołu SNDP (np. ws://c1.szept.io:7777)")
+	maxPeersFlag := flag.Int("max-peers", 0, "maksymalna liczba aktywnych peerów (0 = brak limitu, powyżej limitu następuje redirect)")
 	flag.Parse()
 
 	addr := normalizeListen(*listen)
@@ -57,8 +60,27 @@ func main() {
 	log.Printf("klienci łączą się adresem: %s://<publiczny-adres-tego-serwera>%s", scheme, portSuffix(ln.Addr().String()))
 	log.Printf("test w przeglądarce: http://<adres>%s (strona statusu)", portSuffix(ln.Addr().String()))
 
+	cServer := connector.NewServer()
+	if *maxPeersFlag > 0 {
+		cServer.SetMaxPeers(*maxPeersFlag)
+		log.Printf("limit peerów ustawiony na: %d", *maxPeersFlag)
+	}
+	if *publicURLFlag != "" {
+		cServer.SetPublicURL(*publicURLFlag)
+	} else {
+		cServer.SetPublicURL(scheme + "://" + ln.Addr().String())
+	}
+	if *seedsFlag != "" {
+		seeds := strings.Split(*seedsFlag, ",")
+		for i, s := range seeds {
+			seeds[i] = strings.TrimSpace(s)
+		}
+		cServer.SetSeeds(seeds)
+		log.Printf("zaimportowano %d connectorów startowych (SNDP)", len(seeds))
+	}
+
 	// ReadHeaderTimeout: bez tego wolne/zawieszone żądania trzymają połączenia (Slowloris).
-	srv := &http.Server{Handler: connector.NewServer(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: cServer, ReadHeaderTimeout: 10 * time.Second}
 	if *cert != "" && *key != "" {
 		log.Fatal(srv.ServeTLS(ln, *cert, *key))
 	}

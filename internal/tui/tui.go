@@ -66,6 +66,7 @@ type model struct {
 	syslog []string
 	video  map[string]*videoView // chat key -> latest frame
 	files  []core.Msg            // załączniki bieżącego czatu (numeracja dla /zapisz)
+	msgs   []core.Msg            // wiadomości bieżącego czatu (numeracja dla /r, /usun, /ukryj)
 	ready  bool
 }
 
@@ -139,6 +140,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d = len(m.chats) - 1
 				}
 				m.sel = (m.sel + d) % len(m.chats)
+				if ch := m.curChat(); ch != nil {
+					m.c.MarkChatRead(ch.ID)
+				}
 				m.refresh()
 			}
 		case "pgup":
@@ -148,6 +152,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			line := strings.TrimSpace(m.in.Value())
 			m.in.SetValue("")
+			if ch := m.curChat(); ch != nil {
+				m.c.SendTyping(ch.ID, false)
+			}
 			if line != "" {
 				if cmd := m.exec(line); cmd != nil {
 					return m, cmd
@@ -157,7 +164,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	var cmd tea.Cmd
+	oldVal := m.in.Value()
 	m.in, cmd = m.in.Update(msg)
+	newVal := m.in.Value()
+	if oldVal != newVal && !strings.HasPrefix(newVal, "/") {
+		if ch := m.curChat(); ch != nil {
+			m.c.SendTyping(ch.ID, len(newVal) > 0)
+		}
+	}
 	return m, cmd
 }
 
@@ -182,7 +196,72 @@ func (m *model) exec(line string) tea.Cmd {
 	switch parts[0] {
 	case "/pomoc", "/help":
 		m.log("/nowy <nazwa> · /dm <znajomy> · /zapros · /dolacz <kod> <pin> · /znajomy <kod> · /mojkod · /kto · /kick <nazwa> · /rekey · /zmien <nazwa> · /connector <adres> · /call · /rozlacz · /mic · /cam · /ekran · /quit")
-		m.log("/wyslij <ścieżka> [podpis] — zdjęcie, GIF albo film · /zapisz <nr> [katalog] · /awatar <ścieżka> (albo /awatar - żeby usunąć)")
+		m.log("/wyslij <ścieżka> [podpis] · /zapisz <nr> · /szukaj <fraza> · /r <nr> <emoji> · /usun <nr> (u wszystkich) · /ukryj <nr> (u siebie) · /awatar <ścieżka>")
+	case "/szukaj", "/search":
+		if ch == nil || arg == "" {
+			m.logErr("użycie: /szukaj <fraza>")
+			break
+		}
+		res, err := m.c.SearchChat(ch.ID, arg)
+		if err != nil {
+			m.logErr(err.Error())
+		} else {
+			m.log(fmt.Sprintf("WYNIKI WYSZUKIWANIA (%d):", len(res)))
+			for _, rm := range res {
+				m.syslog = append(m.syslog, fmt.Sprintf(" [%s] %s: %s", rm.TS.Format("15:04"), rm.Name, rm.Text))
+			}
+		}
+	case "/react", "/r":
+		if ch == nil || arg == "" {
+			m.logErr("użycie: /r <nr_wiadomości> <emoji>")
+			break
+		}
+		f := strings.Fields(arg)
+		if len(f) < 2 {
+			m.logErr("użycie: /r <nr_wiadomości> <emoji>")
+			break
+		}
+		n, err := strconv.Atoi(f[0])
+		if err != nil || n < 1 || n > len(m.msgs) {
+			m.logErr("nieprawidłowy numer wiadomości")
+			break
+		}
+		target := m.msgs[n-1].ID
+		if err := m.c.ReactMsg(ch.ID, target, f[1]); err != nil {
+			m.logErr(err.Error())
+		}
+	case "/usun", "/delete":
+		if ch == nil || arg == "" {
+			m.logErr("użycie: /usun <nr_wiadomości> — usuwa u wszystkich w DAG")
+			break
+		}
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 1 || n > len(m.msgs) {
+			m.logErr("nieprawidłowy numer wiadomości")
+			break
+		}
+		target := m.msgs[n-1].ID
+		if err := m.c.DeleteMsg(ch.ID, target); err != nil {
+			m.logErr(err.Error())
+		} else {
+			m.log("usunięto wiadomość u wszystkich")
+		}
+	case "/ukryj":
+		if ch == nil || arg == "" {
+			m.logErr("użycie: /ukryj <nr_wiadomości> — ukrywa u siebie")
+			break
+		}
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 1 || n > len(m.msgs) {
+			m.logErr("nieprawidłowy numer wiadomości")
+			break
+		}
+		target := m.msgs[n-1].ID
+		if err := m.c.HideMsg(ch.ID, target); err != nil {
+			m.logErr(err.Error())
+		} else {
+			m.log("ukryto wiadomość u siebie")
+		}
 	case "/quit":
 		return tea.Quit
 	case "/nowy":
@@ -404,9 +483,13 @@ func (m *model) refresh() {
 	var b strings.Builder
 	m.files = m.files[:0]
 	if ch := m.curChat(); ch != nil {
+		m.msgs = m.c.Messages(ch.ID)
 		var preview *core.Msg
-		for _, msg := range m.c.Messages(ch.ID) {
+		for i, msg := range m.msgs {
 			ts := stDim.Render(msg.TS.Format("15:04"))
+			idxStr := stDim.Render(fmt.Sprintf("[%d] ", i+1))
+			ackStr := formatACK(msg.ACK)
+			reactStr := formatReactions(msg.Reactions)
 			switch msg.Kind {
 			case "info":
 				b.WriteString(ts + " " + stDim.Render(msg.Text) + "\n")
@@ -420,14 +503,21 @@ func (m *model) refresh() {
 						preview = &msg
 					}
 				}
-				b.WriteString(fmt.Sprintf("%s %s: 📎 %s · %s %s\n", ts, stName.Render(msg.Name),
-					msg.File, attach.HumanSize(msg.Size), state))
+				b.WriteString(fmt.Sprintf("%s%s %s: 📎 %s · %s %s%s%s\n", idxStr, ts, stName.Render(msg.Name),
+					msg.File, attach.HumanSize(msg.Size), state, reactStr, ackStr))
 				if msg.Text != "" {
 					b.WriteString("        " + msg.Text + "\n")
 				}
 			default:
-				b.WriteString(ts + " " + stName.Render(msg.Name) + ": " + msg.Text + "\n")
+				txt := msg.Text
+				if msg.Deleted {
+					txt = stDim.Render("[Wiadomość usunięta]")
+				}
+				b.WriteString(idxStr + ts + " " + stName.Render(msg.Name) + ": " + txt + reactStr + ackStr + "\n")
 			}
+		}
+		if typing := m.c.TypingPeers(ch.ID); len(typing) > 0 {
+			b.WriteString(stInfo.Render("✍ "+strings.Join(typing, ", ")+" pisze...") + "\n")
 		}
 		// podgląd ostatniego obrazka — terminal potrafi tyle, ile półbloki
 		if preview != nil {
@@ -649,4 +739,35 @@ func halfblocks(img image.Image, cols int) string {
 		out.WriteString("\x1b[0m\n")
 	}
 	return out.String()
+}
+
+func formatReactions(rm map[string]string) string {
+	if len(rm) == 0 {
+		return ""
+	}
+	counts := map[string]int{}
+	for _, emoji := range rm {
+		counts[emoji]++
+	}
+	var parts []string
+	for emoji, c := range counts {
+		if c > 1 {
+			parts = append(parts, fmt.Sprintf("%s %d", emoji, c))
+		} else {
+			parts = append(parts, emoji)
+		}
+	}
+	sort.Strings(parts)
+	return " [" + strings.Join(parts, " ") + "]"
+}
+
+func formatACK(status string) string {
+	switch status {
+	case "read":
+		return stOnline.Render(" ✓✓")
+	case "delivered":
+		return stDim.Render(" ✓")
+	default:
+		return ""
+	}
 }

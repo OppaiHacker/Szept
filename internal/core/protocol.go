@@ -117,6 +117,10 @@ func (c *Core) onCtrl(p *p2p.Peer, data []byte) {
 		c.serveBlob(p, m)
 	case "blobpart":
 		c.handleBlobPart(p, m)
+	case "typing":
+		c.handleTyping(p, m)
+	case "ack":
+		c.handleAck(p, m)
 	}
 }
 
@@ -292,9 +296,51 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	var skip []byte
 	if from != nil {
 		skip = from.Pub
+		if !bytes.Equal(e.Author, c.ID.Pub) {
+			from.SendCtrl(Ctrl{T: "ack", Chat: chat, EventID: id, Status: "delivered"})
+		}
 	}
 	c.gossip(chat, e, skip)
 	return true
+}
+
+func (c *Core) handleTyping(p *p2p.Peer, m Ctrl) {
+	c.mu.Lock()
+	if c.typing == nil {
+		c.typing = make(map[string]map[string]time.Time)
+	}
+	chatStr := string(m.Chat)
+	if c.typing[chatStr] == nil {
+		c.typing[chatStr] = make(map[string]time.Time)
+	}
+	pubStr := string(p.Pub)
+	if m.Typing {
+		c.typing[chatStr][pubStr] = time.Now()
+	} else {
+		delete(c.typing[chatStr], pubStr)
+	}
+	c.mu.Unlock()
+	c.Notify()
+}
+
+func (c *Core) handleAck(p *p2p.Peer, m Ctrl) {
+	if len(m.EventID) == 0 || m.Status == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.acks == nil {
+		c.acks = make(map[string]map[string]string)
+	}
+	idStr := string(m.EventID)
+	if c.acks[idStr] == nil {
+		c.acks[idStr] = make(map[string]string)
+	}
+	pubStr := string(p.Pub)
+	if current := c.acks[idStr][pubStr]; current != "read" {
+		c.acks[idStr][pubStr] = m.Status
+	}
+	c.mu.Unlock()
+	c.Notify()
 }
 
 // maxOrphans: sufit na sieroty ŁĄCZNIE, nie na czat — znajomy może zakładać

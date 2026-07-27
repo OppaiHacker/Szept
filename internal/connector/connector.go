@@ -27,7 +27,7 @@ import (
 const registerContext = "szept-register-v1"
 
 type Msg struct {
-	Op      string `json:"op"` // register | lookup | signal | error | ok
+	Op      string `json:"op"` // register | lookup | signal | error | ok | redirect | ndp_gossip | mesh_signal
 	Pub     []byte `json:"pub,omitempty"`
 	To      []byte `json:"to,omitempty"`
 	From    []byte `json:"from,omitempty"`
@@ -36,6 +36,12 @@ type Msg struct {
 	Payload []byte `json:"payload,omitempty"`
 	Online  bool   `json:"online,omitempty"`
 	Err     string `json:"err,omitempty"`
+
+	// --- Nowe pola dla SNDP i Sieci Cebulionowej (Load Balancing & Mesh w Sieci Cebulion) ---
+	Redirect []string       `json:"redirect,omitempty"`
+	TraceID  string         `json:"trace_id,omitempty"`
+	TTL      int            `json:"ttl,omitempty"`
+	Nodes    []NeighborInfo `json:"nodes,omitempty"`
 }
 
 func registerDigest(pub []byte, ts int64) []byte {
@@ -67,20 +73,47 @@ func (c *client) send(m Msg) error {
 }
 
 type Server struct {
-	mu    sync.Mutex
-	peers map[string]*client
-	ips   map[string]int // adres IP -> otwarte sesje WS
-	up    websocket.Upgrader
-	start time.Time
+	mu        sync.Mutex
+	peers     map[string]*client
+	ips       map[string]int // adres IP -> otwarte sesje WS
+	up        websocket.Upgrader
+	start     time.Time
+	MaxPeers  int
+	PublicURL string
+	mesh      *meshManager
 }
 
 func NewServer() *Server {
-	return &Server{
+	s := &Server{
 		peers: map[string]*client{},
 		ips:   map[string]int{},
 		up:    websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 		start: time.Now(),
 	}
+	s.mesh = newMeshManager(s, "", nil)
+	return s
+}
+
+func (s *Server) SetSeeds(seeds []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mesh.seeds = seeds
+	if len(seeds) > 0 {
+		go s.mesh.loop()
+	}
+}
+
+func (s *Server) SetPublicURL(rawURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.PublicURL = rawURL
+	s.mesh.publicURL = rawURL
+}
+
+func (s *Server) SetMaxPeers(max int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.MaxPeers = max
 }
 
 // MaxSessionsPerIP: klucze Ed25519 są darmowe, więc limit na pubkey nic nie daje —
@@ -135,9 +168,46 @@ func (s *Server) Count() int {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// plain HTTP (browser/curl) gets a status page — proves the connector is up
 	if !websocket.IsWebSocketUpgrade(r) {
+		if r.URL.Path == "/ndp/neighbors" {
+			w.Header().Set("Content-Type", "application/json")
+			neighbors := make([]NeighborInfo, 0)
+			for _, url := range s.mesh.activeNeighborURLs() {
+				neighbors = append(neighbors, NeighborInfo{URL: url})
+			}
+			s.mesh.mu.Lock()
+			topCopy := make(map[string]map[string]int64)
+			for u, edges := range s.mesh.topology {
+				topCopy[u] = make(map[string]int64)
+				for v, w := range edges {
+					topCopy[u][v] = w
+				}
+			}
+			s.mesh.mu.Unlock()
+
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"url":         s.PublicURL,
+				"peer_count":  s.Count(),
+				"max_clients": s.MaxPeers,
+				"neighbors":   neighbors,
+				"topology":    topCopy,
+			})
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "szept-connector OK\npeers online: %d\nuptime: %s\n",
-			s.Count(), time.Since(s.start).Round(time.Second))
+		fmt.Fprintf(w, "szept-connector (Sieć Cebulion) OK\npeers online: %d\nuptime: %s\nmesh neighbors: %d\n",
+			s.Count(), time.Since(s.start).Round(time.Second), len(s.mesh.activeNeighborURLs()))
+		return
+	}
+	if s.MaxPeers > 0 && s.Count() >= s.MaxPeers {
+		ws, err := s.up.Upgrade(w, r, nil)
+		if err == nil {
+			_ = ws.WriteJSON(Msg{
+				Op:       "redirect",
+				Err:      "connector high load",
+				Redirect: s.mesh.activeNeighborURLs(),
+			})
+			ws.Close()
+		}
 		return
 	}
 	ip := clientIP(r)
@@ -187,6 +257,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ws.SetReadDeadline(time.Now().Add(90 * time.Second))
 		switch m.Op {
+		case "ndp_gossip":
+			if len(m.From) > 0 {
+				s.mesh.addNeighbor(string(m.From), 0, 0)
+			}
+		case "mesh_signal":
+			if s.mesh.markTraceSeen(m.TraceID) {
+				continue
+			}
+			s.mu.Lock()
+			dst := s.peers[string(m.To)]
+			s.mu.Unlock()
+			if dst != nil {
+				dst.send(Msg{Op: "signal", From: m.From, To: m.To, Payload: m.Payload})
+			} else if m.TTL > 0 {
+				targetConnector := s.mesh.routingCache[string(m.To)]
+				s.mesh.relayMeshSignal(m, targetConnector)
+			}
 		case "register":
 			if len(m.Pub) != ed25519.PublicKeySize ||
 				time.Since(time.Unix(m.TS, 0)) > time.Minute || time.Until(time.Unix(m.TS, 0)) > time.Minute ||
@@ -194,14 +281,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				c.send(Msg{Op: "error", Err: "bad register"})
 				continue
 			}
-			// jedno gniazdo = jeden pubkey: inaczej każda kolejna rejestracja
-			// zostawia w mapie wpis, którego rozłączenie już nie sprząta
 			if pub != nil && !bytes.Equal(pub, m.Pub) {
 				c.send(Msg{Op: "error", Err: "already registered"})
 				continue
 			}
-			// przejęcie zajętego slotu wymaga świeższego podpisu niż ten, który
-			// go trzyma — sama powtórka podsłuchanej ramki (ws://) nie wystarczy
 			s.mu.Lock()
 			if old := s.peers[string(m.Pub)]; old != nil && old != c && m.TS <= old.ts {
 				s.mu.Unlock()
@@ -231,7 +314,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			dst := s.peers[string(m.To)]
 			s.mu.Unlock()
 			if dst == nil {
-				c.send(Msg{Op: "error", To: m.To, Err: "offline"})
+				// ponytail: brak lokalnie - wyznacz optymalną ścieżkę Dijkstrą w Sieci Cebulionowej (Cebulion Network)
+				targetConnector := s.mesh.routingCache[string(m.To)]
+				s.mesh.relayMeshSignal(Msg{
+					Op:      "mesh_signal",
+					From:    pub,
+					To:      m.To,
+					Payload: m.Payload,
+					TTL:     5,
+				}, targetConnector)
 				continue
 			}
 			dst.send(Msg{Op: "signal", From: pub, To: m.To, Payload: m.Payload})
@@ -242,12 +333,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ---- client ----
 
 type Client struct {
-	URL      string
-	Priv     ed25519.PrivateKey
-	Pub      ed25519.PublicKey
-	OnSignal func(from []byte, payload []byte)
-	OnUp     func() // fires after each successful (re-)registration
-	OnDown   func() // fires when a registered session drops
+	URL          string
+	FallbackURLs []string
+	Priv         ed25519.PrivateKey
+	Pub          ed25519.PublicKey
+	OnSignal     func(from []byte, payload []byte)
+	OnUp         func() // fires after each successful (re-)registration
+	OnDown       func() // fires when a registered session drops
 
 	mu      sync.Mutex
 	ws      *websocket.Conn
@@ -304,17 +396,62 @@ func (c *Client) Run() {
 }
 
 func (c *Client) session() error {
-	ws, _, err := websocket.DefaultDialer.Dial(c.URL, nil)
-	if err != nil && strings.Contains(err.Error(), "no such host") {
-		// Android potrafi odciąć Go od systemowego DNS — pytamy 1.1.1.1 i łączymy po IP.
-		ws, err = dialFallbackDNS(c.URL)
+	urlsToTry := append([]string{c.URL}, c.FallbackURLs...)
+	var ws *websocket.Conn
+	var dialErr error
+
+	ts := time.Now().Unix()
+	regMsg := Msg{Op: "register", Pub: c.Pub, TS: ts, Sig: SignRegister(c.Priv, c.Pub, ts)}
+
+	for _, u := range urlsToTry {
+		var conn *websocket.Conn
+		conn, _, dialErr = websocket.DefaultDialer.Dial(u, nil)
+		if dialErr != nil && strings.Contains(dialErr.Error(), "no such host") {
+			conn, dialErr = dialFallbackDNS(u)
+		}
+		if dialErr == nil {
+			// Wysyłamy rejestrację jako pierwszą ramkę (zgodnie z protokołem szept)
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteJSON(regMsg); err != nil {
+				conn.Close()
+				continue
+			}
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			var ack Msg
+			if err := conn.ReadJSON(&ack); err == nil {
+				if ack.Op == "redirect" {
+					conn.Close()
+					if len(ack.Redirect) > 0 {
+						c.FallbackURLs = append(c.FallbackURLs, ack.Redirect...)
+					}
+					continue
+				} else if ack.Op == "ok" {
+					conn.SetReadDeadline(time.Time{})
+					ws = conn
+					break
+				} else {
+					conn.Close()
+					return errors.New("register rejected: " + ack.Err)
+				}
+			} else {
+				conn.Close()
+			}
+		}
 	}
-	if err != nil {
-		return err
+
+	if ws == nil {
+		if dialErr != nil {
+			return dialErr
+		}
+		return errors.New("no reachable connector URL")
 	}
+
 	c.mu.Lock()
 	c.ws = ws
+	c.up = true
+	c.lastErr = ""
 	c.mu.Unlock()
+
 	defer func() {
 		ws.Close()
 		c.mu.Lock()
@@ -326,25 +463,10 @@ func (c *Client) session() error {
 		}
 	}()
 
-	ts := time.Now().Unix()
-	err = c.write(Msg{Op: "register", Pub: c.Pub, TS: ts, Sig: SignRegister(c.Priv, c.Pub, ts)})
-	if err != nil {
-		return err
-	}
-	var ack Msg
-	if err := ws.ReadJSON(&ack); err != nil {
-		return err
-	}
-	if ack.Op != "ok" {
-		return errors.New("register rejected: " + ack.Err)
-	}
-	c.mu.Lock()
-	c.up = true
-	c.lastErr = ""
-	c.mu.Unlock()
 	if c.OnUp != nil {
 		go c.OnUp()
 	}
+
 	for {
 		var m Msg
 		if err := ws.ReadJSON(&m); err != nil {
