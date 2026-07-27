@@ -65,26 +65,34 @@ make test     # Runs test suite
 
 ### 3. Launch Client & Add Friends
 1. Start `./bin/szept` (TUI) or `./bin/szept-gui` (GUI).
-2. Share your ID code via `/mojkod` (TUI) or **Friends → Your Code** (GUI).
-3. Add a friend using `/znajomy <code_or_qr>`.
-4. Create a group chat with `/nowy <group_name>` and invite friends using `/zapros`.
+2. Share your ID code via `/mycode` (or `/mojkod` in TUI) or **Friends → Your Code** (GUI).
+3. Add a friend using `/friend <code_or_qr>` (or `/znajomy`).
+4. Create a group chat with `/new <group_name>` (or `/nowy`) and invite friends using `/invite` (or `/zapros`).
 
 ---
 
-## ⌨️ Commands Quick Reference
+## ⌨️ Commands Quick Reference (English & Polish Aliases)
 
-| Command | Description |
+| Command (EN / PL) | Description |
 | :--- | :--- |
-| `/nowy <name>` | Create a new group chat |
+| `/new <name>` / `/nowy <name>` | Create a new group chat |
 | `/dm <friend>` | Open 1:1 chat with a friend |
-| `/zapros` | Generate one-time invite QR & PIN |
-| `/dolacz <code> <pin>` | Join a group chat using invite code |
-| `/szukaj <query>` | Search encrypted history |
-| `/r <msg_no> <emoji>` | React to a message with emoji |
-| `/usun <msg_no>` | Delete message for everyone (Global DAG delete) |
-| `/ukryj <msg_no>` | Hide message locally (Soft delete) |
-| `/call`, `/rozlacz` | Join / leave voice call |
-| `/mic`, `/cam`, `/ekran` | Toggle mic, camera, screen share |
+| `/invite` / `/zapros` | Generate one-time invite QR & PIN |
+| `/join <code> <pin>` / `/dolacz` | Join a group chat using invite code |
+| `/friend <code>` / `/znajomy` | Add friend from invite code |
+| `/search <query>` / `/szukaj` | Search encrypted history |
+| `/react <msg_no> <emoji>` / `/r` | React to a message with emoji |
+| `/delete <msg_no>` / `/usun` | Delete message for everyone (Global DAG delete) |
+| `/hide <msg_no>` / `/ukryj` | Hide message locally (Soft delete) |
+| `/send <path>` / `/wyslij` | Send file attachment (image, GIF, video, doc) |
+| `/save <no>` / `/zapisz` | Save attachment to disk |
+| `/avatar <path>` / `/awatar` | Set your avatar profile picture |
+| `/mycode` / `/code` / `/mojkod` | Display your friend QR code |
+| `/who` / `/kto` | List members in current chat |
+| `/rename <name>` / `/zmien` | Rename current chat |
+| `/call`, `/leave` (`/hangup`, `/rozlacz`) | Join / leave voice call |
+| `/mic`, `/cam`, `/screen` (`/ekran`) | Toggle mic, camera, screen share |
+| `/help` / `/pomoc` | Display list of commands |
 
 ---
 ---
@@ -128,6 +136,31 @@ Aby zapewnić niezawodną łączność w warunkach cenzury sieciowej lub blokad 
 ![Obfuskacja Ruchu Cebulion](assets/cebulion_obfuscation.jpg)
 
 Pakiety na łączu wyglądają jak całkowicie losowy szum o wysokiej entropii i zmiennej długości — systemy DPI nie są w stanie rozpoznać sygnatur WebRTC ani zablokować transmisji.
+
+---
+
+## ⌨️ Tabela Komend (Wersje Polskie i Angielskie)
+
+| Komenda (PL / EN) | Opis |
+| :--- | :--- |
+| `/nowy <nazwa>` / `/new` | Utwórz nową grupę |
+| `/dm <znajomy>` | Otwórz czat 1:1 ze znajomym |
+| `/zapros` / `/invite` | Wygeneruj jednorazowy kod QR i PIN |
+| `/dolacz <kod>` / `/join` | Dołącz do grupy z kodu zaproszenia |
+| `/znajomy <kod>` / `/friend` | Dodaj znajomego z kodu |
+| `/szukaj <fraza>` / `/search` | Szukaj w zaszyfrowanej historii |
+| `/r <nr> <emoji>` / `/react` | Dodaj reakcję emoji do wiadomości |
+| `/usun <nr>` / `/delete` | Usuń wiadomość u wszystkich w DAG-u |
+| `/ukryj <nr>` / `/hide` | Ukryj wiadomość lokalnie u siebie |
+| `/wyslij <ścieżka>` / `/send` | Wyślij plik / grafikę / wideo |
+| `/zapisz <nr>` / `/save` | Zapisz załącznik na dysk |
+| `/awatar <ścieżka>` / `/avatar` | Ustaw swój awatar |
+| `/mojkod` / `/mycode` / `/code` | Wyświetl swój kod znajomego |
+| `/kto` / `/who` | Pokaż członków czatu |
+| `/zmien <nazwa>` / `/rename` | Zmień nazwę czatu |
+| `/call`, `/rozlacz` (`/leave`, `/hangup`) | Dołącz / wyjdź z rozmowy głosowej |
+| `/mic`, `/cam`, `/ekran` (`/screen`) | Przełącz mikrofon, kamerę, udostępnianie ekranu |
+| `/pomoc` / `/help` | Wyświetl listę komend |
 
 ---
 

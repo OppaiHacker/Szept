@@ -1,9 +1,9 @@
 package main
 
-// Narzędzie deweloperskie (do usunięcia): rysuje mobilny układ programowym
-// rendererem fyne i zapisuje PNG-i. Sprawdzanie wyglądu na APK to pełny cykl
-// pakowania, a Xvfb nie da glfw kontekstu GL — software canvas daje jedno i drugie
-// za darmo.
+// Developer tool (to be removed): renders mobile layout using software
+// fyne renderer and saves PNGs. Testing UI on APK requires full packaging
+// cycle, and Xvfb gives no GLFW GL context — software canvas provides both
+// for free.
 //
 //	SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots go test ./cmd/szept-gui -run TestShots -v
 
@@ -34,8 +34,8 @@ func TestShots(t *testing.T) {
 		u.sel = 0
 		u.openConv()
 		shot("02-rozmowa")
-		// przewinięte na środek historii: obie krawędzie mają treść za sobą,
-		// czyli to moment, w którym container.Scroll rysował swoje cienie
+		// scrolled to middle of history: both edges have content behind them,
+		// i.e., exact moment when container.Scroll rendered its shadows
 		u.msgScr.ScrollToOffset(fyne.NewPos(0, 120))
 		shot("02b-rozmowa-przewinieta")
 		u.popPage()
@@ -52,8 +52,8 @@ func TestShots(t *testing.T) {
 	shot("05-ty")
 }
 
-// Pulpit dzieli z telefonem wszystkie klocki, więc poprawka wyglądu na telefonie
-// umie zepsuć układ na pulpicie — stąd ten sam zrzut w drugim wariancie.
+// Desktop shares all building blocks with mobile, so a layout tweak on mobile
+// can break desktop layout — hence same screenshot in second variant.
 func TestShotsDesktop(t *testing.T) {
 	u, shot, done := shotSetup(t, false, fyne.NewSize(1060, 680))
 	defer done()

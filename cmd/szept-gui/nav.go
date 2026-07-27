@@ -1,11 +1,11 @@
 package main
 
-// Nawigacja mobilna: stos pełnoekranowych stron zamiast dialogów.
+// Mobile navigation: stack of full-screen pages instead of dialogs.
 //
-// Na telefonie dialog fyne to kwadrat na środku ekranu — mało miejsca, klawiatura
-// go zasłania, a Wstecz go nie zdejmuje. Dlatego wszystko, co na pulpicie jest
-// okienkiem, na Androidzie jest osobną stroną z paskiem tytułu i strzałką wstecz.
-// u.page() rozgałęzia: mobile → strona, desktop → zwykły dialog.
+// On phone a fyne dialog is a small square in the screen center — limited space,
+// keyboard obscures it, and Back doesn't dismiss it. Therefore everything that is
+// a window on desktop is a separate page with a title bar and back arrow on Android.
+// u.page() branches: mobile -> page, desktop -> regular dialog.
 
 import (
 	"image/color"
@@ -19,9 +19,9 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// appBar: górny pasek strony — strzałka wstecz, tytuł i opcjonalne akcje.
-// Tytuł jest przycinany do miejsca, które zostało między strzałką a akcjami;
-// wcześniej długa nazwa wypychała przyciski za krawędź ekranu.
+// appBar: top page bar — back arrow, title, and optional actions.
+// Title clips to remaining space between arrow and actions;
+// previously long titles pushed action buttons off screen.
 func (u *ui) appBar(title string, back func(), actions ...fyne.CanvasObject) fyne.CanvasObject {
 	t := newClipText(title, fs(17), cFg).bold()
 	var left fyne.CanvasObject
@@ -40,16 +40,15 @@ func (u *ui) appBar(title string, back func(), actions ...fyne.CanvasObject) fyn
 	return container.NewStack(bg, container.NewVBox(row, line))
 }
 
-// backdrop: nieprzezroczyste tło strony, które ZJADA dotknięcia. Samo
-// prostokątne tło ich nie łapie — fyne szuka pierwszego obiektu z interfejsem
-// Tappable idąc od wierzchu, więc kliknięcie w puste miejsce strony trafiałoby
-// w dolny pasek zakładek leżący pod nią.
+// backdrop: opaque page background that CONSUMES touch events. Plain
+// rectangle background does not capture them — fyne looks for the top-most Tappable
+// object, so tapping blank page area would hit bottom tab bar underneath.
 func backdrop() fyne.CanvasObject {
 	return tappable(canvas.NewRectangle(cBg), func() {}, nil)
 }
 
-// pushPage kładzie stronę na wierzchu i wsuwa ją z prawej krawędzi. Stack rysuje
-// warstwy jedna na drugiej, więc bez własnego tła prześwitywałby ekran pod spodem.
+// pushPage pushes page on top and slides it in from right edge. Stack renders
+// layers on top of each other, so without backdrop underlying screen bled through.
 func (u *ui) pushPage(title string, content fyne.CanvasObject, actions ...fyne.CanvasObject) {
 	page := slidePage(container.NewStack(backdrop(), container.NewBorder(
 		u.appBar(title, func() { u.popPage() }, actions...), nil, nil, nil, content)))
@@ -58,10 +57,9 @@ func (u *ui) pushPage(title string, content fyne.CanvasObject, actions ...fyne.C
 	slideIn(page, u.w.Canvas().Size().Width)
 }
 
-// popPage zdejmuje wierzchnią stronę OD RAZU — popAllPages kręci się w pętli
-// dopóki coś zdejmuje, a chatOpen() pyta o zawartość stosu zaraz po powrocie.
-// Animowane wyjeżdżanie musiałoby stronę na chwilę zostawić i jedno i drugie
-// zaczęłoby kłamać.
+// popPage removes top page IMMEDIATELY — popAllPages loops while popping,
+// and chatOpen() queries stack state right after return.
+// Animated pop-out would leave page temporarily and cause state mismatch.
 func (u *ui) popPage() bool {
 	if u.root == nil || len(u.root.Objects) <= 1 {
 		return false
@@ -71,36 +69,35 @@ func (u *ui) popPage() bool {
 	return true
 }
 
-// popAllPages: po wejściu do innego czatu nie ma sensu wracać do stron
-// poprzedniego (np. jego członków).
+// popAllPages: upon entering another chat, returning to pages of previous
+// chat (e.g. member list) is useless.
 func (u *ui) popAllPages() {
 	for u.popPage() {
 	}
 }
 
-// page: to samo wywołanie działa na obu platformach — telefon dostaje stronę,
-// pulpit dialog przycięty do okna.
+// page: same call works on both platforms — mobile gets full page,
+// desktop gets dialog clipped to window size.
 func (u *ui) page(title string, content fyne.CanvasObject, actions ...fyne.CanvasObject) {
 	if u.mobile {
 		u.pushPage(title, vscroll(container.NewPadded(content)), actions...)
 		return
 	}
 	scr := container.NewVScroll(content)
-	// wysokość z treści, nie na sztywno: krótka strona w oknie na 620 px to była
-	// płachta pustki z przyciskiem „Zamknij” przyklejonym gdzieś na dole
+	// height from content, not fixed: short page in 620px window was
+	// an ocean of blank space with Close button stuck at the bottom
 	scr.SetMinSize(u.dlgSize(440, content.MinSize().Height+theme.Padding()*2))
 	dialog.ShowCustom(title, "Zamknij", scr, u.w)
 }
 
-// ---- dialogi ----
+// ---- dialogs ----
 //
-// dialog.ShowInformation/ShowError/ShowConfirm rysują pod treścią ogromną,
-// półprzezroczystą ikonę („?”, „!”) na pół okienka i podpisują przyciski po
-// angielsku (lang.L("Yes")) — w polskiej aplikacji wygląda to jak cudzy widget
-// wklejony w środek. Warianty Custom* nie mają ani ikony, ani gotowych napisów.
+// dialog.ShowInformation/ShowError/ShowConfirm draw a huge semi-transparent
+// icon ("?", "!") over half the dialog and use English button labels (lang.L("Yes")) —
+// looking out of place in localized app. Custom* variants have neither default icon nor hardcoded text.
 
-// dlgBody: treść dialogu. Zawijany tekst ma minimalną szerokość najdłuższego
-// słowa, więc bez rozpórki dialog byłby paskiem na trzy litery.
+// dlgBody: dialog content. Wrapped text min width equals longest
+// word, so without spacer dialog would shrink to 3-letter strip.
 func (u *ui) dlgBody(text string) fyne.CanvasObject {
 	t := widget.NewLabel(text)
 	t.Wrapping = fyne.TextWrapWord
@@ -118,8 +115,8 @@ func (u *ui) fail(err error) {
 	dialog.NewCustom("Nie wyszło", "OK", u.dlgBody(err.Error()), u.w).Show()
 }
 
-// confirm: pytanie tak/nie. Dialog zostaje nawet na telefonie — jedno zdanie
-// i dwa przyciski nie potrzebują całego ekranu, a pytanie ma zatrzymać rękę.
+// confirm: yes/no question. Uses dialog even on mobile — single sentence
+// and two buttons don't need full screen, and prompt is meant to pause action.
 func (u *ui) confirm(text string, yes func()) {
 	d := dialog.NewCustomConfirm("Na pewno?", "Tak", "Anuluj", u.dlgBody(text),
 		func(ok bool) {
@@ -131,9 +128,9 @@ func (u *ui) confirm(text string, yes func()) {
 	d.Show()
 }
 
-// ---- klocki stron ----
+// ---- page building blocks ----
 
-// navRow: wiersz listy ustawień — ikona, tytuł, opis, szewron.
+// navRow: settings list row — icon, title, description, chevron.
 func navRow(icon fyne.Resource, title, desc string, tap func()) fyne.CanvasObject {
 	row := container.NewBorder(nil, nil,
 		container.NewHBox(hspace(4), container.NewCenter(widget.NewIcon(icon)), hspace(10)),
@@ -142,7 +139,7 @@ func navRow(icon fyne.Resource, title, desc string, tap func()) fyne.CanvasObjec
 	return tappable(container.NewPadded(row), tap, nil)
 }
 
-// section: nagłówek grupy wierszy (jak w ustawieniach Discorda).
+// section: group header (like Discord settings).
 func section(title string) fyne.CanvasObject {
 	t := canvas.NewText(title, cMuted)
 	t.TextSize = fs(11)
@@ -150,19 +147,19 @@ func section(title string) fyne.CanvasObject {
 	return container.NewPadded(t)
 }
 
-// bigButton: główna akcja strony.
+// bigButton: primary page action button.
 func bigButton(label string, icon fyne.Resource, tap func()) *widget.Button {
 	b := widget.NewButtonWithIcon(label, icon, tap)
 	b.Importance = widget.HighImportance
 	return b
 }
 
-// ---- tapowalne kontenery ----
+// ---- tappable containers ----
 
-// tapBox: dowolna zawartość, która reaguje na dotknięcie i długie przytrzymanie.
-// Fyne nie ma takiego klocka, a bez niego wiersz listy musiałby być przyciskiem
-// (jeden label, brak awatara). Przeciągnięcie palcem po ekranie nie odpala
-// tap — driver mobilny gubi zdarzenie, gdy zaczęło się przewijanie.
+// tapBox: arbitrary content responding to tap and long-press.
+// Fyne lacks this control, without which list rows had to be buttons
+// (single label, no avatar). Dragging finger doesn't trigger
+// tap — mobile driver drops event when scroll starts.
 type tapBox struct {
 	widget.BaseWidget
 	content fyne.CanvasObject
@@ -183,9 +180,9 @@ func (t *tapBox) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(t.hover, t.content))
 }
 
-// Dotknięcie w trakcie wybiegu (scroll.go) znaczy „stój”, nie „otwórz” — tak
-// zachowuje się każda lista na Androidzie. Bez tego palec położony na lecącej
-// liście otwierał czat, w który akurat trafił.
+// Tapping during fling (scroll.go) means "stop", not "open" — standard
+// Android list behavior. Without this, finger placed on moving list
+// opened whatever chat it happened to touch.
 func (t *tapBox) Tapped(*fyne.PointEvent) {
 	if activeFling != nil {
 		stopFling()
@@ -204,17 +201,15 @@ func (t *tapBox) TappedSecondary(*fyne.PointEvent) {
 	}
 }
 
-// pressTint: podświetlenie dotkniętego wiersza.
+// pressTint: touch highlight overlay color.
 var pressTint = color.NRGBA{0xff, 0xff, 0xff, 0x1c}
 
-// flash: rozjaśnienie i zgaśnięcie zamiast stanu wciśnięcia.
+// flash: highlight flash upon release instead of pressed state.
 //
-// ponytail: podświetlenie leci dopiero po puszczeniu palca, bo prawdziwy stan
-// „wciśnięty” wymagałby mobile.Touchable — a wtedy driver fyne uznaje wiersz za
-// najgłębszy obiekt zdarzeń przeciągania (findObjectAtPositionMatching bierze
-// najgłębsze trafienie) i skoro wiersz nie umie Dragged, przewijanie ROZPOCZĘTE
-// na wierszu przestaje działać w ogóle. Reakcja po puszczeniu to mały koszt za
-// działające przewijanie listy.
+// ponytail: highlight triggers on release because true pressed state
+// required mobile.Touchable — which caused fyne driver to classify row as
+// deepest target for drag events, breaking scroll STARTING on a row.
+// Release flash is a small trade-off for working list scrolling.
 func (t *tapBox) flash() {
 	if t.anim != nil {
 		t.anim.Stop()
@@ -229,10 +224,10 @@ func (t *tapBox) flash() {
 	t.anim.Start()
 }
 
-// ---- dolna nawigacja ----
+// ---- bottom navigation ----
 
-// navTab: jedna zakładka dolnego paska. Własna, bo container.AppTabs na dole
-// daje wąskie, słabo widoczne cele dotykowe i nie umie odznaki.
+// navTab: single tab in bottom bar. Custom because container.AppTabs
+// at bottom provides narrow touch targets and no badge support.
 type navTab struct {
 	icon  fyne.Resource
 	label string
@@ -276,7 +271,7 @@ func (u *ui) buildBottomNav(labels []string, icons []fyne.Resource) fyne.CanvasO
 	return container.NewStack(bg, container.NewVBox(line, row))
 }
 
-// selectTab przełącza zakładkę główną (dolny pasek) i zdejmuje strony ze stosu.
+// selectTab switches main tab (bottom bar) and pops stacked pages.
 func (u *ui) selectTab(i int) {
 	if i < 0 || i >= len(u.tabViews) {
 		return
@@ -286,8 +281,8 @@ func (u *ui) selectTab(i int) {
 	u.tab = i
 	u.tabBody.Objects = []fyne.CanvasObject{u.tabViews[i]}
 	u.tabBody.Refresh()
-	// nowa zakładka wjeżdża z tej strony, z której „przyszła” — 24 px wystarczy,
-	// żeby przełączenie było widoczne, a nie żeby na nie czekać
+	// new tab slides in from the side it "came from" — 24px is enough
+	// for transition without annoying delay
 	if prev != i {
 		if prev < i {
 			slideIn(u.tabBody, 24)
@@ -310,7 +305,7 @@ func (u *ui) selectTab(i int) {
 	u.refresh()
 }
 
-// setTabBadge: liczba nieprzeczytanych na ikonie zakładki.
+// setTabBadge: unread count badge on tab icon.
 func (u *ui) setTabBadge(i, n int) {
 	if i < 0 || i >= len(u.tabs) {
 		return

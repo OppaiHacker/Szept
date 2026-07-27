@@ -26,15 +26,15 @@ const (
 	KindRemove = "remove" // {Pub} removed by owner
 	KindRekey  = "rekey"  // {} bumps epoch; new key travels out-of-band (E2E ctrl)
 	KindRename = "rename" // {Name}
-	KindFile   = "file"   // {Blob, Mime, Name, Size, W, H, Text=podpis} attachment
+	KindFile   = "file"   // {Blob, Mime, Name, Size, W, H, Text=caption} attachment
 	KindAvatar = "avatar" // {Blob, Mime} author's avatar; empty Blob clears it
 	KindNick   = "nick"   // {Name} author renames themselves in this chat
 	KindReact  = "react"  // {Target, Text=emoji} reaction to an event
 	KindDelete = "delete" // {Target} deletes/revokes an event
 )
 
-// QuietKinds: zdarzenia profilowe i modyfikujące. Nie są osobną treścią rozmowy —
-// nie rysujemy ich jako osobnych linii i nie nabijają odznaki nieprzeczytanych.
+// QuietKinds: profile and modifying events. Not separate conversation items —
+// we don't render them as separate lines and they don't increment unread badges.
 func QuietKind(kind string) bool {
 	return kind == KindAvatar || kind == KindNick || kind == KindReact || kind == KindDelete
 }
@@ -65,9 +65,9 @@ type Body struct {
 	W    int    `json:"w,omitempty"`
 	H    int    `json:"h,omitempty"`
 
-	// Duże pliki (> attach.PreviewMax) replikują się tylko jako podgląd: Prev to
-	// sha256 miniatury, którą wszyscy ściągają od razu. Pełne bajty (Blob) leżą
-	// u nadawcy i wędrują dopiero, gdy ktoś naciśnie „pobierz”.
+	// Large files (> attach.PreviewMax) replicate as thumbnail only: Prev is
+	// sha256 of thumbnail, fetched by everyone immediately. Full bytes (Blob) reside
+	// at sender and travel only when recipient taps "download".
 	Prev     []byte `json:"prev,omitempty"`
 	PrevMime string `json:"pmime,omitempty"`
 }
@@ -163,7 +163,7 @@ type Member struct {
 	Pub        []byte
 	Name       string
 	Removed    bool
-	AddedBy    []byte // kto go wpuścił (nil dla założyciela) — usunięcie kaskaduje
+	AddedBy    []byte // who added this member (nil for genesis owner) — removal cascades
 	Avatar     []byte // sha256 of the avatar blob ("" = default initials)
 	AvatarMime string
 }
@@ -201,9 +201,9 @@ func Fold(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
 	return fold(evs, chatID, keys, true)
 }
 
-// FoldTrusted pomija weryfikację podpisów. Wolno jej użyć wyłącznie na
-// zdarzeniach, które przeszły już przez ingest (czyli na tym, co leży w naszej
-// bazie) — sprawdzanie Ed25519 to ~90% kosztu foldu, a robimy go często.
+// FoldTrusted skips signature verification. May only be used on
+// events already validated via ingest (i.e. stored in database) —
+// Ed25519 checks account for ~90% of fold cost and fold runs frequently.
 func FoldTrusted(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
 	return fold(evs, chatID, keys, false)
 }
@@ -215,7 +215,7 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 		Reactions: map[string]map[string]string{},
 		Deleted:   map[string]bool{},
 	}
-	// lamport rodziców: porządek stosowania ma wynikać z DAG-u, nie z licznika
+	// parent Lamport: apply order derives from DAG, not internal counter
 	seen := make(map[string]uint64, len(evs))
 	for _, e := range evs {
 		if verify && !e.VerifySig() {
@@ -229,10 +229,10 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 		} else if !bytes.Equal(e.Chat, chatID) {
 			return nil, errors.New("event from another chat")
 		}
-		// Lamport = max(rodzice)+1, dokładnie. Bez tego autor sam wybiera, w
-		// którym miejscu historii wyląduje jego zdarzenie: antydatowane "add"
-		// wchodzi w stan sprzed czyjegoś usunięcia, a Lamport = 2^64-1 przewija
-		// licznik i blokuje wszystkim dopisywanie.
+		// Lamport = max(parents)+1, strictly. Without this an author selects
+		// where in history their event lands: backdated "add"
+		// enters state prior to someone's kick, or Lamport = 2^64-1 rolls counter
+		// and blocks everyone from appending.
 		if err := checkLamport(e, seen, isGenesis); err != nil {
 			return nil, err
 		}
@@ -242,8 +242,8 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 		if ok {
 			var err error
 			if body, err = e.Decrypt(key); err != nil {
-				// zły klucz epoki (np. podrzucony przez peera) nie może zabić
-				// całego czatu — traktujemy go jak brak klucza
+				// bad epoch key (e.g. spoofed by peer) cannot kill
+				// entire chat — treat as missing key
 				ok = false
 			}
 		}
@@ -257,8 +257,8 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 		}
 		switch e.Kind {
 		case KindCreate:
-			// genesis jest dokładnie jeden: drugi "create" nadpisywałby
-			// właściciela, czyli każdy członek przejmowałby czat
+			// genesis is strictly single: second "create" would overwrite
+			// owner, meaning any member could hijack chat
 			if !isGenesis {
 				return nil, errors.New("second genesis event")
 			}
@@ -334,10 +334,9 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 	return st, nil
 }
 
-// checkLamport wymusza Lamport = max(rodzice)+1 i obecność rodziców przed
-// dzieckiem. Uczciwy klient zawsze tak liczy (heads + 1), więc to nie zmienia
-// niczego dla poprawnej historii — odcina za to wybieranie sobie miejsca
-// w porządku foldu.
+// checkLamport enforces Lamport = max(parents)+1 and presence of parents before
+// child. Honest client computes this naturally (heads + 1), so nothing changes
+// for valid histories — cuts off custom placement in fold order.
 func checkLamport(e *Event, seen map[string]uint64, isGenesis bool) error {
 	if isGenesis {
 		return nil
@@ -361,9 +360,9 @@ func checkLamport(e *Event, seen map[string]uint64, isGenesis bool) error {
 	return nil
 }
 
-// removeTree: usunięcie kaskaduje na tych, których usuwany wpuścił. Bez tego
-// wystarczy dodać do czatu drugą swoją tożsamość, żeby przeżyć wyrzucenie —
-// zostaje członkiem, więc dostaje wszystkie klucze epok, także te po rotacji.
+// removeTree: removal cascades to those introduced by removed member. Without this
+// adding second identity suffices to survive kick —
+// remains member, receiving all epoch keys including post-rotation ones.
 func removeTree(st *State, pub []byte) {
 	m, ok := st.Members[string(pub)]
 	if !ok || m.Removed {

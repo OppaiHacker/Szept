@@ -65,8 +65,8 @@ type model struct {
 	sel    int
 	syslog []string
 	video  map[string]*videoView // chat key -> latest frame
-	files  []core.Msg            // załączniki bieżącego czatu (numeracja dla /zapisz)
-	msgs   []core.Msg            // wiadomości bieżącego czatu (numeracja dla /r, /usun, /ukryj)
+	files  []core.Msg            // attachments of current chat (numbering for /save)
+	msgs   []core.Msg            // messages of current chat (numbering for /r, /delete, /hide)
 	ready  bool
 }
 
@@ -246,7 +246,7 @@ func (m *model) exec(line string) tea.Cmd {
 		} else {
 			m.log("usunięto wiadomość u wszystkich")
 		}
-	case "/ukryj":
+	case "/ukryj", "/hide":
 		if ch == nil || arg == "" {
 			m.logErr("użycie: /ukryj <nr_wiadomości> — ukrywa u siebie")
 			break
@@ -264,7 +264,7 @@ func (m *model) exec(line string) tea.Cmd {
 		}
 	case "/quit":
 		return tea.Quit
-	case "/nowy":
+	case "/nowy", "/new":
 		if arg == "" {
 			m.logErr("podaj nazwę grupy")
 			break
@@ -291,7 +291,7 @@ func (m *model) exec(line string) tea.Cmd {
 		if !found {
 			m.logErr("nie znam takiego znajomego (dodaj: /znajomy <kod>)")
 		}
-	case "/zapros":
+	case "/zapros", "/invite":
 		if ch == nil {
 			m.logErr("wybierz czat")
 			break
@@ -305,7 +305,7 @@ func (m *model) exec(line string) tea.Cmd {
 		m.syslog = append(m.syslog, code)
 		m.log("PIN (podaj drugiej osobie innym kanałem): " + pin)
 		m.syslog = append(m.syslog, qrBlock(code)...)
-	case "/dolacz":
+	case "/dolacz", "/join":
 		f := strings.Fields(arg)
 		if len(f) < 2 {
 			m.logErr("użycie: /dolacz <kod> <pin>")
@@ -316,7 +316,7 @@ func (m *model) exec(line string) tea.Cmd {
 		} else {
 			m.log("dołączanie… (zapraszający musi być online)")
 		}
-	case "/znajomy":
+	case "/znajomy", "/friend":
 		f, err := m.c.AddFriend(arg)
 		if err != nil {
 			m.logErr(err.Error())
@@ -336,7 +336,17 @@ func (m *model) exec(line string) tea.Cmd {
 			m.logErr("zapis konfiguracji: " + err.Error())
 		}
 		m.log("connector zmieniony na " + url + " — łączę…")
-	case "/wyslij":
+	case "/lang", "/jezyk":
+		if arg == "" {
+			m.log("język / language: " + m.c.Lang() + " — zmiana: /lang <pl|en>")
+			break
+		}
+		if err := m.c.SetLang(arg); err != nil {
+			m.logErr(err.Error())
+		} else {
+			m.log("zmieniono język / language set to " + m.c.Lang())
+		}
+	case "/wyslij", "/send":
 		if ch == nil || arg == "" {
 			m.logErr("użycie: /wyslij <ścieżka> [podpis]")
 			break
@@ -347,7 +357,7 @@ func (m *model) exec(line string) tea.Cmd {
 		} else {
 			m.log("wysłano " + filepath.Base(path))
 		}
-	case "/zapisz":
+	case "/zapisz", "/save":
 		f := strings.Fields(arg)
 		if len(f) == 0 {
 			m.logErr("użycie: /zapisz <nr> [katalog] — numery są przy załącznikach")
@@ -369,7 +379,7 @@ func (m *model) exec(line string) tea.Cmd {
 		} else {
 			m.log("zapisano: " + p)
 		}
-	case "/awatar":
+	case "/awatar", "/avatar":
 		if arg == "" {
 			m.logErr("użycie: /awatar <ścieżka do PNG/JPEG/GIF-a> albo /awatar - żeby usunąć")
 			break
@@ -387,12 +397,12 @@ func (m *model) exec(line string) tea.Cmd {
 		} else {
 			m.log("awatar ustawiony (przeskalowany i przekodowany)")
 		}
-	case "/mojkod":
+	case "/mojkod", "/mycode", "/code":
 		code := m.c.FriendCode()
 		m.log("TWÓJ KOD ZNAJOMEGO (odcisk: " + identity.Fingerprint(m.c.ID.Pub) + "):")
 		m.syslog = append(m.syslog, code)
 		m.syslog = append(m.syslog, qrBlock(code)...)
-	case "/kto":
+	case "/kto", "/who":
 		if ch == nil {
 			break
 		}
@@ -427,7 +437,7 @@ func (m *model) exec(line string) tea.Cmd {
 		} else {
 			m.log("nowa epoka klucza")
 		}
-	case "/zmien":
+	case "/zmien", "/rename":
 		if ch == nil || arg == "" {
 			break
 		}
@@ -443,7 +453,7 @@ func (m *model) exec(line string) tea.Cmd {
 		} else {
 			m.log("dołączono do rozmowy (mikrofon aktywny)")
 		}
-	case "/rozlacz":
+	case "/rozlacz", "/leave", "/hangup":
 		if ch != nil {
 			m.c.LeaveCall(ch.ID)
 			delete(m.video, string(ch.ID))
@@ -459,7 +469,7 @@ func (m *model) exec(line string) tea.Cmd {
 				m.logErr(err.Error())
 			}
 		}
-	case "/ekran":
+	case "/ekran", "/screen":
 		if ch != nil {
 			if err := m.c.ToggleScreen(ch.ID); err != nil {
 				m.logErr(err.Error())
@@ -519,7 +529,7 @@ func (m *model) refresh() {
 		if typing := m.c.TypingPeers(ch.ID); len(typing) > 0 {
 			b.WriteString(stInfo.Render("✍ "+strings.Join(typing, ", ")+" pisze...") + "\n")
 		}
-		// podgląd ostatniego obrazka — terminal potrafi tyle, ile półbloki
+		// preview of last image — terminal renders via halfblocks
 		if preview != nil {
 			if data, ok := m.c.BlobBytes(preview.Blob); ok {
 				if img, _, err := image.Decode(bytes.NewReader(data)); err == nil {
@@ -633,9 +643,9 @@ func (m *model) callStatus() string {
 	return strings.Join(bits, " ")
 }
 
-// splitPathArg rozdziela „/wyslij <ścieżka> [podpis]”. Gdy cały argument
-// wskazuje istniejący plik, całość jest ścieżką — nazwy ze spacjami działają
-// bez cudzysłowów (te też obsługujemy).
+// splitPathArg splits "/send <path> [caption]". When full argument
+// points to existing file, entire string is path — names with spaces work
+// without quotes (quotes are handled as well).
 func splitPathArg(arg string) (path, caption string) {
 	if strings.HasPrefix(arg, `"`) {
 		if i := strings.Index(arg[1:], `"`); i >= 0 {

@@ -6,8 +6,8 @@ FYNE ?= $(HOME)/go/bin/fyne
 PREFIX ?= $(HOME)/.local
 APPID  := chat.szept
 
-# Binarki są .PHONY celowo: reguły nie mają listy źródeł, więc bez tego `make`
-# po edycji kodu nie robi nic i zostaje stara binarka. `go build` i tak cache'uje.
+# Binaries are intentionally .PHONY: rules have no source file lists, so without this `make`
+# after code edits does nothing and leaves the old binary. `go build` caches anyway.
 .PHONY: all test clean linux windows connector-windows android install uninstall \
 	$(BIN)/szept-connector $(BIN)/szept $(BIN)/szept-gui
 
@@ -24,11 +24,11 @@ test:
 	go vet ./...
 	go test ./... -timeout 180s
 
-# Connector jest czysty Go — krzyżowa kompilacja bez zależności:
+# Connector is pure Go — cross-compilation with no dependencies:
 connector-windows:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o $(BIN)/szept-connector.exe ./cmd/connector
 
-# Klienty używają cgo (audio/GUI) — potrzebny mingw-w64:
+# Clients use cgo (audio/GUI) — mingw-w64 is required:
 #   Arch: sudo pacman -S mingw-w64-gcc
 windows:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
@@ -36,13 +36,13 @@ windows:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
 		go build -ldflags -H=windowsgui -o $(BIN)/szept-gui.exe ./cmd/szept-gui
 
-# APK: wymaga Android SDK+NDK i narzędzia fyne (go install fyne.io/tools/cmd/fyne@latest).
-# Uprawnienia/manifest: cmd/szept-gui/AndroidManifest.xml
-# checklinkname=0: wlynxg/anet (pion) linkuje net.zoneCache, Go >=1.23 to blokuje
-# Wersja: jedyne źródło prawdy to FyneApp.toml (Version + Build). `fyne package`
-# inkrementuje Build po każdym udanym pakowaniu, więc każdy build = nowa wersja.
-# Manifest ma własny plik, więc fyne go NIE podmienia — wstrzykujemy sed-em:
-# versionCode=Build (Android wymaga liczby rosnącej), versionName=Version.Build.
+# APK: requires Android SDK+NDK and fyne tool (go install fyne.io/tools/cmd/fyne@latest).
+# Permissions/manifest: cmd/szept-gui/AndroidManifest.xml
+# checklinkname=0: wlynxg/anet (pion) links net.zoneCache, Go >=1.23 blocks this
+# Version: single source of truth is FyneApp.toml (Version + Build). `fyne package`
+# increments Build after every successful packaging, so every build = new version.
+# Manifest has its own file, so fyne does NOT substitute it — we inject with sed:
+# versionCode=Build (Android requires strictly increasing integer), versionName=Version.Build.
 android:
 	cd cmd/szept-gui && \
 		V=$$(sed -n 's/^Version *= *"\(.*\)"/\1/p' FyneApp.toml) && \
@@ -54,10 +54,10 @@ android:
 		GOFLAGS=-ldflags=-checklinkname=0 $(FYNE) package --os android
 	mkdir -p $(BIN) && mv cmd/szept-gui/szept.apk $(BIN)/szept.apk
 
-# Instalacja do menu aplikacji (bez roota, XDG user dirs).
-# Ponowne `make install` = aktualizacja: nadpisuje binarkę i wpis .desktop.
-# StartupWMClass musi być równe app.NewWithID w main.go, inaczej launcher nie
-# sklei okna z ikoną i pokaże je jako osobny, bezimienny wpis na pasku.
+# Installation to app menu (without root, XDG user dirs).
+# Re-running `make install` = update: overwrites binary and .desktop entry.
+# StartupWMClass must match app.NewWithID in main.go, otherwise launcher won't
+# associate window with icon and displays it as a separate unnamed taskbar item.
 install: $(BIN)/szept-gui
 	install -Dm755 $(BIN)/szept-gui $(PREFIX)/bin/szept-gui
 	install -Dm644 cmd/szept-gui/Icon.png \

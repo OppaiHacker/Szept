@@ -1,8 +1,8 @@
 package main
 
-// Klocki, których fyne nie ma, a bez których dotyk wygląda na zepsuty:
-// przewijanie z wybiegiem, jednolinijkowy tekst przycinany do dostępnej
-// szerokości i przesuwana warstwa do wjeżdżania stron z boku.
+// Building blocks that fyne lacks, but without which touch feels broken:
+// scrolling with fling coasting, single-line text truncated to available
+// width, and slidable layer for sliding in pages from the side.
 
 import (
 	"image/color"
@@ -14,39 +14,39 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// ---- przewijanie z wybiegiem ----
+// ---- scrolling with fling coasting ----
 
-// Dlaczego to w ogóle istnieje — fyne 2.8 ma po puszczeniu palca własny wybieg,
-// ale zrobiony tak (internal/driver/mobile/driver.go, tapUpCanvas):
+// Why this exists — fyne 2.8 has native fling after finger release,
+// but implemented as (internal/driver/mobile/driver.go, tapUpCanvas):
 //
 //	go func() {
 //	    for |delta| > 2 { delta *= 0.92; DoFromGoroutine(Dragged, false); sleep(16ms) }
 //	    DoFromGoroutine(DragEnd, false)
 //	}()
 //
-// Osobna gorutyna dorzuca pełne odświeżenie przewijania co 16 ms NIE PATRZĄC,
-// czy poprzednie się skończyło. Gdy klatka trwa dłużej (a na telefonie przy
-// kilkuset widgetach trwa), kolejka rośnie i wybieg zamienia się w szarpanie —
-// dokładnie to, co widać jako „nie scrolluje, tylko się zacina”. Do tego droga
-// wybiegu bierze się z JEDNEJ ostatniej różnicy pozycji, nie z prędkości, więc
-// nie ma związku z tym, jak mocno rzuciło się listą.
+// A separate goroutine pushes a full scroll refresh every 16 ms WITHOUT CHECKING
+// whether the previous one finished. When a frame takes longer (which happens on phone
+// with hundreds of widgets), queue builds up and fling turns into stuttering —
+// exactly what appears as "stuck instead of scrolling". Furthermore fling distance
+// comes from a SINGLE last position diff, not velocity, so it has no relation to how hard
+// the list was flicked.
 //
-// flingScroll przejmuje sprawę: mierzy prawdziwą prędkość, zeruje zdarzenie (to
-// gasi pętlę fyne, patrz Dragged) i dowozi treść jedną animacją, którą runner
-// fyne tyka raz na NARYSOWANĄ klatkę — nigdy szybciej, niż GPU nadąża.
+// flingScroll takes over: measures true velocity, zeroes event (which
+// kills fyne loop, see Dragged) and delivers content via a single animation, which fyne
+// runner ticks once per RENDERED frame — never faster than GPU handles.
 const (
-	flingMinVel = float32(180)  // px/s — niżej to nie rzut, tylko puszczenie
-	flingCoast  = float32(0.35) // sekundy wybiegu przy zmierzonej prędkości
+	flingMinVel = float32(180)  // px/s — below this is release, not flick
+	flingCoast  = float32(0.35) // seconds of coasting at measured speed
 	flingTime   = 700 * time.Millisecond
-	// velKeep: wygładzanie prędkości. Jedno drgnięcie palca przy puszczaniu nie
-	// może zdecydować o całym rzucie.
+	// velKeep: velocity smoothing. Single finger jitter upon release must not
+	// dictate entire fling.
 	velKeep = float32(0.6)
 )
 
-// activeFling: w danej chwili leci najwyżej jeden rzut, więc dotknięcie
-// gdziekolwiek (tapBox.Tapped) umie go zatrzymać bez znajomości drzewa.
-// Musi wracać do nil TAKŻE po samoczynnym końcu animacji — inaczej pierwsze
-// dotknięcie po każdym rzucie byłoby brane za „zatrzymaj” i przepadało.
+// activeFling: at most one fling runs at a time, so tapping anywhere
+// (tapBox.Tapped) can halt it without walking the component tree.
+// Must reset to nil ALSO after animation finishes naturally — otherwise
+// first tap after any fling would be interpreted as "stop" and lost.
 var activeFling *flingScroll
 
 func stopFling() {
@@ -57,12 +57,12 @@ func stopFling() {
 
 type flingScroll struct {
 	container.Scroll
-	vel   float32 // px/s; dodatnie = palec w dół
+	vel   float32 // px/s; positive = finger moving down
 	lastT time.Time
 	anim  *fyne.Animation
 }
 
-// vscroll: pionowe przewijanie z wybiegiem — zamiennik container.NewVScroll.
+// vscroll: vertical scroll with fling coasting — drop-in replacement for container.NewVScroll.
 func vscroll(content fyne.CanvasObject) *flingScroll {
 	s := &flingScroll{}
 	s.Direction = container.ScrollVerticalOnly
@@ -78,7 +78,7 @@ func (s *flingScroll) scrollBy(dy float32) {
 func (s *flingScroll) Dragged(e *fyne.DragEvent) {
 	s.halt()
 	now := time.Now()
-	// dt > 120 ms to nie ten sam ruch — zaczynamy liczyć prędkość od zera
+	// dt > 120 ms is not the same gesture — start velocity calculation from zero
 	if dt := now.Sub(s.lastT); dt > 0 && dt < 120*time.Millisecond {
 		s.vel = s.vel*velKeep + e.Dragged.DY/float32(dt.Seconds())*(1-velKeep)
 	} else {
@@ -87,24 +87,24 @@ func (s *flingScroll) Dragged(e *fyne.DragEvent) {
 	s.lastT = now
 	s.scrollBy(-e.Dragged.DY)
 
-	// Zerowanie zdarzenia gasi wygaszającą pętlę fyne: warunek tej pętli to
-	// |e.Dragged| > 2, a mnożenie zera nic nie da, więc po JEDNYM obrocie
-	// wywoła DragEnd i odda wybieg naszej animacji. Zdarzenia z tapMove są
-	// tworzone od nowa przy każdym ruchu palca, więc nic tu nie tracimy.
+	// Zeroing event kills fyne dampening loop: loop condition is
+	// |e.Dragged| > 2, and multiplying zero changes nothing, so after ONE iteration
+	// it invokes DragEnd and hands off fling to our animation. Events from tapMove are
+	// created afresh on each finger move, so nothing is lost here.
 	e.Dragged = fyne.Delta{}
 }
 
-// flingDistance: ile treści dowieźć po puszczeniu palca. Znak jak w scrollBy —
-// palec w dół (DY > 0) cofa rozmowę, czyli zmniejsza offset.
+// flingDistance: how much content to deliver after release. Sign matches scrollBy —
+// finger down (DY > 0) scrolls up chat history, reducing offset.
 func flingDistance(vel float32) float32 {
 	if vel > -flingMinVel && vel < flingMinVel {
-		return 0 // puszczenie, nie rzut
+		return 0 // release, not flick
 	}
 	return -vel * flingCoast
 }
 
-// flingSpan: czas wybiegu rośnie z drogą, ale ma sufit. Stały czas znaczyłby, że
-// leciutkie pchnięcie listy pełznie te same 700 ms co porządny rzut.
+// flingSpan: coasting duration scales with distance, but has a ceiling. Constant time
+// would mean a gentle nudge crawls for the same 700 ms as a hard flick.
 func flingSpan(dist float32) time.Duration {
 	if dist < 0 {
 		dist = -dist
@@ -123,8 +123,8 @@ func (s *flingScroll) DragEnd() {
 	s.anim = fyne.NewAnimation(flingSpan(dist), func(p float32) {
 		s.ScrollToOffset(fyne.NewPos(s.Offset.X, from+dist*p))
 		if p == 1 {
-			// runner zawsze domyka tickiem 1.0 — tu, a nie przez Stop(), żeby nie
-			// grzebać w liście animacji z jej własnego wywołania
+			// runner always completes with tick 1.0 — handled here rather than Stop()
+			// to avoid mutating animation list from inside its callback
 			s.anim = nil
 			if activeFling == s {
 				activeFling = nil
@@ -146,14 +146,13 @@ func (s *flingScroll) halt() {
 	}
 }
 
-// ---- tekst przycinany do szerokości ----
+// ---- text truncated to width ----
 
-// clipText: jedna linia, która sama dokłada wielokropek, gdy się nie mieści.
-// canvas.Text nie umie ani zawijać, ani przycinać — stąd wcześniejsze cięcie na
-// sztywną liczbę znaków, które na szerokim ekranie marnowało miejsce, a na
-// wąskim i tak wypychało treść za krawędź. widget.Label umie Truncation, ale
-// dokłada theme.InnerPadding() (na telefonie 13 px) z każdej strony i wiersz
-// listy robił się dwa razy wyższy.
+// clipText: single line that appends ellipsis automatically when overflowing.
+// canvas.Text can neither wrap nor clip — hence previous hardcoded character limit
+// cut-off, which wasted space on wide screens and still pushed text off-edge on narrow screens.
+// widget.Label supports Truncation, but adds theme.InnerPadding() (13 px on mobile)
+// on both sides, doubling list row height.
 type clipText struct {
 	widget.BaseWidget
 	full string
@@ -191,8 +190,8 @@ func (r *clipRenderer) Layout(size fyne.Size) {
 	r.t.txt.Refresh()
 }
 
-// MinSize: sama wysokość linii. Szerokość zostaje mała, żeby layout mógł ścisnąć
-// wiersz — o przycięcie treści dba Layout.
+// MinSize: line height only. Width stays small so layout can compress
+// row — content clipping handled by Layout.
 func (r *clipRenderer) MinSize() fyne.Size {
 	h := fyne.MeasureText("Ag", r.t.txt.TextSize, r.t.txt.TextStyle).Height
 	return fyne.NewSize(16, h)
@@ -202,9 +201,9 @@ func (r *clipRenderer) Objects() []fyne.CanvasObject { return []fyne.CanvasObjec
 func (r *clipRenderer) Refresh()                     { r.Layout(r.t.Size()) }
 func (r *clipRenderer) Destroy()                     {}
 
-// fitText: najdłuższy prefiks, który mieści się w w pikselach. Zgadujemy długość
-// z proporcji i dopiero potem poprawiamy — inaczej długa nazwa to kilkadziesiąt
-// pomiarów tekstu na każdy wiersz listy.
+// fitText: longest prefix fitting within w pixels. Guesses initial length
+// from ratio before refining — otherwise long strings would trigger dozens
+// of text measurements per list row.
 func fitText(s string, size float32, style fyne.TextStyle, w float32) string {
 	if s == "" || w <= 0 {
 		return s
@@ -230,11 +229,11 @@ func fitText(s string, size float32, style fyne.TextStyle, w float32) string {
 	return string(r[:n]) + "…"
 }
 
-// ---- przesuwana warstwa (wjeżdżanie stron) ----
+// ---- slidable layer (page slide-in) ----
 
-// slideLayout: warstwa na pełny ekran, którą można odsunąć w poziomie.
-// container.Stack sadza dzieci na (0,0) przy każdym układaniu, więc samo
-// animowanie Move() nic nie da — pierwszy layout wraca wszystko na miejsce.
+// slideLayout: full-screen layer that can be offset horizontally.
+// container.Stack resets children to (0,0) on every layout pass, so animating
+// Move() alone is undone by layout.
 type slideLayout struct{ off float32 }
 
 func (s *slideLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
@@ -252,12 +251,12 @@ func (s *slideLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	}
 }
 
-// slideDur: krótko — na telefonie każda animacja dłuższa niż ~200 ms zaczyna być
-// odczuwana jako opieszałość interfejsu, nie jako płynność.
+// slideDur: short — on phone any animation longer than ~200 ms starts feeling
+// sluggish rather than smooth.
 const slideDur = 190 * time.Millisecond
 
-// slideIn wjeżdża warstwą z podanego przesunięcia do zera. W ticku ruszamy tylko
-// Move (Resize zostawia layout kontenera), więc klatka to jedno przesunięcie.
+// slideIn slides layer from specified offset to zero. On tick we only call
+// Move (Resize preserves container layout), making each frame a single offset update.
 func slideIn(page *fyne.Container, from float32) {
 	lay, ok := page.Layout.(*slideLayout)
 	if !ok || from == 0 {
@@ -275,7 +274,7 @@ func slideIn(page *fyne.Container, from float32) {
 	a.Start()
 }
 
-// slidePage: strona gotowa do wjechania z boku.
+// slidePage: page container prepared for sliding in from side.
 func slidePage(content fyne.CanvasObject) *fyne.Container {
 	return container.New(&slideLayout{}, content)
 }

@@ -1,6 +1,6 @@
-// Komendy / (jak na Discordzie): pole wiadomości rozpoznaje wpis od "/",
-// podpowiada dopasowane komendy nad polem, a odpowiedzi wracają jako lokalne
-// „embedy” systemowe w rozmowie — widoczne tylko u nas, nie lecą do sieci.
+// / commands (like on Discord): text input recognizes entries starting with "/",
+// suggests matching commands above input, and responses return as local
+// system "embeds" in conversation — visible only to us, never sent over network.
 package main
 
 import (
@@ -21,51 +21,69 @@ import (
 	"szept/internal/identity"
 )
 
-// maxSys: starsze komunikaty spadają z góry — rozmowa nie ma być logiem
+// maxSys: older messages drop off top — chat shouldn't be a log
 const maxSys = 8
 
-// ---- rejestr komend ----
+// ---- command registry ----
 
 type cmdDef struct {
 	name     string
 	args     string
 	desc     string
-	noMobile bool // kamera/ekran nie mają źródła na Androidzie
+	noMobile bool // camera/screen have no source on Android
 	run      func(*ui, string)
 }
 
-// wypełniane w init(), nie w inicjalizatorze: /pomoc czyta ten sam rejestr,
-// a Go nie przepuszcza cyklu zmienna→funkcja→zmienna
+// populated in init(), not in initializer: /help reads the same registry,
+// and Go doesn't allow cycle variable->function->variable
 var commands []cmdDef
 
 func init() {
 	commands = []cmdDef{
 		{name: "/pomoc", desc: "spis komend", run: (*ui).cmdHelp},
+		{name: "/help", desc: "command list", run: (*ui).cmdHelp},
 		{name: "/nowy", args: "<nazwa>", desc: "nowa grupa", run: (*ui).cmdNew},
+		{name: "/new", args: "<name>", desc: "create group", run: (*ui).cmdNew},
 		{name: "/dm", args: "<znajomy>", desc: "czat na dwoje ze znajomym", run: (*ui).cmdDM},
 		{name: "/kod", desc: "mój kod QR i pole na cudzy", run: func(u *ui, _ string) { u.codePage() }},
+		{name: "/code", desc: "my QR code and friend input", run: func(u *ui, _ string) { u.codePage() }},
 		{name: "/znajomy", args: "<kod SZF->", desc: "dodaj znajomego z kodu", run: (*ui).cmdApply},
+		{name: "/friend", args: "<code SZF->", desc: "add friend from code", run: (*ui).cmdApply},
 		{name: "/dolacz", args: "<kod SZC->", desc: "wejdź do grupy z zaproszenia", run: (*ui).cmdApply},
+		{name: "/join", args: "<code SZC->", desc: "join group from invite", run: (*ui).cmdApply},
 		{name: "/zapros", desc: "kod zaproszenia + PIN do tego czatu", run: needChat((*ui).cmdInvite)},
+		{name: "/invite", desc: "generate invite code + PIN", run: needChat((*ui).cmdInvite)},
 		{name: "/szukaj", args: "<fraza>", desc: "szukaj w historii czatu", run: needChat((*ui).cmdSearch)},
+		{name: "/search", args: "<query>", desc: "search chat history", run: needChat((*ui).cmdSearch)},
 		{name: "/kto", desc: "członkowie czatu", run: needChat((*ui).cmdWho)},
+		{name: "/who", desc: "list chat members", run: needChat((*ui).cmdWho)},
 		{name: "/kick", args: "<nazwa>", desc: "usuń członka (rotuje klucz)", run: needChat((*ui).cmdKick)},
 		{name: "/rekey", desc: "rotacja klucza — nowa epoka", run: needChat((*ui).cmdRekey)},
 		{name: "/zmien", args: "<nazwa>", desc: "zmień nazwę czatu", run: needChat((*ui).cmdRename)},
+		{name: "/rename", args: "<name>", desc: "rename chat", run: needChat((*ui).cmdRename)},
 		{name: "/call", desc: "dołącz do rozmowy", run: needChat((*ui).cmdCall)},
 		{name: "/rozlacz", desc: "wyjdź z rozmowy", run: needChat((*ui).cmdHang)},
+		{name: "/leave", desc: "leave call", run: needChat((*ui).cmdHang)},
+		{name: "/hangup", desc: "leave call", run: needChat((*ui).cmdHang)},
 		{name: "/mic", desc: "mikrofon włącz/wyłącz", run: needChat((*ui).cmdMic)},
 		{name: "/cam", args: "[urządzenie]", desc: "kamera włącz/wyłącz", noMobile: true, run: needChat((*ui).cmdCam)},
 		{name: "/ekran", desc: "udostępnianie ekranu", noMobile: true, run: needChat((*ui).cmdScreen)},
+		{name: "/screen", desc: "share screen", noMobile: true, run: needChat((*ui).cmdScreen)},
 		{name: "/wyslij", desc: "zdjęcie, GIF albo film z dysku", run: needChat((*ui).cmdSendFile)},
+		{name: "/send", desc: "send file attachment", run: needChat((*ui).cmdSendFile)},
 		{name: "/awatar", desc: "zmień swój awatar", run: func(u *ui, _ string) { u.avatarPage() }},
+		{name: "/avatar", desc: "change avatar", run: func(u *ui, _ string) { u.avatarPage() }},
 		{name: "/connector", args: "[adres]", desc: "pokaż albo zmień connector", run: (*ui).cmdConnector},
 		{name: "/ja", desc: "twój profil i ustawienia", run: (*ui).cmdMe},
+		{name: "/me", desc: "my profile and settings", run: (*ui).cmdMe},
 		{name: "/wyczysc", desc: "schowaj komunikaty systemowe", run: (*ui).cmdClear},
+		{name: "/clear", desc: "clear system logs", run: (*ui).cmdClear},
+		{name: "/lang", args: "<pl|en>", desc: "change language / zmień język", run: (*ui).cmdLang},
+		{name: "/jezyk", args: "<pl|en>", desc: "zmień język / change language", run: (*ui).cmdLang},
 	}
 }
 
-// needChat: komendy działające na rozmowie mają jeden wspólny warunek wstępny
+// needChat: commands operating on conversation share a common prerequisite
 func needChat(f func(*ui, *core.ChatInfo, string)) func(*ui, string) {
 	return func(u *ui, arg string) {
 		ch := u.cur()
@@ -89,7 +107,7 @@ func (u *ui) runCommand(line string) {
 	u.sysErr("Nie znam komendy " + name + " — wpisz /pomoc.")
 }
 
-// ---- implementacje ----
+// ---- implementations ----
 
 func (u *ui) cmdHelp(string) {
 	var b strings.Builder
@@ -243,9 +261,21 @@ func (u *ui) cmdScreen(ch *core.ChatInfo, _ string) {
 	}
 }
 
+func (u *ui) cmdLang(_ string, arg string) {
+	if arg == "" {
+		u.sysInfo("Język / Language", "Aktualny / Current: "+u.c.Lang()+"\nZmiana / Change: /lang pl lub /lang en")
+		return
+	}
+	if err := u.c.SetLang(arg); err != nil {
+		u.sysErr(err.Error())
+	} else {
+		u.sysOK("Język / Language", "Zmieniono / Language set: "+u.c.Lang())
+	}
+}
+
 func (u *ui) cmdSendFile(*core.ChatInfo, string) { u.attachPage() }
 
-// cmdMe: profil i ustawienia — na telefonie to zakładka, na pulpicie strona.
+// cmdMe: profile and settings — on mobile it's a tab, on desktop a page.
 func (u *ui) cmdMe(string) {
 	if u.mobile {
 		u.selectTab(2)
@@ -283,7 +313,7 @@ func (u *ui) cmdClear(string) {
 	}
 }
 
-// ---- lokalne komunikaty systemowe (embedy) ----
+// ---- local system messages (embeds) ----
 
 type sysMsg struct {
 	tone  color.NRGBA
@@ -305,7 +335,7 @@ func (u *ui) sysErr(body string) {
 	u.pushSys(sysMsg{cRed, theme.NewErrorThemedResource(theme.ErrorIcon()), "Nie wyszło", body, time.Now()})
 }
 
-// pushSys: bez wybranego czatu nie ma gdzie wstawić embedu — wtedy dialog
+// pushSys: without a selected chat there's nowhere to place embed — fallback to dialog
 func (u *ui) pushSys(m sysMsg) {
 	ch := u.cur()
 	if ch == nil {
@@ -333,16 +363,16 @@ func (u *ui) dropSys(i int) {
 	u.refresh()
 }
 
-// embedCard: panel z kolorowym paskiem po lewej — jak embed na Discordzie.
-// Border daje paskowi jego szerokość minimalną i pełną wysokość karty.
+// embedCard: panel with colored strip on the left — like Discord embeds.
+// Border gives strip its minimum width and full card height.
 func embedCard(tone color.NRGBA, content, right fyne.CanvasObject) fyne.CanvasObject {
 	bg := canvas.NewRectangle(cSurface)
 	bg.CornerRadius = 8
 	bar := canvas.NewRectangle(tone)
 	bar.CornerRadius = 2
 	bar.SetMinSize(fyne.NewSize(4, 4))
-	// Padded z zewnątrz: embed leży w tej samej kolumnie co dymki, a te nigdy nie
-	// dotykają krawędzi ekranu — bez tego kolorowy pasek wychodził na sam brzeg.
+	// Padded on outside: embed lies in the same column as bubbles, which never
+	// touch screen edge — without this, colored strip went all the way to the edge.
 	return container.NewPadded(container.NewStack(bg,
 		container.NewBorder(nil, nil, bar, right, container.NewPadded(content))))
 }
@@ -361,7 +391,7 @@ func (u *ui) sysEmbed(i int, s sysMsg) fyne.CanvasObject {
 	return embedCard(s.tone, content, container.NewVBox(drop, layout.NewSpacer()))
 }
 
-// infoEmbed: zdarzenia członkostwa i rotacji klucza — jedna linia w embedzie
+// infoEmbed: membership and key rekey events — single line in embed
 func infoEmbed(m core.Msg) fyne.CanvasObject {
 	tone, icon := cMuted, theme.InfoIcon()
 	switch m.Info {
@@ -381,11 +411,11 @@ func infoEmbed(m core.Msg) fyne.CanvasObject {
 		container.NewCenter(mutedText(m.TS.Format("15:04"), 10))), nil)
 }
 
-// ---- pole wiadomości z podpowiedziami ----
+// ---- message entry with autocomplete ----
 
-// cmdEntry: Entry, które oddaje strzałki/Tab/Enter listy podpowiedzi, zamiast
-// przesuwać kursor i wysyłać. AcceptsTab decyduje, czy Tab dojdzie do TypedKey
-// (inaczej driver przenosi fokus dalej).
+// cmdEntry: Entry that yields arrow keys/Tab/Enter to hint list instead of
+// moving cursor and submitting. AcceptsTab determines whether Tab reaches TypedKey
+// (otherwise driver moves focus away).
 type cmdEntry struct {
 	widget.Entry
 	keys    func(*fyne.KeyEvent) bool
@@ -408,7 +438,7 @@ func (e *cmdEntry) TypedKey(k *fyne.KeyEvent) {
 }
 
 func (u *ui) maxHints() int {
-	if u.mobile { // niżej i tak stoi klawiatura
+	if u.mobile { // keyboard sits below on mobile
 		return 4
 	}
 	return 6
@@ -417,7 +447,7 @@ func (u *ui) maxHints() int {
 func (u *ui) buildComposer() fyne.CanvasObject {
 	e := newCmdEntry()
 	e.PlaceHolder = "napisz wiadomość albo / po komendy…"
-	if u.mobile { // na telefonie długi placeholder nie mieści się w polu
+	if u.mobile { // on phone long placeholder doesn't fit in input
 		e.PlaceHolder = "wiadomość albo /"
 	}
 	u.entry = e
@@ -436,13 +466,13 @@ func (u *ui) buildComposer() fyne.CanvasObject {
 
 	send := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() { u.submit(e.Text) })
 	send.Importance = widget.HighImportance
-	// spinacz: pełna strona z galerią i systemowym wyborem (media.go);
-	// tekst z pola leci jako podpis pod plikiem
+	// paperclip: full page with gallery and system picker (media.go);
+	// text from input field goes as attachment caption
 	add := widget.NewButtonWithIcon("", theme.ContentAddIcon(), u.attachPage)
 	add.Importance = widget.LowImportance
 	row := container.NewBorder(nil, nil, add, send, e)
-	// pole siedzi na własnym, ciemniejszym pasku (jak composer Discorda) —
-	// wcześniej wisiało wprost na tle rozmowy i zlewało się z ostatnim dymkiem
+	// input sits on its own darker bar (like Discord composer) —
+	// previously hung directly on chat background and blended with last bubble
 	return container.NewStack(canvas.NewRectangle(cSurface), container.NewPadded(row))
 }
 
@@ -470,7 +500,7 @@ func (u *ui) submit(s string) {
 	}
 }
 
-// matchCommands: dopasowanie po fragmencie nazwy, dopóki nie ma argumentów
+// matchCommands: match by substring until arguments are typed
 func (u *ui) matchCommands(text string) []cmdDef {
 	if !strings.HasPrefix(text, "/") || strings.ContainsAny(text, " \n") {
 		return nil
@@ -528,7 +558,7 @@ func (u *ui) updateHints() {
 	u.hintBox.Refresh()
 }
 
-// pickHint: wstawia nazwę i spację — dalej użytkownik dopisuje argument
+// pickHint: inserts command name and space — user then types arguments
 func (u *ui) pickHint(i int) {
 	if i < 0 || i >= len(u.hints) {
 		return
@@ -537,7 +567,7 @@ func (u *ui) pickHint(i int) {
 	u.entry.CursorColumn = len(u.entry.Text)
 	u.entry.Refresh()
 	u.hideHints()
-	u.w.Canvas().Focus(u.entry) // klik w podpowiedź myszką zabrał fokus przyciskowi
+	u.w.Canvas().Focus(u.entry) // mouse click on hint stole focus for the button
 }
 
 func (u *ui) hintKey(k *fyne.KeyEvent) bool {

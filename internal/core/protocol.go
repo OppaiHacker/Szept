@@ -49,15 +49,45 @@ func (c *Core) onPeerUp(p *p2p.Peer) {
 			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "join"})
 		}
 	}
-	go c.retryWants(true) // ktoś wszedł: może ma brakujące załączniki
+// ---- peer lifecycle ----
+
+func (c *Core) onPeerUp(p *p2p.Peer) {
+	p.SendCtrl(Ctrl{T: "hello", Name: c.ID.Name})
+	// offer sync for every chat this peer belongs to
+	for idStr := range c.chatIDs() {
+		chat := []byte(idStr)
+		if st, err := c.ChatState(chat); err == nil && st.IsMember(p.Pub) {
+			p.SendCtrl(Ctrl{T: "sync", Chat: chat, Heads: c.St.Heads(chat)})
+		}
+	}
+	// pending invite redemption?
+	c.mu.Lock()
+	r := c.redeem
+	var inCall [][]byte
+	for chatStr, call := range c.calls {
+		if call.Joined {
+			inCall = append(inCall, []byte(chatStr))
+		}
+	}
+	c.mu.Unlock()
+	if r != nil && bytes.Equal(r.Inviter, p.Pub) {
+		p.SendCtrl(Ctrl{T: "redeem", Chat: r.Chat, Secret: r.Secret, Pin: r.Pin, Name: c.ID.Name})
+	}
+	// announce active calls to the newcomer
+	for _, chat := range inCall {
+		if st, err := c.ChatState(chat); err == nil && st.IsMember(p.Pub) {
+			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "join"})
+		}
+	}
+	go c.retryWants(true) // peer connected: may hold missing attachments
 	c.Notify()
 }
 
 // ---- ctrl dispatch ----
 
-// known: czy z tym peerem łączy nas cokolwiek poza wiszącym zaproszeniem.
-// Obcy wpuszczony na czas otwartego zaproszenia ma prawo tylko do wykupienia go
-// — reszta handlerów (klucze, sync, bloby) nie jest dla przypadkowych gości.
+// known: whether we share any relationship with this peer beyond a pending invite.
+// Strangers admitted during open invite window are only allowed to redeem it —
+// other handlers (keys, sync, blobs) are not for random guests.
 func (c *Core) known(pub []byte) bool {
 	if c.St.IsFriend(pub) {
 		return true
@@ -176,8 +206,8 @@ func (c *Core) handleWant(p *p2p.Peer, m Ctrl) {
 	bytesOut := 0
 	sent := map[string]bool{}
 	queue := append([][]byte(nil), m.IDs...)
-	// send requested events plus their ancestors (bounded — sztuki ORAZ bajty:
-	// jedna wiadomość ctrl ponad limit SCTP nie dojdzie i sync stanie)
+	// send requested events plus their ancestors (bounded — items AND bytes:
+	// a ctrl message above SCTP limit won't deliver and sync halts)
 	for len(queue) > 0 && len(wires) < 2000 && bytesOut < 1<<20 {
 		id := queue[0]
 		queue = queue[1:]
@@ -224,9 +254,9 @@ func (c *Core) handleEvents(p *p2p.Peer, m Ctrl) {
 	}
 }
 
-// redeemDone zamyka wykupione zaproszenie dopiero, gdy naprawdę jesteśmy
-// w czacie. Wcześniej to jedyne, co łączy nas z zapraszającym — skasowane za
-// szybko odcina go bramą known() w połowie dołączania.
+// redeemDone closes redeemed invite only when we are truly
+// in the chat. Previously it was the only link connecting us with inviter —
+// deleting too early cuts them off via known() gate halfway through joining.
 func (c *Core) redeemDone(chat []byte) {
 	st, err := c.ChatState(chat)
 	if err != nil || !st.IsMember(c.ID.Pub) {
@@ -269,7 +299,7 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 		return false
 	}
 	keys, _ := c.St.ChatKeys(chat)
-	// FoldTrusted: podpis e sprawdziliśmy wyżej, reszta leży już w bazie
+	// FoldTrusted: signature of e was checked above, rest is already in database
 	if _, err := event.FoldTrusted(append(evs, e), chat, keys); err != nil {
 		if strings.Contains(err.Error(), "missing key") {
 			c.park(chat, e)
@@ -289,7 +319,7 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 			c.St.PutChat(chat, store.ChatMeta{Name: st.Name})
 		}
 	}
-	// załącznik albo awatar: zamów brakującą treść
+	// attachment or avatar: request missing content
 	if e.Kind == event.KindFile || e.Kind == event.KindAvatar {
 		c.noteAttachment(chat, e)
 	}
@@ -343,9 +373,8 @@ func (c *Core) handleAck(p *p2p.Peer, m Ctrl) {
 	c.Notify()
 }
 
-// maxOrphans: sufit na sieroty ŁĄCZNIE, nie na czat — znajomy może zakładać
-// dowolnie wiele czatów (bootstrap w handleSync), więc limit per czat nie jest
-// żadnym limitem.
+// maxOrphans: ceiling on orphans IN TOTAL, not per chat — friend can create
+// arbitrarily many chats (bootstrap in handleSync), so limit per chat is no limit.
 const maxOrphans = 5000
 
 func (c *Core) park(chat []byte, e *event.Event) {
@@ -391,9 +420,9 @@ func (c *Core) drainOrphans(chat []byte, from *p2p.Peer) {
 	}
 }
 
-// handleKeys przyjmuje klucze epok. Tylko od członka czatu (albo w trakcie
-// dołączania, gdy stanu jeszcze nie ma — wtedy jedynie od zapraszającego):
-// podrzucony klucz jest nie do usunięcia i psuje epokę na zawsze.
+// handleKeys accepts epoch keys. Only from chat member (or during
+// joining, when state does not exist yet — then only from inviter):
+// spoofed key cannot be removed and breaks epoch forever.
 func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 	if !c.knownChat(m.Chat) {
 		return
@@ -403,8 +432,8 @@ func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 			return
 		}
 	} else {
-		// czat bez złożonego stanu = dopiero dołączamy; klucze może dać ta sama
-		// strona, która czat wprowadziła (patrz handleSync)
+		// chat without folded state = joining in progress; keys can be provided
+		// by the same peer that introduced the chat (see handleSync)
 		c.mu.Lock()
 		r := c.redeem
 		c.mu.Unlock()
@@ -429,8 +458,8 @@ func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 	if added {
 		c.invalidate(m.Chat)
 		c.drainOrphans(m.Chat, p)
-		go c.announceProfile() // nowy czat = trzeba w nim ogłosić swój profil
-		// z kluczem w ręku da się wreszcie odczytać metryczki załączników
+		go c.announceProfile() // new chat = announce profile in it
+		// with key in hand attachment metadata can finally be decrypted
 		go c.rescanAttachments()
 		// with keys in hand, pull the DAG
 		p.SendCtrl(Ctrl{T: "sync", Chat: m.Chat, Heads: c.St.Heads(m.Chat)})
@@ -474,9 +503,9 @@ const InviteTTL = 10 * time.Minute
 // NewInvite issues a one-time invite for a chat. Returns the code and a
 // 6-digit PIN to hand over out-of-band; joining requires both.
 //
-// Tylko założyciel czatu: zaproszenie oznacza wpuszczenie obcego do wspólnej,
-// szyfrowanej historii, więc decyzja należy do jednej osoby. Ograniczenie
-// siedzi tutaj, nie w UI — TUI i GUI wołają to samo.
+// Only chat creator: invite means letting a stranger into shared,
+// encrypted history, so decision belongs to one person. Constraint sits here,
+// not in UI — TUI and GUI call the same method.
 func (c *Core) NewInvite(chat []byte) (code, pin string, err error) {
 	if st, err := c.ChatState(chat); err != nil {
 		return "", "", err

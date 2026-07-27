@@ -11,9 +11,9 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// Rzut ma dowieźć treść PRZECIWNIE do ruchu palca: palec w dół odsłania
-// wcześniejsze wiadomości, czyli zmniejsza offset. Pomyłka w znaku daje listę,
-// która po puszczeniu odskakuje w drugą stronę.
+// Fling coasting must deliver content OPPOSITE to finger movement: finger down reveals
+// earlier messages, i.e., reduces offset. Wrong sign gives a list
+// that snaps back in the opposite direction on release.
 func TestFlingDistance(t *testing.T) {
 	if d := flingDistance(flingMinVel - 1); d != 0 {
 		t.Errorf("wolne puszczenie ma nie rzucać, dostałem %v", d)
@@ -27,15 +27,15 @@ func TestFlingDistance(t *testing.T) {
 	if d := flingDistance(-2000); d <= 0 {
 		t.Errorf("palec w górę ma zwiększać offset, dostałem %v", d)
 	}
-	// czas wybiegu rośnie z drogą, ale nie schodzi poniżej podłogi ani nie
-	// przekracza sufitu — inaczej lekkie pchnięcie pełzło tyle co mocny rzut
+	// coasting time grows with distance, but neither drops below floor nor
+	// exceeds ceiling — otherwise a light nudge would crawl as long as a hard flick
 	if a, b := flingSpan(30), flingSpan(3000); a >= b || a < 200*time.Millisecond || b > flingTime {
 		t.Errorf("czas wybiegu poza widełkami: krótki=%v długi=%v", a, b)
 	}
 }
 
-// Przewijanie z wybiegiem musi nadal przewijać: Dragged ma ruszyć offset,
-// a clamp fyne nie może go puścić poza treść.
+// Fling scrolling must still scroll: Dragged should update offset,
+// and fyne's clamp must not release it past content boundary.
 func TestFlingScrollDragged(t *testing.T) {
 	test.NewTempApp(t)
 	tall := container.NewVBox()
@@ -45,23 +45,23 @@ func TestFlingScrollDragged(t *testing.T) {
 	s := vscroll(tall)
 	s.Resize(fyne.NewSize(300, 200))
 
-	up := &fyne.DragEvent{Dragged: fyne.NewDelta(0, -50)} // palec w górę
+	up := &fyne.DragEvent{Dragged: fyne.NewDelta(0, -50)} // finger moving up
 	s.Dragged(up)
 	if s.Offset.Y <= 0 {
 		t.Fatalf("przeciągnięcie w górę nie przewinęło: offset=%v", s.Offset.Y)
 	}
-	// wygaszająca pętla fyne kręci się dopóki |e.Dragged| > 2 — wyzerowane
-	// zdarzenie jest jedynym sposobem, żeby oddała wybieg naszej animacji
+	// fyne dampening loop runs while |e.Dragged| > 2 — zeroed
+	// event is the only way for it to hand off coasting to our animation
 	if up.Dragged != (fyne.Delta{}) {
 		t.Errorf("zdarzenie nie zostało wyzerowane: %+v", up.Dragged)
 	}
-	s.Dragged(&fyne.DragEvent{Dragged: fyne.NewDelta(0, 9999)}) // w dół, poza początek
+	s.Dragged(&fyne.DragEvent{Dragged: fyne.NewDelta(0, 9999)}) // moving down, past start
 	if s.Offset.Y != 0 {
 		t.Fatalf("offset wyszedł poza początek treści: %v", s.Offset.Y)
 	}
 }
 
-// fitText skraca do dostępnej szerokości i tylko wtedy dokłada wielokropek.
+// fitText truncates to available width and appends ellipsis only when needed.
 func TestFitText(t *testing.T) {
 	test.NewTempApp(t)
 	const size = 14

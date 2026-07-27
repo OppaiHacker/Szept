@@ -14,16 +14,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Sieć Cebulion / Sieć Cebulionowa (Cebulion Network):
-// Rozproszona siatka konektorów ze zdalnym trasowaniem sygnałów (mesh_signal)
-// na bazie algorytmu Dijkstry z wagami opóźnień (Ping RTT) oraz protokołu SNDP (Szept Neighbor Discovery Protocol).
+// Cebulion Network:
+// Distributed mesh of connectors with remote signal routing (mesh_signal)
+// based on Dijkstra algorithm with delay weights (Ping RTT) and SNDP (Szept Neighbor Discovery Protocol).
 
 const (
-	// MaxNeighbors określa limit liczby przechowywanych sąsiadów w Sieci Cebulionowej (ochrona przed DoS / flood).
+	// MaxNeighbors sets upper bound on stored neighbors in Cebulion Network (DoS / flood guard).
 	MaxNeighbors = 64
-	// MaxTopologyNodes określa maksymalną liczbę węzłów w mapie topologii BGP (ochrona przed O(V^2) DoS w Dijkstrze).
+	// MaxTopologyNodes sets max nodes in BGP topology map (prevents O(V^2) DoS in Dijkstra).
 	MaxTopologyNodes = 256
-	// maxJSONBytes to limit wielkości odpowiedzi z punktu gossip /ndp/neighbors (ochrona przed OOM).
+	// maxJSONBytes limits response payload size from gossip endpoint /ndp/neighbors (OOM guard).
 	maxJSONBytes = 128 << 10
 )
 
@@ -31,7 +31,7 @@ var meshDialer = &websocket.Dialer{
 	HandshakeTimeout: 3 * time.Second,
 }
 
-// ponytail: unikalny TraceID dla zapobiegania pętlom trasowania w Sieci Cebulionowej
+// ponytail: unique TraceID to prevent routing loops in Cebulion Network
 func newTraceID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
@@ -51,7 +51,7 @@ func isValidNeighborURL(raw string, publicURL string) bool {
 		return false
 	}
 	host := u.Hostname()
-	// ponytail: blokujemy adresy metadanych chmurowych (169.254.169.254) i nieprawidłowe IP w Sieci Cebulionowej
+	// ponytail: block cloud metadata addresses (169.254.169.254) and invalid IPs in Cebulion Network
 	if host == "" || host == "169.254.169.254" || host == "0.0.0.0" {
 		return false
 	}
@@ -80,7 +80,7 @@ type meshManager struct {
 	publicURL    string
 	seeds        []string
 	neighbors    map[string]*neighborNode    // url -> node
-	topology     map[string]map[string]int64 // nodeA -> nodeB -> RTT ms (Graf BGP/Dijkstry w Sieci Cebulionowej)
+	topology     map[string]map[string]int64 // nodeA -> nodeB -> RTT ms (BGP/Dijkstra graph in Cebulion Network)
 	seenTraces   map[string]time.Time        // trace_id -> timestamp
 	routingCache map[string]string           // pubkey -> target connector url
 }
@@ -195,7 +195,7 @@ func (m *meshManager) cleanupTraces() {
 	}
 }
 
-// NextHopDijkstra oblicza najkrótszą ścieżkę wag opóźnień (Ping RTT) od startURL do targetURL.
+// NextHopDijkstra calculates shortest path for latency weights (Ping RTT) from startURL to targetURL.
 func (m *meshManager) NextHopDijkstra(start, target string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -345,7 +345,7 @@ func (m *meshManager) pingNode(targetURL string) {
 		m.addNeighbor(n.URL, n.PeerCount, n.PingMs)
 	}
 
-	// Połączenie grafów BGP z odebranym stanem łączy w Sieci Cebulionowej
+	// Merging BGP graphs with received link state in Cebulion Network
 	for u, edges := range gossip.Topology {
 		for v, w := range edges {
 			m.updateTopologyEdge(u, v, w)
@@ -372,7 +372,7 @@ func (m *meshManager) relayMeshSignal(msg Msg, targetConnectorURL string) {
 		return
 	}
 
-	// Ustalanie optymalnego Next-Hopa przy użyciu algorytmu Dijkstry w Sieci Cebulionowej
+	// Determining optimal Next-Hop using Dijkstra algorithm in Cebulion Network
 	nextHopURL := ""
 	if targetConnectorURL != "" {
 		nextHopURL = m.NextHopDijkstra(m.publicURL, targetConnectorURL)

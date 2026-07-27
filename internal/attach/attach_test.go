@@ -42,8 +42,8 @@ func testGIF(t *testing.T, frames int) []byte {
 	return b.Bytes()
 }
 
-// Zwykłe pliki wolno wysyłać, ale nie wolno im udawać mediów: typ bierze się
-// z magicznych bajtów, nie z nazwy, a awatarem nie zostaną nigdy.
+// Generic files can be sent, but cannot impersonate media: type is determined
+// from magic bytes, not filename, and they can never become avatars.
 func TestNonMedia(t *testing.T) {
 	notMedia := map[string][]byte{
 		"html":   []byte("<html><script>alert(1)</script></html>"),
@@ -70,10 +70,10 @@ func TestNonMedia(t *testing.T) {
 	if _, err := Check(nil, "puste"); err == nil {
 		t.Error("pusty plik przeszedł")
 	}
-	// PNG z podmienionym nagłówkiem: magic mówi PNG, treść to śmieci
+	// PNG with fake header: magic says PNG, content is trash
 	fake := append([]byte("\x89PNG\r\n\x1a\n"), []byte("<script>alert(1)</script>")...)
 	if _, err := Check(fake, "x.png"); err == nil {
-		t.Error("podrobiony PNG przeszedł walidację")
+		t.Error("fake PNG passed validation")
 	}
 }
 
@@ -82,7 +82,7 @@ func TestSafeName(t *testing.T) {
 		"../../etc/passwd":       "passwd.png",
 		`C:\Windows\system32\x`:  "x.png",
 		"zdjęcie.png":            "zdjęcie.png",
-		"payload.png.sh":         "payload_png.png", // media: rozszerzenie z typu
+		"payload.png.sh":         "payload_png.png", // media: extension from type
 		".bashrc":                "bashrc.png",
 		"":                       "zalacznik.png",
 		"a\x00b\nc":              "abc.png",
@@ -93,7 +93,7 @@ func TestSafeName(t *testing.T) {
 			t.Errorf("SafeName(%q, png) = %q, chciałem %q", in, got, want)
 		}
 	}
-	// zwykły plik: rozszerzenie zostaje, ale tylko jedno i tylko alfanumeryczne
+	// generic file: extension retained, but only one and alphanumeric
 	generic := map[string]string{
 		"raport.pdf":       "raport.pdf",
 		"raport.pdf.exe":   "raport_pdf.exe",
@@ -108,7 +108,7 @@ func TestSafeName(t *testing.T) {
 	}
 }
 
-// Podgląd dużego obrazka: zmniejszony JPEG, który przechodzi Verify u odbiorcy.
+// Thumbnail of large image: scaled-down JPEG that passes Verify at receiver.
 func TestPreview(t *testing.T) {
 	out, w, h, err := Preview(testPNG(t, 1600, 800), "image/png")
 	if err != nil {
@@ -121,7 +121,7 @@ func TestPreview(t *testing.T) {
 		t.Fatalf("podgląd nie przechodzi Verify: %v", err)
 	}
 	if _, _, _, err := Preview([]byte("#!/bin/sh\n"), "text/plain"); err == nil {
-		t.Error("podgląd nie-obrazu przeszedł")
+		t.Error("non-image preview passed")
 	}
 }
 
@@ -134,16 +134,16 @@ func TestCheckImage(t *testing.T) {
 		t.Fatalf("zła meta: %+v", m)
 	}
 	if _, err := Check(make([]byte, MaxFileBytes+1), "wielki.png"); err == nil {
-		t.Error("plik ponad limit przeszedł")
+		t.Error("file over limit passed")
 	}
 }
 
-// Awatar musi być przekodowany: doklejony ładunek nie może przeżyć.
+// Avatar must be re-encoded: appended payload must not survive.
 func TestAvatarStripsPayload(t *testing.T) {
 	payload := []byte("<script>alert('xss')</script>PK\x03\x04ukryte-archiwum")
 	poly := append(testPNG(t, 300, 200), payload...)
 	if _, _, err := image.DecodeConfig(bytes.NewReader(poly)); err != nil {
-		t.Fatal("test bez sensu: polyglot nie dekoduje się jako obraz")
+		t.Fatal("pointless test: polyglot does not decode as image")
 	}
 	out, mime, err := Avatar(poly)
 	if err != nil {
@@ -153,7 +153,7 @@ func TestAvatarStripsPayload(t *testing.T) {
 		t.Fatalf("mime = %q", mime)
 	}
 	if bytes.Contains(out, payload) || bytes.Contains(out, []byte("script")) {
-		t.Fatal("ładunek przeżył normalizację awatara")
+		t.Fatal("payload survived avatar normalization")
 	}
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(out))
 	if err != nil {
@@ -167,7 +167,7 @@ func TestAvatarStripsPayload(t *testing.T) {
 	}
 }
 
-// GIF-a da się ustawić jako awatar i zostaje animowanym GIF-em.
+// GIF can be set as avatar and remains animated GIF.
 func TestAvatarGIF(t *testing.T) {
 	out, mime, err := Avatar(testGIF(t, 8))
 	if err != nil {
@@ -192,7 +192,7 @@ func TestAvatarGIF(t *testing.T) {
 	}
 }
 
-// Blob z sieci: typ musi zgadzać się z tym, co zapowiedział podpisany event.
+// Network blob: type must match claim from signed event.
 func TestVerify(t *testing.T) {
 	data := testPNG(t, 8, 8)
 	if err := Verify(data, "image/png"); err != nil {
@@ -206,8 +206,8 @@ func TestVerify(t *testing.T) {
 	}
 }
 
-// bombJPEG: poprawny nagłówek JPEG (SOI + SOF0) deklarujący podane wymiary —
-// tak wygląda bomba dekompresyjna: 3 MB pliku, gigabajty po zdekodowaniu.
+// bombJPEG: valid JPEG header (SOI + SOF0) claiming specified dimensions —
+// classic decompression bomb: 3 MB file, gigabytes unpacked.
 func bombJPEG(w, h int) []byte {
 	return []byte{
 		0xff, 0xd8, // SOI

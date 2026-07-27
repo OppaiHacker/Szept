@@ -1,4 +1,4 @@
-// szept: terminalowy klient komunikatora.
+// szept: terminal messenger client.
 package main
 
 import (
@@ -41,8 +41,8 @@ func promptPass(label string) []byte {
 }
 
 func main() {
-	dataFlag := flag.String("data", "", "katalog danych (domyślnie ~/.local/share/szept)")
-	connFlag := flag.String("connector", "", "adres connectora, np. ws://serwer:7777")
+	dataFlag := flag.String("data", "", "data directory (default ~/.local/share/szept)")
+	connFlag := flag.String("connector", "", "connector address, e.g. ws://server:7777")
 	flag.Parse()
 
 	cfgFile, dataDir := boot.Dirs()
