@@ -1,8 +1,8 @@
 package main
 
-// Lista czatów i widok rozmowy. Układ wzorowany na mobilnym Discordzie:
-// wiersz czatu = awatar + nazwa + zajawka ostatniej wiadomości + odznaka,
-// rozmowa = osobna pełnoekranowa strona z paskiem, dymkami i polem tekstowym.
+// Chat list and conversation view. Layout inspired by mobile Discord:
+// chat row = avatar + name + preview of last message + badge,
+// conversation = separate full-screen page with app bar, bubbles, and text input.
 
 import (
 	"bytes"
@@ -23,23 +23,23 @@ import (
 	"szept/internal/identity"
 )
 
-// msgPage: ile dymków rysujemy od razu. Telefon nie ma po co budować pół
-// tysiąca widgetów przy wejściu do czatu — starsze dociąga przycisk u góry.
-// Stały sufit, nie prawdziwa wirtualizacja. widget.List umie
-// recyklingować wiersze, ale wymaga znanej wysokości każdego z nich, a dymek
-// z zawijanym tekstem i miniaturą jej nie ma.
+// msgPage: number of bubbles rendered immediately. On mobile, there's no reason
+// to build 500 widgets upon entering a chat — older ones are pulled by top button.
+// Fixed ceiling, not real virtualization. widget.List can
+// recycle rows, but requires a known height for each row, which a bubble
+// with wrapped text and thumbnail does not have.
 const msgPage = 30
 
-// grupowanie: kolejne wiadomości tej samej osoby w tym odstępie zlewają się
-// w jeden blok (jeden podpis, jeden awatar) — tak robi Discord.
+// grouping: consecutive messages from the same person within this window merge
+// into one block (single header, single avatar) — just like Discord.
 const groupWindow = 5 * time.Minute
 
-// ---- lista czatów ----
+// ---- chat list ----
 
-// rebuildChats: te same dotykowe wiersze na obu platformach. Pulpit miał tu
-// widget.List z samą nazwą czatu — bez awatara, zajawki i godziny wyglądał jak
-// inna aplikacja niż telefon, a zaznaczenie rysowało bladą płachtę na całą
-// szerokość. Czatów są dziesiątki, więc recykling wierszy nic tu nie dawał.
+// rebuildChats: identical touch rows on both platforms. Desktop previously had
+// widget.List with plain chat names — without avatar, preview, and timestamp it looked
+// like a different app than mobile, and selection drew a faint strip across the full
+// width. There are tens of chats, so row recycling provided no benefit.
 func (u *ui) rebuildChats() {
 	u.chatBox.RemoveAll()
 	for i, r := range u.rows {
@@ -59,7 +59,7 @@ func (u *ui) rebuildChats() {
 	u.chatBox.Refresh()
 }
 
-// chatRow: awatar, nazwa, zajawka, po prawej godzina i odznaka.
+// chatRow: avatar, name, preview, on the right timestamp and badge.
 func (u *ui) chatRow(r chatRow, sel bool, tap func()) fyne.CanvasObject {
 	prev := u.chatPreview(r.info)
 	body := twoLine(r.info.Name, prev.text, 15, 12)
@@ -81,7 +81,7 @@ func (u *ui) chatRow(r chatRow, sel bool, tap func()) fyne.CanvasObject {
 		right.Add(container.NewCenter(on))
 	}
 
-	// awatar grupy: przy dwóch osobach twarz rozmówcy, w grupie inicjał nazwy
+	// group avatar: for two members, partner's face; in group, initial of group name
 	av := u.chatAvatar(r.info, avatarBig)
 	row := container.NewBorder(nil, nil,
 		container.NewHBox(container.NewCenter(av), hspace(6)),
@@ -106,8 +106,8 @@ func (u *ui) chatAvatar(ci core.ChatInfo, size float32) fyne.CanvasObject {
 	return u.avatarView(ci.ID, ci.Name, size)
 }
 
-// badge: czerwona pigułka z liczbą nieprzeczytanych — ten sam kolor co odznaka
-// na dolnej nawigacji, żeby jedno oznaczało to samo w dwóch miejscach.
+// badge: red pill with unread count — same color as badge
+// on bottom navigation, so it means the same thing in both places.
 func badge(n int) fyne.CanvasObject {
 	bg := canvas.NewRectangle(cRed)
 	bg.CornerRadius = 9
@@ -125,9 +125,9 @@ func badge(n int) fyne.CanvasObject {
 		container.NewStack(bg, container.NewCenter(txt)))
 }
 
-// chatPreview: ostatnia wiadomość czatu, z cache pod liczbą zdarzeń —
-// odszyfrowanie całej historii każdego czatu przy każdym odświeżeniu byłoby
-// widoczne na telefonie.
+// chatPreview: last chat message, cached under event count —
+// decrypting full history of every chat on every refresh would be
+// visible on mobile.
 func (u *ui) chatPreview(ci core.ChatInfo) chatPrev {
 	key := string(ci.ID)
 	n := u.c.St.EventCount(ci.ID)
@@ -162,7 +162,7 @@ func (u *ui) chatPreview(ci core.ChatInfo) chatPrev {
 	return p
 }
 
-// shortTime: godzina dla dzisiejszych, data dla starszych.
+// shortTime: time for today's messages, date for older ones.
 func shortTime(t time.Time) string {
 	now := time.Now()
 	if t.YearDay() == now.YearDay() && t.Year() == now.Year() {
@@ -177,7 +177,7 @@ func shortTime(t time.Time) string {
 var plMonths = []string{"sty", "lut", "mar", "kwi", "maj", "cze",
 	"lip", "sie", "wrz", "paź", "lis", "gru"}
 
-// dayLabel: separator dnia w rozmowie.
+// dayLabel: day separator in conversation.
 func dayLabel(t time.Time) string {
 	now := time.Now()
 	d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
@@ -191,7 +191,7 @@ func dayLabel(t time.Time) string {
 	return fmt.Sprintf("%d %s %d", t.Day(), plMonths[int(t.Month())-1], t.Year())
 }
 
-// ---- widok rozmowy ----
+// ---- conversation view ----
 
 func (u *ui) buildConv() {
 	u.title = newClipText("", fs(16), cFg).bold()
@@ -200,7 +200,7 @@ func (u *ui) buildConv() {
 	u.msgBox = container.NewVBox()
 	u.msgScr = vscroll(u.msgBox)
 
-	composer := u.buildComposer() // pole wiadomości + komendy / (commands.go)
+	composer := u.buildComposer() // text field + / commands (commands.go)
 	u.buildCallControls()
 
 	more := widget.NewButtonWithIcon("", theme.MoreVerticalIcon(), nil)
@@ -213,9 +213,9 @@ func (u *ui) buildConv() {
 		b.Importance = widget.LowImportance
 		back = b
 	}
-	// awatar dostaje stałą klatkę avatarRow×avatarRow. Bez niej pusty Stack ma
-	// MinSize zero i Border wylicza lewą kolumnę PRZED pierwszym
-	// updateConvHeader — awatar dorysowywał się potem na tytule i podpisie.
+	// avatar gets a fixed frame avatarRow×avatarRow. Without it, empty Stack has
+	// zero MinSize and Border calculates the left column BEFORE the first
+	// updateConvHeader — avatar would render over title and subtitle later.
 	headAv := container.NewGridWrap(fyne.NewSize(avatarRow, avatarRow), u.headAvatar)
 	head := container.NewBorder(nil, nil,
 		container.NewHBox(back, container.NewCenter(headAv), hspace(6)),
@@ -231,8 +231,8 @@ func (u *ui) buildConv() {
 		container.NewStack(canvas.NewRectangle(cBg), u.msgScr))
 }
 
-// buildCallControls: przyciski mediów żyją w banerze rozmowy, więc poza
-// rozmową pasek tytułu zostaje pusty.
+// buildCallControls: media controls live in conversation banner, so outside
+// conversation the title bar stays empty.
 func (u *ui) buildCallControls() {
 	lbl := func(s string) string {
 		if u.mobile {
@@ -285,14 +285,14 @@ func (u *ui) buildCallControls() {
 	bg.CornerRadius = 10
 	dot := container.NewCenter(container.NewGridWrap(fyne.NewSize(10, 10), u.bannerDot))
 	if u.mobile {
-		// kamera i ekran nie mają na Androidzie źródła (brak V4L2/X11) — nie kuś
+		// camera and screen have no source on Android (lacking V4L2/X11) — don't offer them
 		u.callBar = container.NewHBox(u.micBtn, hang)
 	} else {
 		u.callBar = container.NewHBox(u.micBtn, u.camBtn, u.scrBtn, hang)
 	}
 	head := container.NewHBox(dot, hspace(6), container.NewCenter(u.bannerLbl), layout.NewSpacer())
 	var body fyne.CanvasObject
-	if u.mobile { // wąski ekran: przyciski pod tekstem
+	if u.mobile { // narrow screen: buttons below text
 		body = container.NewVBox(head, u.callBar)
 	} else {
 		body = container.NewBorder(nil, nil, nil, u.callBar, head)
@@ -315,7 +315,7 @@ func (u *ui) updateConvHeader(ch *core.ChatInfo) {
 	u.headAvatar.Refresh()
 }
 
-// openConv: wchodzi w rozmowę — na telefonie jako pełnoekranowa strona.
+// openConv: opens conversation — on mobile as a full-screen page.
 func (u *ui) openConv() {
 	if ch := u.cur(); ch != nil {
 		u.c.MarkChatRead(ch.ID)
@@ -334,15 +334,15 @@ func (u *ui) openConv() {
 		u.root.Add(u.convPage)
 	}
 	u.root.Refresh()
-	u.refresh() // dopiero teraz chatOpen() widzi stronę i rysuje wiadomości
+	u.refresh() // only now chatOpen() sees the page and renders messages
 	if fresh {
-		// wjazd dopiero po narysowaniu dymków — animowanie pustej strony, która
-		// w połowie drogi dopiero się wypełnia, wygląda gorzej niż brak animacji
+		// transition only after rendering bubbles — animating an empty page
+		// that fills halfway through looks worse than no animation
 		slideIn(u.convPage, u.w.Canvas().Size().Width)
 	}
 }
 
-// openChat: przełącza na wskazany czat i (na telefonie) otwiera jego stronę.
+// openChat: switches to specified chat and (on mobile) opens its page.
 func (u *ui) openChat(chat []byte) {
 	u.refresh()
 	for i, r := range u.rows {
@@ -357,7 +357,7 @@ func (u *ui) openChat(chat []byte) {
 	u.openConv()
 }
 
-// ---- rysowanie wiadomości ----
+// ---- rendering messages ----
 
 func (u *ui) renderMessages(ch *core.ChatInfo) {
 	msgs := u.c.Messages(ch.ID)
@@ -371,18 +371,18 @@ func (u *ui) renderMessages(ch *core.ChatInfo) {
 	}
 	sig := u.msgSignature(ch, msgs, older)
 	if sig == u.msgSig {
-		return // nic się nie zmieniło — nie ruszamy przewijania ani nie dekodujemy obrazków
+		return // nothing changed — skip scroll adjustments and image decoding
 	}
 	sameChat := u.lastChat == string(ch.ID)
 	stick := !sameChat || u.nearBottom()
 	keep := u.msgScr.Offset.Y
 	oldH := u.msgBox.MinSize().Height
 	u.msgSig = sig
-	u.msgAnims = u.msgAnims[:0] // dymki idą do kosza razem z ich animacjami
+	u.msgAnims = u.msgAnims[:0] // bubbles are discarded along with their animations
 
 	u.msgBox.RemoveAll()
-	// sloty na odtwarzanie GIF-ów dostają najnowsze wiadomości — stąd przegląd
-	// listy od końca
+	// slots for playing GIFs are assigned to latest messages — hence iterating
+	// list backwards
 	animate := map[int]bool{}
 	for i, slots := len(msgs)-1, 0; i >= 0 && slots < maxAnims; i-- {
 		if msgs[i].Kind == "file" && attach.Animated(msgs[i].Mime) {
@@ -393,7 +393,7 @@ func (u *ui) renderMessages(ch *core.ChatInfo) {
 	if older > 0 {
 		u.msgBox.Add(container.NewPadded(widget.NewButton(
 			fmt.Sprintf("Pokaż wcześniejsze (%d)", older), func() {
-				cur := u.cur() // lista czatów mogła się w tym czasie przetasować
+				cur := u.cur() // chat list could have been reshuffled during this time
 				if cur == nil {
 					return
 				}
@@ -426,28 +426,28 @@ func (u *ui) renderMessages(ch *core.ChatInfo) {
 		u.msgBox.Add(container.NewPadded(container.NewCenter(mutedWrap(
 			"Nikt jeszcze nic nie napisał — przełam pierwsze lody, albo wpisz / po komendy."))))
 	}
-	// odpowiedzi komend: lokalne, nie lecą do sieci — zawsze na końcu rozmowy
+	// command responses: local, not sent over network — always at conversation end
 	for i, s := range u.sys[string(ch.ID)] {
 		u.msgBox.Add(u.sysEmbed(i, s))
 	}
 	u.msgBox.Refresh()
 
-	// przewijanie: zostajemy tam, gdzie użytkownik czyta. Skok na dół tylko
-	// wtedy, gdy i tak był na dole (albo właśnie wszedł do czatu) — inaczej
-	// każda przychodząca wiadomość wyrywałaby go z historii.
+	// scrolling: stay where user is reading. Jump to bottom only
+	// when already at bottom (or just entered chat) — otherwise
+	// incoming messages would yank user out of history.
 	switch {
 	case stick:
 		u.scrollToEnd()
 	case u.grew:
-		// doładowanie starszych rośnie w GÓRĘ: przesuwamy o tyle, ile doszło,
-		// żeby czytana wiadomość została pod tym samym palcem
+		// loading older messages grows UPWARDS: scroll by newly added height
+		// so currently read message stays under the same finger
 		u.grew = false
 		u.msgScr.ScrollToOffset(fyne.NewPos(0, keep+u.msgBox.MinSize().Height-oldH))
 	default:
 		u.msgScr.ScrollToOffset(fyne.NewPos(0, keep))
 	}
 
-	// mignięcie najnowszej cudzej wiadomości (nie przy zmianie czatu)
+	// flash latest incoming message (not on chat switch)
 	if sameChat && len(msgs)+older > u.lastCount && u.lastCount > 0 && lastBubble != nil && !lastOwn {
 		flashBubble(lastBubble)
 	}
@@ -463,8 +463,8 @@ func flashBubble(bg *canvas.Rectangle) {
 	a.Start()
 }
 
-// msgSignature: odcisk tego, co widać. Bez zmian nie przebudowujemy listy —
-// oszczędza dekodowanie obrazków i, co ważniejsze, nie gubi pozycji przewijania.
+// msgSignature: fingerprint of visible content. Skip rebuild if unchanged —
+// saves image decoding and, more importantly, preserves scroll position.
 func (u *ui) msgSignature(ch *core.ChatInfo, msgs []core.Msg, older int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%x|%d|%d|%d|", ch.ID, len(msgs), older, len(u.sys[string(ch.ID)]))
@@ -479,10 +479,10 @@ func (u *ui) msgSignature(ch *core.ChatInfo, msgs []core.Msg, older int) string 
 	return b.String()
 }
 
-// scrollToEnd: skok na koniec rozmowy. container.Scroll liczy maksymalne
-// przesunięcie z ROZMIARU treści, a ten jest znany dopiero po ułożeniu widoku —
-// przy pierwszym wejściu do czatu wywołanie w tym samym cyklu nic nie robiło.
-// Stąd druga próba po chwili.
+// scrollToEnd: jump to end of conversation. container.Scroll calculates max
+// offset from content SIZE, which is only known after layout pass —
+// calling in the same cycle on first chat entry did nothing.
+// Hence second attempt after brief delay.
 func (u *ui) scrollToEnd() {
 	u.msgScr.ScrollToBottom()
 	go func() {
@@ -491,7 +491,7 @@ func (u *ui) scrollToEnd() {
 	}()
 }
 
-// nearBottom: czy użytkownik patrzy na koniec rozmowy.
+// nearBottom: whether user is looking near the end of conversation.
 func (u *ui) nearBottom() bool {
 	max := u.msgBox.MinSize().Height - u.msgScr.Size().Height
 	if max <= 0 {
@@ -500,10 +500,9 @@ func (u *ui) nearBottom() bool {
 	return u.msgScr.Offset.Y >= max-60
 }
 
-// daySeparator: kreska przez całą szerokość z datą w środku. Kreska była tu
-// tworzona i nigdy nie dodana do widoku — została sama, wisząca w powietrzu
-// etykieta. Etykieta zasłania kreskę własnym tłem, bo fyne nie umie przerwać
-// prostokąta w środku.
+// daySeparator: full-width horizontal rule with date in the center.
+// The rule was created and never added to view — leaving a floating label.
+// Label covers rule with background because fyne cannot break line in center.
 func daySeparator(t time.Time) fyne.CanvasObject {
 	line := canvas.NewRectangle(cSep)
 	line.SetMinSize(fyne.NewSize(1, 1))
@@ -515,8 +514,8 @@ func daySeparator(t time.Time) fyne.CanvasObject {
 		container.NewCenter(container.NewStack(cover, container.NewPadded(lbl)))))
 }
 
-// bubbleMax: ile pikseli zostaje na sam tekst w dymku. Liczone z realnej
-// szerokości ekranu, nie z liczby znaków — telefony bywają różnie szerokie.
+// bubbleMax: remaining pixels for text inside bubble.
+// Calculated from real screen width, not character count — phone widths vary.
 func (u *ui) bubbleMax() float32 {
 	w := u.w.Canvas().Size().Width
 	if w <= 0 {
@@ -525,10 +524,10 @@ func (u *ui) bubbleMax() float32 {
 	return w - bubbleMargin(u.mobile) - avatarSmall - 8*theme.Padding()
 }
 
-// bubbleFits: czy tekst zmieści się w dymku bez zawijania. Ma to znaczenie, bo
-// zawijający widget.Label podaje minimalną szerokość z najdłuższego słowa —
-// dopóki zawijanie jest włączone, dymek nie potrafi przytulić treści i „ok”
-// rozciąga się na całą szerokość ekranu jak nagłówek.
+// bubbleFits: whether text fits in bubble without wrapping. Important because
+// wrapping widget.Label reports min width from longest word —
+// as long as wrapping is enabled, bubble cannot hug content and expands
+// across full screen width like a header.
 func (u *ui) bubbleFits(s string) bool {
 	max := u.bubbleMax()
 	if max <= 0 || strings.Count(s, "\n") > 3 {
@@ -542,7 +541,7 @@ func (u *ui) bubbleFits(s string) bool {
 	return true
 }
 
-// wrapFor: dymek przytulający treść musi mieć zawijanie WYŁĄCZONE — patrz bubbleFits.
+// wrapFor: content-hugging bubble must have wrapping OFF — see bubbleFits.
 func wrapFor(hug bool) fyne.TextWrap {
 	if hug {
 		return fyne.TextWrapOff
@@ -550,8 +549,8 @@ func wrapFor(hug bool) fyne.TextWrap {
 	return fyne.TextWrapWord
 }
 
-// bubbleMargin: pusty pas z drugiej strony dymka, żeby wiadomość nigdy nie sięgała
-// obu krawędzi — inaczej nie widać, kto mówi.
+// bubbleMargin: empty margin on opposite side of bubble so message never reaches
+// both edges — otherwise author is unclear.
 func bubbleMargin(mobile bool) float32 {
 	if mobile {
 		return 60
@@ -559,10 +558,10 @@ func bubbleMargin(mobile bool) float32 {
 	return 200
 }
 
-// bubbleRow: jeden dymek z podpisem i awatarem (albo bez, gdy grupujemy).
-// Godzina pojawia się tylko przy pierwszej wiadomości z serii — kolejne dymki
-// tej samej osoby są nagie, tak jak w Discordzie. To nie tylko wygląd: dymek bez
-// stopki to pięć widgetów mniej, a przewijamy ich tu kilkaset.
+// bubbleRow: single bubble with header and avatar (or without when grouped).
+// Timestamp appears only on first message of series — subsequent bubbles
+// from same author are bare, just like Discord. Not just visual: bubble without
+// footer saves 5 widgets, and we scroll hundreds here.
 func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 	lastBubble **canvas.Rectangle, lastOwn *bool) fyne.CanvasObject {
 	own := bytes.Equal(m.Author, u.c.ID.Pub)
@@ -573,13 +572,13 @@ func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 	bg.CornerRadius = 16
 
 	var content fyne.CanvasObject
-	hug := false // dymek szerokości treści zamiast na całą szerokość wiersza
-	// miniatura i kafelek pliku mają znany rozmiar, więc dymek może je obleźć —
-	// o szerokości decyduje wtedy tylko podpis
+	hug := false // content-width bubble instead of full row width
+	// thumbnail and file tile have fixed size, so bubble can wrap them —
+	// width is then determined solely by caption
 	if m.Kind == "file" {
 		body := container.NewVBox(u.attachView(m, animate))
 		hug = true
-		if m.Text != "" { // podpis pod załącznikiem
+		if m.Text != "" { // attachment caption
 			cap := widget.NewLabel(m.Text)
 			hug = u.bubbleFits(m.Text)
 			cap.Wrapping = wrapFor(hug)
@@ -659,14 +658,14 @@ func formatReactionsGUI(rm map[string]string) string {
 	return strings.Join(parts, " ")
 }
 
-// ---- akcje wiadomości (długie przytrzymanie) ----
+// ---- message actions (long press) ----
 
 func (u *ui) msgActions(m core.Msg) {
 	ch := u.cur()
 	if ch == nil {
 		return
 	}
-	chat := bytes.Clone(ch.ID) // strona żyje dłużej niż wskaźnik na wiersz listy
+	chat := bytes.Clone(ch.ID) // page outlives pointer to list row
 	head := widget.NewLabel(trunc(m.Name+" · "+m.TS.Format("02.01 15:04"), 60))
 	head.TextStyle = fyne.TextStyle{Bold: true}
 	body := m.Text
@@ -730,7 +729,7 @@ func (u *ui) msgActions(m core.Msg) {
 	u.page("Wiadomość", rows)
 }
 
-// ---- menu czatu ----
+// ---- chat menu ----
 
 func (u *ui) chatMenu(anchor fyne.CanvasObject) {
 	ch := u.cur()
@@ -878,7 +877,7 @@ func (u *ui) membersPage() {
 	u.page("Członkowie — "+ch.Name, box)
 }
 
-// personRow: wspólny wiersz osoby (członkowie, znajomi).
+// personRow: shared person row (members, friends).
 func (u *ui) personRow(pub []byte, name, tag string, online bool, tap func()) fyne.CanvasObject {
 	dot := canvas.NewText("●", cMuted)
 	dot.TextSize = fs(11)
@@ -897,7 +896,7 @@ func (u *ui) personRow(pub []byte, name, tag string, online bool, tap func()) fy
 	return tappable(container.NewPadded(row), tap, nil)
 }
 
-// ---- stan rozmowy ----
+// ---- call state ----
 
 func (u *ui) renderCallState(ch *core.ChatInfo) {
 	call := u.c.CallState(ch.ID)
@@ -911,7 +910,7 @@ func (u *ui) renderCallState(ch *core.ChatInfo) {
 		}
 		u.micBtn.SetIcon(icon)
 		u.bannerLbl.Text = fmt.Sprintf("W ROZMOWIE · %d uczest. · %s", len(call.Members)+1, mic)
-		u.callBtn.Hide() // rozłączenie jest w banerze
+		u.callBtn.Hide() // leave call is in banner
 		u.callBar.Show()
 		u.showBanner()
 	case call != nil && len(call.Members) > 0:

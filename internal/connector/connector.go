@@ -37,7 +37,7 @@ type Msg struct {
 	Online  bool   `json:"online,omitempty"`
 	Err     string `json:"err,omitempty"`
 
-	// --- Nowe pola dla SNDP i Sieci Cebulionowej (Load Balancing & Mesh w Sieci Cebulion) ---
+	// --- New fields for SNDP and Cebulion Network (Load Balancing & Mesh in Cebulion Network) ---
 	Redirect []string       `json:"redirect,omitempty"`
 	TraceID  string         `json:"trace_id,omitempty"`
 	TTL      int            `json:"ttl,omitempty"`
@@ -62,7 +62,7 @@ func SignRegister(priv ed25519.PrivateKey, pub []byte, ts int64) []byte {
 type client struct {
 	ws *websocket.Conn
 	mu sync.Mutex
-	ts int64 // timestamp rejestracji trzymającej slot — patrz "register"
+	ts int64 // registration timestamp holding slot — see "register"
 }
 
 func (c *client) send(m Msg) error {
@@ -75,7 +75,7 @@ func (c *client) send(m Msg) error {
 type Server struct {
 	mu        sync.Mutex
 	peers     map[string]*client
-	ips       map[string]int // adres IP -> otwarte sesje WS
+	ips       map[string]int // IP address -> open WS sessions
 	up        websocket.Upgrader
 	start     time.Time
 	MaxPeers  int
@@ -116,13 +116,13 @@ func (s *Server) SetMaxPeers(max int) {
 	s.MaxPeers = max
 }
 
-// MaxSessionsPerIP: klucze Ed25519 są darmowe, więc limit na pubkey nic nie daje —
-// liczymy sesje po adresie IP.
+// MaxSessionsPerIP: Ed25519 keys are free, so pubkey limit achieves nothing —
+// we count sessions per IP address.
 const MaxSessionsPerIP = 64
 
-// clientIP zwraca "" gdy limit ma nie obowiązywać.
-// Za reverse proxy wszyscy przychodzą z loopbacku, więc go zwalniamy;
-// jeśli kiedyś proxy będzie zdalne, trzeba zaufanemu X-Forwarded-For.
+// clientIP returns "" when rate limiting should not apply.
+// Behind reverse proxy all requests arrive from loopback, so we bypass it;
+// if proxy is ever remote, inspect trusted X-Forwarded-For.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -314,7 +314,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			dst := s.peers[string(m.To)]
 			s.mu.Unlock()
 			if dst == nil {
-				// Brak lokalnie - wyznacz optymalną ścieżkę Dijkstrą w Sieci Cebulionowej (Cebulion Network)
+				// Missing locally - find optimal path using Dijkstra in Cebulion Network
 				targetConnector := s.mesh.routingCache[string(m.To)]
 				s.mesh.relayMeshSignal(Msg{
 					Op:      "mesh_signal",
@@ -410,7 +410,7 @@ func (c *Client) session() error {
 			conn, dialErr = dialFallbackDNS(u)
 		}
 		if dialErr == nil {
-			// Wysyłamy rejestrację jako pierwszą ramkę (zgodnie z protokołem szept)
+			// Send registration as first frame (per szept protocol specification)
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteJSON(regMsg); err != nil {
 				conn.Close()
@@ -488,8 +488,8 @@ func (c *Client) session() error {
 
 // dialFallbackDNS resolves the host via a public resolver and dials the IP,
 // but keeps the original URL so TLS SNI and the Host header stay the hostname —
-// podmiana hosta na IP w URL-u wywracała wss:// (cert bez IP SAN, zły routing).
-// Tylko awaryjna ścieżka po "no such host"; 1.1.1.1 na sztywno wystarczy.
+// replacing host with IP in URL broke wss:// (cert without IP SAN, bad routing).
+// Fallback path only after "no such host"; hardcoded 1.1.1.1 is sufficient.
 func dialFallbackDNS(rawURL string) (*websocket.Conn, error) {
 	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 		var d net.Dialer
@@ -505,7 +505,7 @@ func dialFallbackDNS(rawURL string) (*websocket.Conn, error) {
 		if addrs, err := r.LookupHost(ctx, host); err == nil && len(addrs) > 0 {
 			ip = addrs[0]
 		} else if ip, err = dohLookup(ctx, host); err != nil {
-			// port 53 ucięty (firma/operator) i DoH też nie przeszło
+			// port 53 blocked (corporate/ISP) and DoH also failed
 			return nil, fmt.Errorf("dns fallback: %w", err)
 		}
 		var dl net.Dialer
@@ -515,8 +515,8 @@ func dialFallbackDNS(rawURL string) (*websocket.Conn, error) {
 	return ws, err
 }
 
-// dohLookup: DNS over HTTPS, gdy port 53 jest zablokowany. Pytamy 1.1.1.1 po IP
-// (cert Cloudflare ma IP SAN), więc nie potrzeba DNS-u żeby zapytać o DNS.
+// dohLookup: DNS over HTTPS when port 53 is blocked. Queries 1.1.1.1 by IP
+// (Cloudflare cert has IP SAN), so DNS is not required to query DNS.
 func dohLookup(ctx context.Context, host string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET",
 		"https://1.1.1.1/dns-query?type=A&name="+url.QueryEscape(host), nil)

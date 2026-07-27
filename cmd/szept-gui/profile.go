@@ -1,8 +1,8 @@
 package main
 
-// Profile i ustawienia: zakładka „Ty” (własny profil + ustawienia), profil
-// znajomego/członka czatu, lista znajomych, kody QR. Na telefonie wszystko to
-// pełnoekranowe strony (nav.go), na pulpicie te same treści w dialogach.
+// Profiles and settings: "You" tab (own profile + settings), profile
+// of friend/chat member, friend list, QR codes. On mobile all these are
+// full-screen pages (nav.go), on desktop the same content in dialogs.
 
 import (
 	"bytes"
@@ -22,14 +22,14 @@ import (
 	"szept/internal/store"
 )
 
-// ---- zakładka „Ty” ----
+// ---- "You" tab ----
 
 func (u *ui) mePage() fyne.CanvasObject {
 	u.meBox = container.NewVBox()
 	return vscroll(u.meBox)
 }
 
-// rebuildMe: przerysowuje zakładkę po zmianie nazwy, awatara albo connectora.
+// rebuildMe: redraws tab on name, avatar, or connector change.
 func (u *ui) rebuildMe() {
 	if u.meBox == nil {
 		return
@@ -146,10 +146,10 @@ func (u *ui) aboutPage() {
 	))
 }
 
-// ---- profil innej osoby ----
+// ---- other person's profile ----
 
-// profilePage: znajomy albo członek czatu. Właściciel czatu dostaje tu też
-// przycisk usunięcia z czatu (rotuje klucz).
+// profilePage: friend or chat member. Chat owner gets kick button here
+// (rekeys encryption).
 func (u *ui) profilePage(pub []byte, name string, canKick bool, ch *core.ChatInfo) {
 	me := bytes.Equal(pub, u.c.ID.Pub)
 	online := u.c.Online(pub) || me
@@ -234,16 +234,16 @@ func (u *ui) isFriend(pub []byte) bool {
 	return false
 }
 
-// store2friend: członek czatu ma dokładnie to, co potrzebne we wpisie znajomego.
+// store2friend: chat member has exactly what's needed for friend entry.
 func store2friend(pub []byte, name string) store.Friend {
 	return store.Friend{Pub: bytes.Clone(pub), Name: name}
 }
 
-// ---- lista znajomych ----
+// ---- friend list ----
 
-// rebuildFriends przerysowuje całą listę przy każdym odświeżeniu.
-// Znajomych są dziesiątki, nie tysiące — widget.List z recyklingiem
-// wierszy dołożyć, gdy lista zacznie zauważalnie mulić.
+// rebuildFriends redraws entire list on every refresh.
+// Tens of friends, not thousands — add recycled widget.List
+// when list starts to lag noticeably.
 func (u *ui) rebuildFriends() {
 	friends, _ := u.c.St.Friends()
 	sort.Slice(friends, func(i, j int) bool { return friends[i].Name < friends[j].Name })
@@ -264,10 +264,10 @@ func (u *ui) rebuildFriends() {
 	u.friendBox.Refresh()
 }
 
-// ---- kody i QR ----
+// ---- codes and QR ----
 
 func (u *ui) qrImage(code string) fyne.CanvasObject {
-	// -9 = równe 9px na moduł: nearest-neighbor nie zgubi ani nie sklei kresek
+	// -9 = exact 9px per module: nearest-neighbor won't blur or merge lines
 	png, err := qrcode.Encode(code, qrcode.Medium, -9)
 	if err != nil {
 		return widget.NewLabel("(QR błąd)")
@@ -276,7 +276,7 @@ func (u *ui) qrImage(code string) fyne.CanvasObject {
 	img.FillMode = canvas.ImageFillContain
 	img.ScaleMode = canvas.ImageScalePixels
 	side := float32(240)
-	if u.mobile { // na telefonie QR ma wypełnić szerokość — z małego nie da się skanować
+	if u.mobile { // on mobile QR fills width — hard to scan small ones
 		if cw := u.w.Canvas().Size().Width; cw > 160 {
 			side = fyne.Min(cw-60, 360)
 		}

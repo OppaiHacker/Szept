@@ -1,8 +1,8 @@
-// Package store: bbolt persistence. Każda wartość jest szyfrowana kluczem
-// magazynu (HKDF z seeda tożsamości) i związana ze swoim miejscem w bazie
-// (bucket + klucz) przez associated data — zdarzenia też, bo ich koperta
-// (autor, rodzaj, epoka, powiązania) jest metadanymi rozmowy. Jawne zostają
-// wyłącznie klucze rekordów: ID zdarzeń, skróty blobów, klucze publiczne.
+// Package store: bbolt persistence. Every value is encrypted with the
+// storage key (HKDF from identity seed) and bound to its location in the database
+// (bucket + key) via associated data — events too, as their envelope
+// (author, kind, epoch, relations) is chat metadata. Only record
+// keys remain plaintext: event IDs, blob hashes, public keys.
 package store
 
 import (
@@ -28,10 +28,10 @@ var (
 	bChats   = []byte("chats")   // chatID -> enc(json ChatMeta)
 	bFriends = []byte("friends") // pub -> enc(json Friend)
 	bInvites = []byte("invites") // sha256(secret) -> enc(json Invite)
-	bBlobs   = []byte("blobs")   // sha256(plaintext) -> enc(bytes) — treść załączników
-	bAvatars = []byte("avatars") // pub -> enc(json AvatarMeta) — podręczny indeks awatarów
-	bHidden  = []byte("hidden")  // nested: chatID -> (eventID -> nil) — schowane u nas
-	bMeta    = []byte("meta")    // klucz -> enc(wartość): własny nick itd.
+	bBlobs   = []byte("blobs")   // sha256(plaintext) -> enc(bytes) — attachment content
+	bAvatars = []byte("avatars") // pub -> enc(json AvatarMeta) — handy avatar index
+	bHidden  = []byte("hidden")  // nested: chatID -> (eventID -> nil) — hidden locally
+	bMeta    = []byte("meta")    // key -> enc(value): own nick etc.
 )
 
 type ChatMeta struct {
@@ -52,8 +52,8 @@ type Invite struct {
 	Tries   int    `json:"tries,omitempty"`
 }
 
-// MaxPinTries: 6 cyfr to 10^6 kombinacji, a "redeem" to zwykła wiadomość na
-// otwartym kanale — bez licznika cała przestrzeń idzie w sekundy.
+// MaxPinTries: 6 digits is 10^6 combinations, and "redeem" is a regular message on
+// an open channel — without rate limit the full space falls in seconds.
 const MaxPinTries = 5
 
 func (i Invite) Expired(now int64) bool { return i.Exp > 0 && now > i.Exp }
@@ -63,15 +63,15 @@ type Store struct {
 	key []byte // storage key for at-rest value encryption
 }
 
-// dbVersion: format zapisu na dysku. Klucz leży jawnie (to nie sekret) i służy
-// tylko do tego, żeby baza w starym formacie powiedziała to wprost, zamiast
-// sypać się na deszyfracji.
+// dbVersion: format version on disk. Key lives in plaintext (it's not secret) and serves
+// only so a database in old format states so explicitly, instead of
+// failing during decryption.
 const dbVersion = "2"
 
 var kVersion = []byte("dbver")
 
 func Open(path string, storageKey []byte) (*Store, error) {
-	// Timeout: bez niego druga instancja wisi w nieskończoność na flocku
+	// Timeout: without it a second instance hangs indefinitely on flock
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 3 * time.Second})
 	if err != nil {
 		return nil, err
@@ -85,7 +85,7 @@ func Open(path string, storageKey []byte) (*Store, error) {
 		meta := tx.Bucket(bMeta)
 		switch v := meta.Get(kVersion); {
 		case v == nil && tx.Bucket(bChats).Stats().KeyN == 0 && tx.Bucket(bEvents).Stats().BucketN <= 1:
-			return meta.Put(kVersion, []byte(dbVersion)) // świeża baza
+			return meta.Put(kVersion, []byte(dbVersion)) // fresh DB
 		case v == nil || string(v) != dbVersion:
 			return fmt.Errorf("baza %s jest w starszym formacie (%q, teraz %q) — skasuj plik i zaloguj się ponownie",
 				path, v, dbVersion)
@@ -101,10 +101,10 @@ func Open(path string, storageKey []byte) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// ad wiąże wartość z jej miejscem w bazie (bucket + klucze). Bez tego mając sam
-// plik bazy można przestawiać zaszyfrowane wartości między rekordami — podmienić
-// blob pod danym skrótem albo przenieść klucz epoki do innego czatu — mimo że
-// żadnej z nich nie da się odczytać.
+// ad binds a value to its location in DB (bucket + keys). Without this, possessing
+// the DB file allows swapping encrypted values between records — replacing
+// a blob under a hash or moving an epoch key to another chat — even though
+// none of them can be decrypted.
 func ad(parts ...[]byte) []byte {
 	var b []byte
 	for _, p := range parts {
@@ -151,9 +151,9 @@ func (s *Store) AddEvent(chat []byte, e *event.Event) (bool, error) {
 			return nil
 		}
 		fresh = true
-		// zdarzenia też szyfrujemy: ciało było zaszyfrowane od zawsze, ale
-		// koperta (autor, rodzaj, epoka, powiązania) leżała jawnie, czyli plik
-		// bazy zdradzał graf „kto z kim i ile” bez żadnego klucza
+		// events are encrypted too: body was encrypted always, but
+		// envelope (author, kind, epoch, relations) was plaintext, revealing
+		// "who with whom and how much" graph without any key
 		if err := evs.Put(id, s.seal(ad(bEvents, chat, id), event.Marshal(e))); err != nil {
 			return err
 		}
@@ -243,8 +243,8 @@ func (s *Store) Heads(chat []byte) [][]byte {
 // NextLamport: max lamport among heads + 1.
 func (s *Store) NextLamport(chat []byte) uint64 { return s.LamportAfter(chat, s.Heads(chat)) }
 
-// LamportAfter: max lamport among the given parents + 1. Fold wymaga dokładnie
-// tej wartości, więc rodzice i lamport muszą pochodzić z jednego odczytu heads.
+// LamportAfter: max lamport among the given parents + 1. Fold strictly requires
+// this exact value, so parents and lamport must come from a single heads read.
 func (s *Store) LamportAfter(chat []byte, parents [][]byte) uint64 {
 	var max uint64
 	for _, h := range parents {
@@ -294,11 +294,11 @@ func (s *Store) DeleteChat(chat []byte) error {
 	})
 }
 
-// ---- schowane zdarzenia (soft delete tylko u nas) ----
+// ---- hidden events (soft delete locally only) ----
 //
-// Historia w DAG-u jest podpisana i replikowana — nie da się z niej nic wyjąć
-// bez zerwania łańcucha hashy. „Usuń u mnie” to więc lokalna lista zdarzeń,
-// których UI nie rysuje. Bajty zostają, ale tylko na tym urządzeniu.
+// DAG history is signed and replicated — nothing can be removed
+// without breaking the hash chain. "Hide locally" is a local list of events
+// that the UI doesn't render. Bytes stay, but on this device only.
 
 func (s *Store) HideEvent(chat, id []byte) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -310,7 +310,7 @@ func (s *Store) HideEvent(chat, id []byte) error {
 	})
 }
 
-// ShowAllHidden odkrywa wszystko w danym czacie (przycisk „przywróć”).
+// ShowAllHidden unhides everything in given chat ("restore" button).
 func (s *Store) ShowAllHidden(chat []byte) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bHidden).Bucket(chat) == nil {
@@ -320,7 +320,7 @@ func (s *Store) ShowAllHidden(chat []byte) error {
 	})
 }
 
-// Hidden zwraca zbiór schowanych ID (klucz = string(eventID)).
+// Hidden returns set of hidden IDs (key = string(eventID)).
 func (s *Store) Hidden(chat []byte) map[string]bool {
 	out := map[string]bool{}
 	s.db.View(func(tx *bolt.Tx) error {
@@ -336,7 +336,7 @@ func (s *Store) Hidden(chat []byte) map[string]bool {
 	return out
 }
 
-// ---- meta: drobne ustawienia własnego profilu ----
+// ---- meta: minor settings of own profile ----
 
 func (s *Store) PutMeta(key string, val []byte) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -465,11 +465,11 @@ func (s *Store) OpenInviteCount() int {
 }
 
 // TakeInvite atomically consumes an unused invite. Errors if unknown, used,
-// expired or the PIN doesn't match. Zły PIN nie wykupuje zaproszenia, ale
-// zużywa próbę — po MaxPinTries zaproszenie jest spalone.
+// expired or the PIN doesn't match. Wrong PIN does not redeem invite, but
+// consumes an attempt — after MaxPinTries the invite is burned.
 func (s *Store) TakeInvite(secretHash, pin []byte) (Invite, error) {
 	var inv Invite
-	var reject error // błąd zwracany PO commicie: return z Update cofa zapis
+	var reject error // error returned AFTER commit: return from Update rolls back write
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bInvites)
 		v := b.Get(secretHash)
@@ -512,22 +512,22 @@ func (s *Store) TakeInvite(secretHash, pin []byte) (Invite, error) {
 	return inv, reject
 }
 
-// ---- blobs: treść załączników i awatarów ----
+// ---- blobs: attachment and avatar content ----
 //
-// Adresowane treścią: klucz = sha256(jawnych bajtów), więc ta sama grafika
-// wysłana w pięciu czatach leży raz, a odbiorca sam sprawdza, czy dostał to,
-// co obiecywał podpisany event. Wartość jest zaszyfrowana kluczem magazynu.
-// Bez odśmiecania — DeleteChat zostawia bloby. Sprzątanie dopiszemy,
-// gdy komuś baza spuchnie; dziś skasowanie ich groziłoby usunięciem załącznika
-// wciąż widocznego w innym czacie.
+// Content-addressed: key = sha256(plaintext bytes), so the same image
+// sent in five chats is stored once, and recipient verifies if they got what
+// signed event promised. Value is encrypted with storage key.
+// No GC — DeleteChat leaves blobs. We will add cleanup when
+// someone's DB swells; today deleting them risks removing an attachment
+// still visible in another chat.
 
-// PutBlob zapisuje treść pod jej własnym skrótem i ten skrót zwraca.
+// PutBlob saves content under its hash and returns the hash.
 func (s *Store) PutBlob(data []byte) ([]byte, error) {
 	h := sha256.Sum256(data)
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bBlobs)
 		if b.Get(h[:]) != nil {
-			return nil // ta sama treść = ten sam klucz, nie ma co nadpisywać
+			return nil // same content = same key, nothing to overwrite
 		}
 		return b.Put(h[:], s.seal(ad(bBlobs, h[:]), data))
 	})
@@ -557,17 +557,17 @@ func (s *Store) HasBlob(hash []byte) bool {
 	return ok
 }
 
-// ---- awatary ----
+// ---- avatars ----
 
-// AvatarMeta wskazuje blob z obrazkiem i jego typ (image/png albo image/gif).
+// AvatarMeta points to avatar image blob and its mime type (image/png or image/gif).
 type AvatarMeta struct {
 	Blob []byte `json:"blob"`
 	Mime string `json:"mime"`
 }
 
-// PutAvatar zapamiętuje awatar danego klucza publicznego. Prawdziwym źródłem
-// prawdy są podpisane eventy w czatach — to tylko indeks, żeby lista znajomych
-// nie musiała rozwijać całego DAG-a. Pusty Blob kasuje wpis.
+// PutAvatar stores avatar for given public key. Real source
+// of truth is signed events in chats — this is an index so friend list
+// doesn't have to traverse entire DAG. Empty Blob deletes entry.
 func (s *Store) PutAvatar(pub []byte, a AvatarMeta) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bAvatars)
@@ -597,9 +597,9 @@ func (s *Store) Avatar(pub []byte) (AvatarMeta, bool) {
 	return a, ok
 }
 
-// quietKinds: zdarzenia profilowe (awatar, nick) nie są treścią rozmowy i nie
-// mają nabijać odznaki „nieprzeczytane”. Rodzaj jest jawny w zapisie sieciowym,
-// więc po odszyfrowaniu wystarczy szukanie po bajtach — bez JSON-a.
+// quietKinds: profile events (avatar, nick) are not conversation content and should not
+// increment "unread" badge. Kind is plaintext in wire format,
+// so after decryption searching by bytes suffices — without JSON.
 var quietKinds = [][]byte{
 	[]byte(`"kind":"` + event.KindAvatar + `"`),
 	[]byte(`"kind":"` + event.KindNick + `"`),
@@ -615,9 +615,9 @@ func quietWire(v []byte) bool {
 }
 
 // EventCount: cheap event tally for unread badges (no decrypt).
-// Przejście po wartościach zamiast Stats().KeyN — bajty leżą w mmapie,
-// więc to skan pamięci, nie odczyt z dysku. Gdyby historia urosła do setek
-// tysięcy zdarzeń, trzymajmy licznik osobno zamiast liczyć go za każdym razem.
+// Value iteration instead of Stats().KeyN — bytes live in mmap,
+// so this is a memory scan, not disk I/O. If history grows to hundreds of
+// thousands of events, keep counter separately instead of recomputing each time.
 func (s *Store) EventCount(chat []byte) int {
 	n := 0
 	s.db.View(func(tx *bolt.Tx) error {

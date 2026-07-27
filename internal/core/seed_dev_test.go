@@ -1,7 +1,7 @@
 package core
 
-// Narzędzie deweloperskie (do usunięcia): buduje katalog danych z gotową
-// historią, żeby dało się obejrzeć UI na emulatorze bez drugiego telefonu.
+// Dev tool (to be removed): builds data directory with ready history so UI
+// can be inspected on emulator without a second phone.
 //   SZEPT_SEED=/tmp/seed go test ./internal/core -run TestSeedDevice -v
 
 import (
@@ -39,7 +39,7 @@ func seedPNG(t *testing.T, w, h int, seed int64) []byte {
 func TestSeedDevice(t *testing.T) {
 	dir := os.Getenv("SZEPT_SEED")
 	if dir == "" {
-		t.Skip("SZEPT_SEED nie ustawione")
+		t.Skip("SZEPT_SEED not set")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -65,8 +65,8 @@ func TestSeedDevice(t *testing.T) {
 
 	var b *Core
 	if dirB := os.Getenv("SZEPT_SEED_B"); dirB != "" {
-		// drugi katalog danych: podkładamy go na telefon, żeby obejrzeć widok
-		// ODBIORCY dużego pliku (podgląd + „pobierz pełny plik”)
+		// second data directory: seed it into phone to inspect RECIPIENT view
+		// of large file (preview + "fetch full file")
 		os.MkdirAll(dirB, 0o700)
 		idb := identity.Create()
 		idb.Name = "bartek"
@@ -98,7 +98,7 @@ func TestSeedDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// czat na dwoje
+	// 2-person chat
 	fs, _ := a.St.Friends()
 	var bf = fs[0]
 	for _, f := range fs {
@@ -111,7 +111,7 @@ func TestSeedDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "bartek widzi dm", 60*time.Second, func() bool {
-		a.connectAll() // pierwsze wyszukanie peera może wypaść przed rejestracją
+		a.connectAll() // initial peer lookup may fall before registration
 		_, err := b.ChatState(dm)
 		return err == nil
 	})
@@ -134,7 +134,7 @@ func TestSeedDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// grupa: ala zakłada, pozostali wchodzą z zaproszenia
+	// group: ala creates, others enter via invite
 	grp, err := a.CreateChat("ekipa z osiedla")
 	if err != nil {
 		t.Fatal(err)
@@ -158,19 +158,19 @@ func TestSeedDevice(t *testing.T) {
 	cz.Send(grp, "a mogę wziąć psa?")
 	b.SendFile(grp, "mapka.png", seedPNG(t, 640, 400, 5), "trasa")
 
-	// profil ustawiony przed dołączeniem do czatów dochodzi tą samą drogą,
-	// co w aplikacji (Start() woła to w pętli)
+	// profile set before joining chats arrives through same path
+	// as in app (Start() calls this in loop)
 	for _, p := range []*Core{a, b, cz} {
 		p.announceProfile()
 	}
 	waitFor(t, "ala ma wszystko", 30*time.Second, func() bool {
 		return len(a.Messages(grp)) >= 7 && len(a.Messages(dm)) >= 7
 	})
-	time.Sleep(2 * time.Second) // domknięcie transferów blobów
+	time.Sleep(2 * time.Second) // finalization of blob transfers
 	t.Logf("zasiane w %s: dm=%d grupa=%d", dir, len(a.Messages(dm)), len(a.Messages(grp)))
 	if hold := os.Getenv("SZEPT_SEED_HOLD"); hold != "" {
-		// zamykamy bartka (jego tożsamość przejmuje telefon) i trzymamy alę
-		// online, żeby telefon mógł pobrać od niej pełny plik
+		// close bartek (his identity is taken over by phone) and hold ala
+		// online so phone can download full file from her
 		d, err := time.ParseDuration(hold)
 		if err != nil {
 			t.Fatal(err)

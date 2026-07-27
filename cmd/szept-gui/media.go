@@ -1,8 +1,8 @@
 package main
 
-// Załączniki, awatary i galeria: dekodowanie z podręcznym cache, odtwarzanie
-// GIF-ów (fyne nie animuje ich sam), kafelki plików w rozmowie i wybór tego,
-// co wysyłamy — siatka miniatur z dysku albo systemowy wybór plików.
+// Attachments, avatars, and gallery: cached decoding, playing
+// GIFs (fyne does not animate them natively), file tiles in chat, and selecting
+// outbound files — local thumbnail grid or system file picker.
 
 import (
 	"bytes"
@@ -34,24 +34,24 @@ import (
 )
 
 const (
-	// maxAnims: animujemy tylko kilka ostatnich GIF-ów. Klatki trzymamy
-	// rozpakowane w RAM, więc czat pełen gifów inaczej zjadłby telefon.
+	// maxAnims: animate only the last few GIFs. Frames are stored
+	// unpacked in RAM, so a chat full of GIFs would exhaust phone memory.
 	maxAnims = 6
-	// cacheMax: tyle rozpakowanych obrazków/GIF-ów trzymamy pod ręką.
+	// cacheMax: number of unpacked images/GIFs kept in memory.
 	cacheMax = 16
 	tickStep = 80 * time.Millisecond
 
-	avatarSmall = float32(30) // przy dymku wiadomości
-	avatarRow   = float32(38) // lista znajomych / członkowie
-	avatarBig   = float32(48) // wiersz czatu
-	avatarHuge  = float32(96) // strona profilu
+	avatarSmall = float32(30) // next to message bubble
+	avatarRow   = float32(38) // friend list / members
+	avatarBig   = float32(48) // chat row
+	avatarHuge  = float32(96) // profile page
 
-	// galleryMax: ile plików pokazujemy w siatce. Katalog ze zdjęciami potrafi
-	// mieć tysiące pozycji, a miniatura każdej to dekodowanie JPEG-a.
+	// galleryMax: max files shown in grid. Photo directories can
+	// hold thousands of items, and each thumbnail requires JPEG decoding.
 	galleryMax = 30
 	thumbSide  = float32(104)
-	// thumbMax: powyżej tego nie robimy miniatury — dekodowanie 40-megapikselowego
-	// zdjęcia na telefonie to sekundy i setki megabajtów RAM-u.
+	// thumbMax: thumbnail limit — decoding a 40-megapixel
+	// photo on a phone costs seconds and hundreds of megabytes of RAM.
 	thumbMax = 12 << 20
 )
 
@@ -60,7 +60,7 @@ type gifClip struct {
 	delays []time.Duration
 }
 
-// anim: jeden odtwarzany GIF. Wszystkie chodzą z jednego tickera.
+// anim: single animated GIF. All instances advance from a single ticker.
 type anim struct {
 	clip *gifClip
 	img  *canvas.Image
@@ -68,9 +68,9 @@ type anim struct {
 	acc  time.Duration
 }
 
-// startAnims odpala jedyny w aplikacji zegar animacji. Lista u.anims jest
-// przebudowywana przy każdym renderMessages — i jedno, i drugie dzieje się
-// w wątku UI (fyne.Do), więc nie ma tu wyścigu.
+// startAnims launches the application's single animation timer. The u.anims list
+// is rebuilt during every renderMessages — both run on the UI thread (fyne.Do),
+// so there is no race condition here.
 func (u *ui) startAnims() {
 	go func() {
 		for range time.Tick(tickStep) {
@@ -93,9 +93,9 @@ func (u *ui) stepAnims() {
 	}
 }
 
-// cacheGet/cachePut: prymitywny cache dekodowanych treści, klucz = skrót bloba
-// (+ sufiks wariantu). Kasujemy na ślepo przy przepełnieniu — dekodowanie
-// kosztuje milisekundy, więc pudło w cache nikogo nie zaboli.
+// cacheGet/cachePut: primitive cache for decoded content, key = blob hash
+// (+ variant suffix). Blind cache wipe on overflow — decoding
+// takes milliseconds, so cache misses cause no visible lag.
 func (u *ui) cacheGet(key string) any { return u.decoded[key] }
 
 func (u *ui) cachePut(key string, v any) {
@@ -110,7 +110,7 @@ func (u *ui) cachePut(key string, v any) {
 	u.decoded[key] = v
 }
 
-// still: pojedynczy obrazek (pierwsza klatka GIF-a, gdy animacji nie ma).
+// still: static image (first GIF frame when animation is disabled).
 func (u *ui) still(key string, data []byte, round bool) image.Image {
 	ck := key + "|s"
 	if round {
@@ -130,8 +130,8 @@ func (u *ui) still(key string, data []byte, round bool) image.Image {
 	return img
 }
 
-// clip: klatki GIF-a gotowe do odtwarzania (nil, gdy się nie da — wtedy UI
-// pokazuje sam obrazek statyczny).
+// clip: GIF frames ready for playback (nil if unsupported — UI
+// falls back to static image).
 func (u *ui) clip(key string, data []byte, round bool) *gifClip {
 	ck := key + "|g"
 	if round {
@@ -157,7 +157,7 @@ func (u *ui) clip(key string, data []byte, round bool) *gifClip {
 	return c
 }
 
-// circleMask wycina z obrazka koło (awatary) — fyne nie umie przycinać.
+// circleMask crops a circle from an image (avatars) — fyne cannot clip.
 func circleMask(src image.Image) image.Image {
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()
@@ -178,7 +178,7 @@ func circleMask(src image.Image) image.Image {
 			if ca == 0 {
 				continue
 			}
-			// nieprzezroczystość liczona z premultiplied RGBA
+			// opacity calculated from premultiplied RGBA
 			dst.Set(x, y, color.NRGBA{
 				R: uint8(cr * 0xff / ca), G: uint8(cg * 0xff / ca),
 				B: uint8(cb * 0xff / ca), A: uint8(ca >> 8),
@@ -188,14 +188,14 @@ func circleMask(src image.Image) image.Image {
 	return dst
 }
 
-// ---- awatary ----
+// ---- avatars ----
 
-// avatarView: kółko z awatarem albo — gdy go nie ma — z inicjałem.
+// avatarView: circle with avatar or — if absent — initial letter.
 func (u *ui) avatarView(pub []byte, name string, size float32) fyne.CanvasObject {
 	sz := fyne.NewSize(size, size)
 	data, mime, hash := u.c.AvatarOf(pub)
 	if len(data) > 0 {
-		key := fmt.Sprintf("%x", hash) // zmiana awatara = nowy skrót = nowy wpis w cache
+		key := fmt.Sprintf("%x", hash) // avatar change = new hash = new cache entry
 		if attach.Animated(mime) && len(u.anims)+len(u.msgAnims) < maxAnims {
 			if cl := u.clip(key, data, true); cl != nil {
 				ci := canvas.NewImageFromImage(cl.frames[0])
@@ -212,7 +212,7 @@ func (u *ui) avatarView(pub []byte, name string, size float32) fyne.CanvasObject
 			return container.NewGridWrap(sz, ci)
 		}
 	}
-	// brak awatara: kółko w kolorze autora z pierwszą literą nazwy
+	// no avatar: circle in author color with first letter of name
 	circle := canvas.NewCircle(authorColor(pub))
 	letter := "?"
 	for _, r := range name {
@@ -225,8 +225,8 @@ func (u *ui) avatarView(pub []byte, name string, size float32) fyne.CanvasObject
 	return container.NewGridWrap(sz, container.NewStack(circle, container.NewCenter(t)))
 }
 
-// avatarPage: podgląd + wybór pliku. Obrazek jest normalizowany w core
-// (przekodowanie), więc tutaj tylko podajemy bajty.
+// avatarPage: preview + file selection. Image is normalized in core
+// (re-encoding), so here we only provide bytes.
 func (u *ui) avatarPage() {
 	preview := container.NewStack(u.avatarView(u.c.ID.Pub, u.c.ID.Name, avatarHuge*1.4))
 	redraw := func() {
@@ -270,13 +270,12 @@ func (u *ui) avatarPage() {
 	))
 }
 
-// ---- wybór plików ----
+// ---- file selection ----
 
-// showFileDlg pokazuje okno plików w rozsądnym rozmiarze.
-// Kolejność jest istotna: fyne 2.8 w Resize() woła MinSize(), które sięga do
-// okna tworzonego dopiero w Show() — Resize przed Show to panika (nil pointer).
-// Na telefonie Show() oddaje sterowanie natywnemu pickerowi i okna fyne w ogóle
-// nie ma, więc tam nie ruszamy rozmiaru.
+// showFileDlg displays file dialog in a reasonable size.
+// Order matters: fyne 2.8 calls MinSize() inside Resize(), which accesses
+// window created in Show() — Resize before Show causes nil pointer panic.
+// On mobile, Show() delegates to native picker and there is no fyne window.
 func (u *ui) showFileDlg(fd *dialog.FileDialog) {
 	fd.Show()
 	if !u.mobile {
@@ -284,9 +283,9 @@ func (u *ui) showFileDlg(fd *dialog.FileDialog) {
 	}
 }
 
-// pickFile otwiera systemowy wybór pliku i wczytuje go z limitem rozmiaru.
-// mimes zawęża listę: na Androidzie fyne przekłada filtr na EXTRA_MIME_TYPES,
-// więc "image/*|video/*" daje wybieraczkę zdjęć, a nie listę dokumentów.
+// pickFile opens system file picker and reads file with size limit.
+// mimes restricts filter: on Android fyne maps filter to EXTRA_MIME_TYPES,
+// so "image/*|video/*" opens media picker instead of doc list.
 func (u *ui) pickFile(limit int64, mimes []string, done func(name string, data []byte)) {
 	fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
 		if err != nil || r == nil {
@@ -314,7 +313,7 @@ func (u *ui) pickImage(limit int64, done func(string, []byte)) {
 	u.pickFile(limit, []string{"image/*"}, done)
 }
 
-// readLimit: plik z dysku z twardym sufitem rozmiaru.
+// readLimit: file from disk with a hard size cap.
 func readLimit(path string, limit int64) ([]byte, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -327,11 +326,11 @@ func readLimit(path string, limit int64) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// ---- strona „załącznik” ----
+// ---- attachment page ----
 
-// attachPage: to, co widzi użytkownik po dotknięciu spinacza. Siatka miniatur
-// z folderu multimediów u góry, systemowy wybór niżej. Podpis bierzemy z pola
-// wiadomości, żeby dało się wysłać zdjęcie z komentarzem jak na Discordzie.
+// attachPage: user view after tapping paperclip. Thumbnail grid
+// from media folder at top, system picker below. Caption is taken
+// from message field to allow sending image with comment like Discord.
 func (u *ui) attachPage() {
 	ch := u.cur()
 	if ch == nil {
@@ -381,9 +380,9 @@ func (u *ui) attachPage() {
 	u.page("Załącznik", rows)
 }
 
-// ---- galeria w aplikacji ----
+// ---- in-app gallery ----
 
-// mediaDir: folder, po którym chodzi siatka miniatur.
+// mediaDir: directory scanned by thumbnail grid.
 func (u *ui) mediaDir() string {
 	if u.cfg.MediaDir != "" {
 		return u.cfg.MediaDir
@@ -396,8 +395,8 @@ func (u *ui) mediaDir() string {
 	return defaultMediaDirs()[0]
 }
 
-// defaultMediaDirs: typowe miejsca ze zdjęciami. Android trzyma je w /sdcard,
-// pulpit w ~/Pictures albo ~/Obrazy.
+// defaultMediaDirs: typical media locations. Android keeps them in /sdcard,
+// desktop in ~/Pictures or ~/Obrazy.
 func defaultMediaDirs() []string {
 	if mobileUI {
 		return []string{
@@ -412,7 +411,7 @@ func defaultMediaDirs() []string {
 	}
 }
 
-// galleryFile: jedna pozycja siatki.
+// galleryFile: single item in grid.
 type galleryFile struct {
 	path string
 	name string
@@ -420,9 +419,9 @@ type galleryFile struct {
 	mod  time.Time
 }
 
-// scanMedia: pliki multimedialne z katalogu, najnowsze pierwsze. Rozpoznajemy
-// po rozszerzeniu — sniffowanie magicznych bajtów w tysiącu plików byłoby
-// wolniejsze niż całe otwarcie ekranu; treść i tak sprawdza attach.Check.
+// scanMedia: media files from directory, newest first. Identified
+// by extension — sniffing magic bytes in thousand files would be
+// slower than opening screen; content is validated by attach.Check anyway.
 func scanMedia(dir string, imagesOnly bool) ([]galleryFile, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -455,10 +454,9 @@ func scanMedia(dir string, imagesOnly bool) ([]galleryFile, error) {
 	return out, nil
 }
 
-// galleryGrid: siatka miniatur z folderu multimediów. Gdy Android nie da nam
-// dostępu do pamięci (uprawnienie „Pliki i multimedia” jest do włączenia tylko
-// z ustawień systemu — aplikacja bez JNI nie umie o nie poprosić), pokazujemy
-// wprost, co zrobić, i zostawiamy systemowy wybór jako drogę obok.
+// galleryGrid: thumbnail grid from media folder. When Android denies
+// storage access ("Files and media" permission can only be enabled from
+// system settings without JNI), show instructions and leave system picker.
 func (u *ui) galleryGrid(imagesOnly bool, pick func(path string)) fyne.CanvasObject {
 	dir := u.mediaDir()
 	files, err := scanMedia(dir, imagesOnly)
@@ -490,13 +488,13 @@ func (u *ui) galleryGrid(imagesOnly bool, pick func(path string)) fyne.CanvasObj
 	return container.NewPadded(grid)
 }
 
-// loadThumbs dekoduje miniatury w tle, jedna po drugiej, i wstawia je do
-// gotowych kafelków. Synchronicznie w wątku UI byłaby to sekundowa zwiecha —
-// każdy plik to pełne dekodowanie obrazu.
+// loadThumbs decodes thumbnails in background, one by one, and injects into
+// prepared tiles. Synchronously on UI thread would freeze UI for seconds —
+// every file requires full image decode.
 func (u *ui) loadThumbs(files []galleryFile, slots []*fyne.Container) {
 	for i, f := range files {
 		if isVideoExt(f.name) || f.size > thumbMax {
-			continue // filmu bez dekodera nie podejrzymy (bez ffmpeg)
+			continue // video without decoder cannot be previewed (no ffmpeg)
 		}
 		data, err := os.ReadFile(f.path)
 		if err != nil {
@@ -506,8 +504,8 @@ func (u *ui) loadThumbs(files []galleryFile, slots []*fyne.Container) {
 		if img == nil {
 			continue
 		}
-		// Bez cache — galerię otwiera się rzadko, a dekodowanie leci
-		// w tle. Cache trzeba by jeszcze pilnować przed wyścigiem z wątkiem UI.
+		// No cache — gallery opened rarely, and decoding runs
+		// in background. Cache would need synchronization with UI thread.
 		slot := slots[i]
 		fyne.Do(func() {
 			ci := canvas.NewImageFromImage(img)
@@ -519,15 +517,15 @@ func (u *ui) loadThumbs(files []galleryFile, slots []*fyne.Container) {
 	}
 }
 
-// thumbImage: miniatura z pełnych bajtów. ApproxBiLinear, nie CatmullRom —
-// przy stu pikselach różnicy nie widać, a kosztuje kilka razy mniej.
+// thumbImage: thumbnail from full bytes. ApproxBiLinear, not CatmullRom —
+// unnoticeable difference at 100px, costs fraction of CPU.
 func thumbImage(data []byte) image.Image {
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil
 	}
-	// kwadrat ze środka kadru — siatka ma wyglądać jak siatka, nie jak
-	// zbiór prostokątów z pustymi pasami
+	// center crop square — grid should look uniform, not like
+	// collection of rectangles with letterboxing
 	b := src.Bounds()
 	n := b.Dx()
 	if b.Dy() < n {
@@ -548,7 +546,7 @@ func galleryIcon(name string) fyne.Resource {
 	return theme.FileImageIcon()
 }
 
-// tile: kafelek galerii — miniatura (dosypywana z loadThumbs) i nazwa pliku.
+// tile: gallery tile — thumbnail (populated by loadThumbs) and filename.
 func (u *ui) tile(f galleryFile, slot *fyne.Container, tap func()) fyne.CanvasObject {
 	label := mutedText(trunc(f.name, 14), 9)
 	bg := canvas.NewRectangle(cSurface)
@@ -566,7 +564,7 @@ func isVideoExt(name string) bool {
 	return false
 }
 
-// mediaDirPage: zmiana folderu galerii — wpisany ręcznie albo wybrany systemowo.
+// mediaDirPage: change gallery folder — manual entry or system select.
 func (u *ui) mediaDirPage() {
 	e := widget.NewEntry()
 	e.SetText(u.mediaDir())
@@ -626,7 +624,7 @@ func (u *ui) mediaDirPage() {
 			"plików — ten działa zawsze.")))
 }
 
-// ---- zapis i otwieranie ----
+// ---- save and open ----
 
 func (u *ui) saveAttachment(m core.Msg) {
 	data, ok := u.c.BlobBytes(m.Blob)
@@ -649,9 +647,9 @@ func (u *ui) saveAttachment(m core.Msg) {
 	u.showFileDlg(fd)
 }
 
-// openExternal zapisuje załącznik do katalogu tymczasowego i oddaje go
-// systemowemu odtwarzaczowi. Nazwa i rozszerzenie pochodzą z wykrytego typu,
-// nie z sieci — nie odpalamy tu niczego samodzielnie.
+// openExternal saves attachment to temp directory and delegates to
+// system viewer. Name and extension come from detected type,
+// not network — we don't execute anything directly.
 func (u *ui) openExternal(m core.Msg) {
 	path, err := u.c.SaveAttachment(m.Blob, m.File, os.TempDir())
 	if err != nil {
@@ -663,8 +661,8 @@ func (u *ui) openExternal(m core.Msg) {
 	}
 }
 
-// fetchFull: „pobierz pełny plik”. Bajty leżą u nadawcy (albo u kogoś, kto już
-// je ma) — jeśli nikt z nich nie jest online, prośba poczeka w kolejce.
+// fetchFull: "download full file". Bytes live with sender (or peer who
+// already has them) — if none are online, request waits in queue.
 func (u *ui) fetchFull(m core.Msg) {
 	ch := u.cur()
 	if ch == nil {
@@ -680,10 +678,10 @@ func (u *ui) fetchFull(m core.Msg) {
 	u.toast("Pobieram " + m.File)
 }
 
-// ---- kafelek załącznika w rozmowie ----
+// ---- attachment tile in chat ----
 
-// attachView rysuje kafelek załącznika; animate = ta wiadomość dostała slot
-// na odtwarzanie GIF-a (patrz renderMessages).
+// attachView renders attachment tile; animate = message received slot
+// for GIF playback (see renderMessages).
 func (u *ui) attachView(m core.Msg, animate bool) fyne.CanvasObject {
 	label := m.File
 	if label == "" {
@@ -692,7 +690,7 @@ func (u *ui) attachView(m core.Msg, animate bool) fyne.CanvasObject {
 	head := canvas.NewText(trunc(label, 34)+"  ·  "+attach.HumanSize(m.Size), cFg)
 	head.TextSize = fs(12)
 
-	// duży plik: mamy podgląd, pełne bajty na przycisk
+	// large file: we have preview, full bytes on button
 	if !m.Have && m.HavePrev {
 		body := container.NewVBox()
 		if img := u.previewImage(m); img != nil {
@@ -725,8 +723,8 @@ func (u *ui) attachView(m core.Msg, animate bool) fyne.CanvasObject {
 	buttons := container.NewHBox(open, save, layout.NewSpacer())
 
 	if !attach.IsImage(m.Mime) {
-		// wideo odtwarza system, zwykły plik oddajemy do zapisu — fyne nie ma
-		// dekodera, a wciąganie ffmpeg do klienta czatu to nie jest mały koszt
+		// video played by system, regular file offered to save — fyne has no
+		// decoder, and pulling ffmpeg into chat client is significant bloat
 		return container.NewVBox(
 			container.NewHBox(widget.NewIcon(fileIcon(m.Mime)), hspace(2),
 				container.NewCenter(head)),
@@ -754,7 +752,7 @@ func (u *ui) attachView(m core.Msg, animate bool) fyne.CanvasObject {
 	return container.NewVBox(container.NewGridWrap(fyne.NewSize(w, h), ci), head, buttons)
 }
 
-// previewImage: miniatura dużego pliku (osobny blob, dlatego osobna ścieżka).
+// previewImage: thumbnail of large file (separate blob, hence separate path).
 func (u *ui) previewImage(m core.Msg) fyne.CanvasObject {
 	data, ok := u.c.BlobBytes(m.Prev)
 	if !ok {
@@ -771,7 +769,7 @@ func (u *ui) previewImage(m core.Msg) fyne.CanvasObject {
 	return container.NewGridWrap(fyne.NewSize(w, h), ci)
 }
 
-// fileIcon: ikona wg typu — obraz, film, dźwięk albo zwykły plik.
+// fileIcon: icon by type — image, video, audio or generic file.
 func fileIcon(mime string) fyne.Resource {
 	switch {
 	case attach.IsImage(mime):
@@ -786,7 +784,7 @@ func fileIcon(mime string) fyne.Resource {
 	return theme.FileIcon()
 }
 
-// previewSize skaluje podgląd tak, by mieścił się w dymku.
+// previewSize scales preview to fit inside bubble.
 func previewSize(w, h int, mobile bool) (float32, float32) {
 	maxW, maxH := float32(320), float32(260)
 	if mobile {

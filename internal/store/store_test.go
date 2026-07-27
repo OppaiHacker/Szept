@@ -49,7 +49,7 @@ func TestStoreRoundtrip(t *testing.T) {
 		t.Fatal("key roundtrip failed")
 	}
 
-	// bloby: adresowane treścią, ta sama zawartość nie dubluje się w bazie
+	// blobs: content-addressed, identical content does not duplicate in database
 	data := []byte("udawany obrazek")
 	hash, err := s.PutBlob(data)
 	if err != nil {
@@ -59,30 +59,30 @@ func TestStoreRoundtrip(t *testing.T) {
 		t.Fatal("blob roundtrip failed")
 	}
 	if h2, _ := s.PutBlob(data); string(h2) != string(hash) {
-		t.Fatal("ten sam blob dostał inny skrót")
+		t.Fatal("same blob got different hash")
 	}
 	if s.HasBlob(crypt.RandBytes(32)) {
-		t.Fatal("HasBlob na losowym skrócie")
+		t.Fatal("HasBlob on random hash")
 	}
 	if _, ok := s.Avatar(priv.Public().(ed25519.PublicKey)); ok {
-		t.Fatal("awatar znaleziony bez zapisu")
+		t.Fatal("avatar found without put")
 	}
 	pub := priv.Public().(ed25519.PublicKey)
 	s.PutAvatar(pub, AvatarMeta{Blob: hash, Mime: "image/gif"})
 	if a, ok := s.Avatar(pub); !ok || a.Mime != "image/gif" || string(a.Blob) != string(hash) {
-		t.Fatalf("awatar roundtrip: %+v %v", a, ok)
+		t.Fatalf("avatar roundtrip: %+v %v", a, ok)
 	}
-	s.PutAvatar(pub, AvatarMeta{}) // pusty = usunięcie
+	s.PutAvatar(pub, AvatarMeta{}) // empty = delete
 	if _, ok := s.Avatar(pub); ok {
-		t.Fatal("awatar przeżył usunięcie")
+		t.Fatal("avatar survived deletion")
 	}
 
-	// awatary nie liczą się do odznaki nieprzeczytanych
+	// avatars don't count towards unread badge
 	before := s.EventCount(chat)
 	av, _ := event.New(priv, chat, event.KindAvatar, event.Body{Blob: hash, Mime: "image/gif"}, 3, [][]byte{m.ID()}, 1, key)
 	s.AddEvent(chat, av)
 	if after := s.EventCount(chat); after != before {
-		t.Fatalf("EventCount %d -> %d, awatar nabił odznakę", before, after)
+		t.Fatalf("EventCount %d -> %d, avatar incremented badge", before, after)
 	}
 
 	pinHash := sha256.Sum256([]byte("123456"))
@@ -99,8 +99,8 @@ func TestStoreRoundtrip(t *testing.T) {
 		t.Fatal("invite reused")
 	}
 
-	// zgadywanie PIN-u pali zaproszenie: "redeem" to zwykła wiadomość na
-	// otwartym kanale, więc bez licznika 10^6 kombinacji idzie w sekundy
+	// guessing PIN burns invite: "redeem" is a normal message on
+	// an open channel, so without counter 10^6 combinations fall in seconds
 	h3 := crypt.RandBytes(32)
 	s.PutInvite(h3, Invite{Chat: chat, PinHash: pinHash[:], Exp: time.Now().Add(time.Minute).Unix()})
 	for i := 0; i < MaxPinTries; i++ {
@@ -109,7 +109,7 @@ func TestStoreRoundtrip(t *testing.T) {
 		}
 	}
 	if _, err := s.TakeInvite(h3, []byte("123456")); err == nil {
-		t.Fatal("zaproszenie przeżyło zgadywanie PIN-u")
+		t.Fatal("invite survived PIN guessing")
 	}
 
 	// expired invite must be rejected and not counted as open
@@ -123,12 +123,12 @@ func TestStoreRoundtrip(t *testing.T) {
 	}
 }
 
-// Plik bazy nie ma zdradzać metadanych rozmowy (kto, jakiego rodzaju zdarzenia,
-// nazwy czatów), a wartości mają być związane ze swoim miejscem — przestawienie
-// dwóch rekordów musi się wywalić na AEAD.
+// Database file must not leak conversation metadata (who, what event kind,
+// chat names), and values must be bound to location — swapping
+// two records must fail on AEAD.
 func TestAtRestOpaque(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db")
-	sk := crypt.NewKey() // ten sam klucz magazynu przy ponownym otwarciu
+	sk := crypt.NewKey() // same storage key on reopen
 	s, err := Open(path, sk)
 	if err != nil {
 		t.Fatal(err)
@@ -151,11 +151,11 @@ func TestAtRestOpaque(t *testing.T) {
 	}
 	for _, leak := range [][]byte{pub, key, []byte("tajna-nazwa"), []byte(`"kind":"create"`), []byte("plik jeden")} {
 		if bytes.Contains(raw, leak) {
-			t.Fatalf("plik bazy zawiera jawnie %q", leak)
+			t.Fatalf("db file contains plaintext %q", leak)
 		}
 	}
 
-	// przestawienie wartości dwóch blobów: klucz ten sam, miejsce inne
+	// swapping values of two blobs: key is same, location differs
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 3 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -176,11 +176,11 @@ func TestAtRestOpaque(t *testing.T) {
 	}
 	defer s2.Close()
 	if _, ok := s2.GetBlob(h1); ok {
-		t.Fatal("przestawiony blob dał się odczytać mimo poprawnego klucza")
+		t.Fatal("swapped blob decrypted despite correct key")
 	}
-	// kontrola dodatnia: nieruszony rekord z tym samym kluczem czyta się dalej
+	// positive control: untouched record with same key still reads
 	h3, _ := s2.PutBlob([]byte("plik trzy"))
 	if v, ok := s2.GetBlob(h3); !ok || string(v) != "plik trzy" {
-		t.Fatal("nieruszony blob przestał się czytać")
+		t.Fatal("untouched blob failed to read")
 	}
 }

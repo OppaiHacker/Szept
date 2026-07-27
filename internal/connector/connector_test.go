@@ -29,7 +29,7 @@ func TestPerIPLimit(t *testing.T) {
 		t.Fatal("zwolniony slot nie wrócił")
 	}
 
-	// loopback (reverse proxy na tym samym hoście) jest zwolniony z limitu
+	// loopback (reverse proxy on same host) is exempt from limit
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "127.0.0.1:5555"
 	if ip := clientIP(r); ip != "" {
@@ -46,8 +46,8 @@ func TestPerIPLimit(t *testing.T) {
 	}
 }
 
-// Jedno gniazdo = jeden pubkey (inaczej każda rejestracja zostawia wpis,
-// którego rozłączenie nie sprząta), a podsłuchana ramka nie przejmuje slotu.
+// Single socket = single pubkey (otherwise each registration leaves entry
+// that disconnect does not clean up), and eavesdropped frame cannot steal slot.
 func TestRegisterBinding(t *testing.T) {
 	s := NewServer()
 	srv := httptest.NewServer(s)
@@ -81,7 +81,7 @@ func TestRegisterBinding(t *testing.T) {
 	if op := register(ws, other, otherPriv, ts); op == "ok" {
 		t.Fatal("drugi pubkey na tym samym gnieździe przeszedł")
 	}
-	// powtórka tej samej podpisanej ramki z innego gniazda nie przejmuje slotu
+	// replaying same signed frame from another socket does not steal slot
 	replay := dial()
 	defer replay.Close()
 	if op := register(replay, pub, priv, ts); op == "ok" {
@@ -182,7 +182,7 @@ func TestMeshRelay(t *testing.T) {
 	url2 := "ws" + strings.TrimPrefix(srv2.URL, "http")
 	s2.SetPublicURL(url2)
 
-	// Połączenie sieciowe SNDP z wagami latencji
+	// SNDP network connection with latency weights
 	s1.mesh.addNeighbor(url2, 0, 10)
 	s2.mesh.addNeighbor(url1, 0, 10)
 
@@ -212,7 +212,7 @@ func TestMeshRelay(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Klient A (Server 1) wysyła sygnał do Klienta B (Server 2)
+	// Client A (Server 1) sends signal to Client B (Server 2)
 	if err := a.Signal(b.Pub, []byte("mesh-hello")); err != nil {
 		t.Fatal(err)
 	}
@@ -231,9 +231,9 @@ func TestDijkstraRouting(t *testing.T) {
 	s := NewServer()
 	s.PublicURL = "ws://c1"
 
-	// Definiujemy topologię 4 węzłów:
-	// c1 --(150ms)--> c3 --(10ms)--> c4 (suma = 160ms)
-	// c1 --(12ms)-->  c2 --(15ms)--> c3 --(10ms)--> c4 (suma = 37ms)
+	// Define 4-node topology:
+	// c1 --(150ms)--> c3 --(10ms)--> c4 (sum = 160ms)
+	// c1 --(12ms)-->  c2 --(15ms)--> c3 --(10ms)--> c4 (sum = 37ms)
 	s.mesh.updateTopologyEdge("ws://c1", "ws://c3", 150)
 	s.mesh.updateTopologyEdge("ws://c3", "ws://c4", 10)
 
@@ -250,7 +250,7 @@ func TestCebulionSecurityAndLimits(t *testing.T) {
 	s := NewServer()
 	s.PublicURL = "ws://local-cebulion"
 
-	// Weryfikacja ochrony SSRF przed adresami metadanych chmurowych i nieprawidłowym IP w Sieci Cebulionowej
+	// Verify SSRF protection against cloud metadata addresses and invalid IPs in Cebulion Network
 	s.mesh.addNeighbor("http://169.254.169.254/latest", 0, 10)
 	s.mesh.addNeighbor("http://0.0.0.0:80", 0, 10)
 	s.mesh.addNeighbor("ftp://bad-scheme.com", 0, 10)
@@ -261,10 +261,10 @@ func TestCebulionSecurityAndLimits(t *testing.T) {
 
 	s.mesh.addNeighbor("ws://127.0.0.1:8080", 5, 10)
 	if len(s.mesh.neighbors) != 1 {
-		t.Fatalf("Oczekiwano 1 sąsiada po dodaniu ws://127.0.0.1:8080, jest %d", len(s.mesh.neighbors))
+		t.Fatalf("Expected 1 neighbor after adding ws://127.0.0.1:8080, got %d", len(s.mesh.neighbors))
 	}
 
-	// Weryfikacja ochrony pamięci przed rozrostem grafu (MaxTopologyNodes)
+	// Verify memory protection against graph inflation (MaxTopologyNodes)
 	for i := 0; i < 350; i++ {
 		s.mesh.updateTopologyEdge("ws://node0", "ws://node"+string(rune(i+1000)), 10)
 	}
@@ -296,7 +296,7 @@ func TestCebulionMultiHopRelay(t *testing.T) {
 	url3 := "ws" + strings.TrimPrefix(srv3.URL, "http")
 	s3.SetPublicURL(url3)
 
-	// Łączymy w siatkę Sieci Cebulion: s1 <-> s2 <-> s3
+	// Connect into Cebulion Network mesh: s1 <-> s2 <-> s3
 	s1.mesh.addNeighbor(url2, 0, 10)
 	s2.mesh.addNeighbor(url1, 0, 10)
 	s2.mesh.addNeighbor(url3, 0, 10)
@@ -328,7 +328,7 @@ func TestCebulionMultiHopRelay(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Klient A na s1 wysyła sygnał do Klienta B na s3 przez węzeł pośredni s2
+	// Client A on s1 sends signal to Client B on s3 via intermediate node s2
 	if err := a.Signal(b.Pub, []byte("cebulion-multihop-test")); err != nil {
 		t.Fatal(err)
 	}

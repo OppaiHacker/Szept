@@ -69,13 +69,13 @@ func TestInviteSyncKick(t *testing.T) {
 	}
 	time.Sleep(2 * time.Second)
 	if st, err := evil.ChatState(chat); err == nil && st.IsMember(evil.ID.Pub) {
-		t.Fatal("zły PIN dał członkostwo")
+		t.Fatal("wrong PIN gave membership")
 	}
 	if err := b.Redeem(code, pin); err != nil {
 		t.Fatal(err)
 	}
 
-	waitFor(t, "b widzi czat po zaproszeniu", 20*time.Second, func() bool {
+	waitFor(t, "b sees chat after invite", 20*time.Second, func() bool {
 		st, err := b.ChatState(chat)
 		return err == nil && st.IsMember(b.ID.Pub) && st.Name == "tajna-grupa"
 	})
@@ -83,7 +83,7 @@ func TestInviteSyncKick(t *testing.T) {
 	if err := a.Send(chat, "czesc bartek"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "wiadomość a→b", 10*time.Second, func() bool {
+	waitFor(t, "message a->b", 10*time.Second, func() bool {
 		for _, m := range b.Messages(chat) {
 			if m.Text == "czesc bartek" {
 				return true
@@ -95,7 +95,7 @@ func TestInviteSyncKick(t *testing.T) {
 	if err := b.Send(chat, "czesc ala"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "wiadomość b→a", 10*time.Second, func() bool {
+	waitFor(t, "message b->a", 10*time.Second, func() bool {
 		for _, m := range a.Messages(chat) {
 			if m.Text == "czesc ala" {
 				return true
@@ -111,7 +111,7 @@ func TestInviteSyncKick(t *testing.T) {
 	}
 	time.Sleep(2 * time.Second)
 	if st, err := c2.ChatState(chat); err == nil && st.IsMember(c2.ID.Pub) {
-		t.Fatal("zużyty kod zadziałał drugi raz")
+		t.Fatal("used code worked second time")
 	}
 
 	// kick rotates the key
@@ -133,13 +133,13 @@ func TestInviteSyncKick(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	for _, m := range b.Messages(chat) {
 		if m.Text == "sekret bez bartka" {
-			t.Fatal("wyrzucony członek dostał nową wiadomość")
+			t.Fatal("kicked member received new message")
 		}
 	}
 }
 
-// Załącznik jedzie osobnym kanałem: w DAG-u ląduje sam skrót, a treść odbiorca
-// dociąga sam i sprawdza. Awatar dodatkowo przechodzi przez przekodowanie.
+// Attachment travels over separate channel: DAG gets only hash, content recipient
+// fetches on demand and verifies. Avatar additionally undergoes re-encoding.
 func TestAttachmentAndAvatarTransfer(t *testing.T) {
 	srv := httptest.NewServer(connector.NewServer())
 	defer srv.Close()
@@ -163,15 +163,15 @@ func TestAttachmentAndAvatarTransfer(t *testing.T) {
 	if err := a.SendFile(chat, "../../ważne/kot.png", pngData, "kot"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "b pobiera załącznik", 25*time.Second, func() bool {
+	waitFor(t, "b fetches attachment", 25*time.Second, func() bool {
 		for _, m := range b.Messages(chat) {
 			if m.Kind == "file" && m.Have {
 				if m.File != "kot.png" || m.Mime != "image/png" || m.Text != "kot" {
-					t.Fatalf("zła metryczka: %+v", m)
+					t.Fatalf("bad metadata: %+v", m)
 				}
 				got, ok := b.BlobBytes(m.Blob)
 				if !ok || !bytes.Equal(got, pngData) {
-					t.Fatal("treść załącznika nie zgadza się z oryginałem")
+					t.Fatal("attachment content does not match original")
 				}
 				return true
 			}
@@ -179,14 +179,14 @@ func TestAttachmentAndAvatarTransfer(t *testing.T) {
 		return false
 	})
 
-	// zwykły plik wolno wysłać, ale nie może udawać obrazu
+	// normal file is allowed to be sent, but cannot pretend to be an image
 	if err := a.SendFile(chat, "wirus.png", []byte("<html><script>x()</script>"), ""); err != nil {
-		t.Fatalf("zwykły plik odrzucony: %v", err)
+		t.Fatalf("normal file rejected: %v", err)
 	}
 	for _, m := range a.Messages(chat) {
 		if m.Kind == "file" && m.Size < 100 {
 			if attach.IsMedia(m.Mime) || strings.HasSuffix(m.File, ".png") {
-				t.Fatalf("HTML przeszedł jako obraz: %q %q", m.Mime, m.File)
+				t.Fatalf("HTML passed as image: %q %q", m.Mime, m.File)
 			}
 		}
 	}
@@ -194,27 +194,27 @@ func TestAttachmentAndAvatarTransfer(t *testing.T) {
 	if err := a.SetAvatar(testImageGIF(t)); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "b widzi awatar ali", 25*time.Second, func() bool {
+	waitFor(t, "b sees ala's avatar", 25*time.Second, func() bool {
 		data, mime, hash := b.AvatarOf(a.ID.Pub)
 		if len(data) == 0 {
 			return false
 		}
 		if len(hash) != 32 {
-			t.Fatalf("awatar bez skrótu: %x", hash)
+			t.Fatalf("avatar without hash: %x", hash)
 		}
 		if mime != "image/gif" {
-			t.Fatalf("awatar przyszedł jako %q", mime)
+			t.Fatalf("avatar arrived as %q", mime)
 		}
 		if _, err := gif.DecodeAll(bytes.NewReader(data)); err != nil {
-			t.Fatalf("awatar nie jest poprawnym GIF-em: %v", err)
+			t.Fatalf("avatar is not a valid GIF: %v", err)
 		}
 		st, err := b.ChatState(chat)
 		return err == nil && len(st.Members[string(a.ID.Pub)].Avatar) == 32
 	})
 }
 
-// Duży plik (> PreviewMax) rozchodzi się jako sam podgląd; pełne bajty jadą
-// dopiero po FetchBlob. Zarazem sprawdzamy „ukryj u mnie” i zmianę nazwy.
+// Large file (> PreviewMax) auto-replicates thumbnail only; full bytes travel
+// only after FetchBlob. Simultaneously tests "hide locally" and name changes.
 func TestBigFilePreviewAndHide(t *testing.T) {
 	srv := httptest.NewServer(connector.NewServer())
 	defer srv.Close()
@@ -236,7 +236,7 @@ func TestBigFilePreviewAndHide(t *testing.T) {
 
 	big := testBigPNG(t)
 	if int64(len(big)) <= attach.PreviewMax {
-		t.Fatalf("plik testowy ma %d B — musi przekroczyć %d", len(big), attach.PreviewMax)
+		t.Fatalf("test file has %d B — must exceed %d", len(big), attach.PreviewMax)
 	}
 	if err := a.SendFile(chat, "wielkie.png", big, "podgląd"); err != nil {
 		t.Fatal(err)
@@ -250,67 +250,67 @@ func TestBigFilePreviewAndHide(t *testing.T) {
 		}
 		return nil
 	}
-	// nadawca ma wszystko od razu — nie pobiera niczego od siebie
+	// sender has everything immediately — doesn't fetch from self
 	if m := find(a); m == nil || !m.Have || len(m.Prev) == 0 || !m.HavePrev {
-		t.Fatalf("nadawca: %+v", m)
+		t.Fatalf("sender: %+v", m)
 	}
-	waitFor(t, "b ma podgląd, ale nie pełny plik", 30*time.Second, func() bool {
+	waitFor(t, "b has preview, but not full file", 30*time.Second, func() bool {
 		m := find(b)
 		return m != nil && m.HavePrev && !m.Have
 	})
 	m := find(b)
 	if _, ok := b.BlobBytes(m.Blob); ok {
-		t.Fatal("odbiorca ściągnął cały plik bez pytania")
+		t.Fatal("recipient fetched whole file without asking")
 	}
 	b.FetchBlob(chat, m.Blob, m.Mime, m.Size, m.Author)
-	waitFor(t, "b pobiera pełny plik na żądanie", 60*time.Second, func() bool {
+	waitFor(t, "b fetches full file on demand", 60*time.Second, func() bool {
 		got, ok := b.BlobBytes(m.Blob)
 		return ok && bytes.Equal(got, big)
 	})
 
-	// soft delete: bajty zostają w DAG-u, ale u nas przestają być widoczne
+	// soft delete: bytes remain in DAG, but become hidden locally
 	before := len(b.Messages(chat))
 	if err := b.HideMsg(chat, m.ID); err != nil {
 		t.Fatal(err)
 	}
 	if after := len(b.Messages(chat)); after != before-1 {
-		t.Fatalf("po ukryciu %d wiadomości, przed %d", after, before)
+		t.Fatalf("after hiding %d messages, before %d", after, before)
 	}
 	if !b.St.HasEvent(chat, m.ID) {
-		t.Fatal("ukrycie skasowało zdarzenie z bazy")
+		t.Fatal("hiding deleted event from database")
 	}
 	if b.HiddenCount(chat) != 1 {
-		t.Fatalf("licznik ukrytych = %d", b.HiddenCount(chat))
+		t.Fatalf("hidden count = %d", b.HiddenCount(chat))
 	}
 	if err := b.UnhideAll(chat); err != nil {
 		t.Fatal(err)
 	}
 	if after := len(b.Messages(chat)); after != before {
-		t.Fatalf("po przywróceniu %d wiadomości, chciałem %d", after, before)
+		t.Fatalf("after unhiding %d messages, wanted %d", after, before)
 	}
 
-	// nowa nazwa dojeżdża do drugiej strony
+	// new name arrives at the other peer
 	if err := b.SetNick("Bartek Nowy"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "a widzi nową nazwę b", 20*time.Second, func() bool {
+	waitFor(t, "a sees b's new name", 20*time.Second, func() bool {
 		st, err := a.ChatState(chat)
 		return err == nil && st.Members[string(b.ID.Pub)].Name == "Bartek Nowy"
 	})
 
-	// zaproszenia wystawia tylko założyciel
+	// invites issued only by creator
 	if _, _, err := b.NewInvite(chat); err == nil {
-		t.Fatal("nie-założyciel wystawił zaproszenie")
+		t.Fatal("non-creator issued invite")
 	}
 	if _, _, err := a.NewInvite(chat); err != nil {
-		t.Fatalf("założyciel nie może zaprosić: %v", err)
+		t.Fatalf("creator cannot invite: %v", err)
 	}
 }
 
-// testBigPNG: szum ponad attach.PreviewMax — PNG szumu się nie kompresuje.
+// testBigPNG: noise above attach.PreviewMax — PNG noise does not compress.
 func testBigPNG(t *testing.T) []byte {
 	t.Helper()
-	const side = 2100 // 2100² * 3 B ≈ 13 MB po kompresji szumu
+	const side = 2100 // 2100² * 3 B ≈ 13 MB after noise compression
 	rnd := rand.New(rand.NewSource(11))
 	img := image.NewRGBA(image.Rect(0, 0, side, side))
 	buf := make([]byte, side*side*4)
@@ -326,8 +326,8 @@ func testBigPNG(t *testing.T) []byte {
 	return out.Bytes()
 }
 
-// testImagePNG: szum, żeby PNG się nie skompresował — plik musi być większy
-// od jednego kawałka transportu (blobChunk), inaczej test omija składanie.
+// testImagePNG: noise so PNG does not compress — file must be larger
+// than single transport chunk (blobChunk), otherwise test bypasses assembly.
 func testImagePNG(t *testing.T) []byte {
 	t.Helper()
 	rnd := rand.New(rand.NewSource(7))
@@ -384,7 +384,7 @@ func TestDirectChatViaFriendCode(t *testing.T) {
 	if err := a.Send(chat, "dm test"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "b dostaje DM", 20*time.Second, func() bool {
+	waitFor(t, "b receives DM", 20*time.Second, func() bool {
 		for _, m := range b.Messages(chat) {
 			if m.Text == "dm test" {
 				return true

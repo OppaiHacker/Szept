@@ -29,19 +29,19 @@ func normalizeListen(s string) string {
 }
 
 func main() {
-	listen := flag.String("listen", ":7777", "adres nasłuchu (port, :port lub host:port)")
-	cert := flag.String("cert", "", "ścieżka do cert TLS (opcjonalnie)")
-	key := flag.String("key", "", "ścieżka do klucza TLS (opcjonalnie)")
-	seedsFlag := flag.String("seeds", "", "lista URL-i connectorów startowych rozdzielona przecinkami (np. ws://c2.szept.io:7777)")
-	publicURLFlag := flag.String("public-url", "", "publiczny URL tego connectora do protokołu SNDP (np. ws://c1.szept.io:7777)")
-	maxPeersFlag := flag.Int("max-peers", 0, "maksymalna liczba aktywnych peerów (0 = brak limitu, powyżej limitu następuje redirect)")
+	listen := flag.String("listen", ":7777", "listen address (port, :port or host:port)")
+	cert := flag.String("cert", "", "path to TLS cert (optional)")
+	key := flag.String("key", "", "path to TLS key (optional)")
+	seedsFlag := flag.String("seeds", "", "comma-separated list of seed connector URLs (e.g. ws://c2.szept.io:7777)")
+	publicURLFlag := flag.String("public-url", "", "public URL of this connector for SNDP protocol (e.g. ws://c1.szept.io:7777)")
+	maxPeersFlag := flag.Int("max-peers", 0, "max number of active peers (0 = no limit, exceeding limit triggers redirect)")
 	flag.Parse()
 
 	addr := normalizeListen(*listen)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		// Typowy przypadek VPS/NAT: publiczny IP nie jest przypisany do interfejsu
-		// (cloud 1:1 NAT). Bindujemy wtedy na wszystkie interfejsy na tym samym porcie.
+		// Typical VPS/NAT case: public IP is not bound directly to the interface
+		// (cloud 1:1 NAT). We bind to all interfaces on the same port instead.
 		if _, port, splitErr := net.SplitHostPort(addr); splitErr == nil && port != "" {
 			log.Printf("nie mogę nasłuchiwać na %s (%v) — próbuję :%s (wszystkie interfejsy)", addr, err, port)
 			addr = ":" + port
@@ -79,7 +79,7 @@ func main() {
 		log.Printf("zaimportowano %d connectorów startowych (SNDP)", len(seeds))
 	}
 
-	// ReadHeaderTimeout: bez tego wolne/zawieszone żądania trzymają połączenia (Slowloris).
+	// ReadHeaderTimeout: without this, slow/hung requests keep connections open (Slowloris).
 	srv := &http.Server{Handler: cServer, ReadHeaderTimeout: 10 * time.Second}
 	if *cert != "" && *key != "" {
 		log.Fatal(srv.ServeTLS(ln, *cert, *key))

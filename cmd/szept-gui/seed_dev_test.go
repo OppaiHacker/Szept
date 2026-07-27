@@ -1,9 +1,9 @@
 package main
 
-// Narzędzie deweloperskie (do usunięcia razem z shot_dev_test.go): buduje
-// katalog danych z dwoma czatami i wiadomościami od kilku osób, żeby zrzuty
-// ekranu miały co pokazać. Zdarzenia cudzych autorów wkładamy prosto do store —
-// prawdziwa synchronizacja wymagałaby connectora i drugiego procesu.
+// Developer tool (to be removed together with shot_dev_test.go): builds
+// data directory with two chats and messages from several peers for
+// screenshot generation. Peer events are inserted directly into store —
+// real sync would require connector and second process.
 
 import (
 	"crypto/ed25519"
@@ -29,9 +29,9 @@ func newPerson(name string) seedPerson {
 	return seedPerson{name, pub, priv}
 }
 
-// seedLine: jedna wiadomość do wstawienia — kto, co i ile minut temu.
+// seedLine: single message to insert — who, text, and minutes ago.
 type seedLine struct {
-	who  *seedPerson // nil = ja
+	who  *seedPerson // nil = me
 	text string
 	ago  time.Duration
 }

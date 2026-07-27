@@ -136,12 +136,12 @@ type Manager struct {
 	seen    map[string]time.Time // odtworzone blob-y sygnalingu — patrz fresh()
 }
 
-// sigTTL: tyle samo, co okno świeżości podpisanego blobu.
+// sigTTL: same as freshness window of signed blob.
 const sigTTL = 2 * time.Minute
 
-// fresh odsiewa powtórki: podpisana oferta jest ważna 2 minuty, a przez ten
-// czas connector (albo ktokolwiek na ws://) może ją odtwarzać w kółko —
-// każda kopia zakładałaby nowy PeerConnection z gatheringiem ICE.
+// fresh filters out replays: signed offer is valid for 2 minutes, and during
+// that time connector (or anyone on ws://) can replay it repeatedly —
+// each copy would spin up a new PeerConnection with ICE gathering.
 func (m *Manager) fresh(key string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

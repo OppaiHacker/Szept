@@ -340,7 +340,7 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		return
 	}
 	// sender must be an active chat member *and* must have announced the call:
-	// bez tego członek spoza rozmowy wpycha dźwięk do głośnika i obraz na ekran
+	// without this, a non-participant chat member can inject audio into speaker and video on screen
 	st, err := c.ChatState(chat)
 	if err != nil || !st.IsMember(p.Pub) {
 		return
@@ -402,9 +402,9 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		}
 		c.mu.Unlock()
 		if complete {
-			// nagłówek w limitach wymiarów, zanim UI odpali jpeg.Decode: ramka ma
-			// ~3 MB, ale JPEG może zadeklarować 65535×65535 px i dekoder spróbuje
-			// zaalokować gigabajty (bomba dekompresyjna od członka rozmowy)
+			// header within dimension limits before UI invokes jpeg.Decode: frame is
+			// ~3 MB, but JPEG can claim 65535x65535 px and decoder would try
+			// allocating gigabytes (decompression bomb from call member)
 			if attach.CheckDims(jpeg) != nil {
 				return
 			}

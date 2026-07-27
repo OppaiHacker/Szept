@@ -1,8 +1,8 @@
-// szept-gui: klient Fyne na Linux/Windows/Android.
+// szept-gui: Fyne client for Linux/Windows/Android.
 //
-// Android jest tu platformą pierwszą: dolny pasek zakładek, pełnoekranowe
-// strony zamiast dialogów, dotykowe wiersze list (patrz nav.go, chat.go,
-// profile.go). Pulpit dostaje ten sam kod z gałęziami !u.mobile.
+// Android is the primary platform here: bottom tab bar, full-screen
+// pages instead of dialogs, touch list rows (see nav.go, chat.go,
+// profile.go). Desktop gets the same code with !u.mobile branches.
 package main
 
 import (
@@ -37,22 +37,22 @@ import (
 //go:embed Icon.png
 var iconPNG []byte
 
-// msec: skrót na czas animacji (canvas.New*Animation bierze time.Duration).
+// msec: shortcut for animation duration (canvas.New*Animation takes time.Duration).
 const msec = time.Millisecond
 
-// ---- paleta ----
+// ---- palette ----
 
-// Paleta jak w mobilnym Discordzie (te same neutralne szarości), tylko akcent
-// zostaje fioletem szeptu. Trzy poziomy tła są tu istotne: paski i nawigacja są
-// CIEMNIEJSZE od treści — to one dają wrażenie warstw bez cieni, których fyne
-// i tak nie rysuje wokół kontenerów.
+// Palette like in mobile Discord (same neutral grays), only accent
+// stays szept purple. Three background levels matter here: app bars and navigation are
+// DARKER than content — giving a layered feel without shadows, which fyne
+// doesn't draw around containers anyway.
 var (
-	cDeep     = color.NRGBA{0x1e, 0x1f, 0x22, 0xff} // pasek górny, dolna nawigacja
-	cBg       = color.NRGBA{0x31, 0x33, 0x38, 0xff} // tło treści
-	cSurface  = color.NRGBA{0x2b, 0x2d, 0x31, 0xff} // karty, pasek pola tekstowego
-	cSurface2 = color.NRGBA{0x38, 0x3a, 0x40, 0xff} // przyciski, inputy, dymki innych
-	cBubbleMe = color.NRGBA{0x5b, 0x4f, 0xd6, 0xff} // dymki własne
-	cAccent   = color.NRGBA{0x8b, 0x7c, 0xf6, 0xff} // fiolet szeptu
+	cDeep     = color.NRGBA{0x1e, 0x1f, 0x22, 0xff} // top bar, bottom nav
+	cBg       = color.NRGBA{0x31, 0x33, 0x38, 0xff} // content background
+	cSurface  = color.NRGBA{0x2b, 0x2d, 0x31, 0xff} // cards, input bar
+	cSurface2 = color.NRGBA{0x38, 0x3a, 0x40, 0xff} // buttons, inputs, peer bubbles
+	cBubbleMe = color.NRGBA{0x5b, 0x4f, 0xd6, 0xff} // own bubbles
+	cAccent   = color.NRGBA{0x8b, 0x7c, 0xf6, 0xff} // szept purple accent
 	cFg       = color.NRGBA{0xdb, 0xde, 0xe1, 0xff}
 	cMuted    = color.NRGBA{0x94, 0x9b, 0xa4, 0xff}
 	cSep      = color.NRGBA{0x3f, 0x41, 0x47, 0xff}
@@ -61,7 +61,7 @@ var (
 	cRed      = color.NRGBA{0xed, 0x42, 0x45, 0xff}
 )
 
-// kolory autorów w grupach (deterministyczne po pubkey)
+// author colors in groups (deterministic by pubkey)
 var authorPalette = []color.NRGBA{
 	{0x7d, 0xd3, 0xfc, 0xff}, {0xf9, 0xa8, 0xd4, 0xff}, {0x86, 0xef, 0xac, 0xff},
 	{0xfd, 0xe0, 0x47, 0xff}, {0xfd, 0xba, 0x74, 0xff}, {0xc4, 0xb5, 0xfd, 0xff},
@@ -74,10 +74,10 @@ func authorColor(pub []byte) color.NRGBA {
 	return authorPalette[int(pub[0])%len(authorPalette)]
 }
 
-// mobileUI: ustawiane raz w main(); tekst i dotykowe rozmiary skalują się w górę.
+// mobileUI: set once in main(); text and touch targets scale up.
 var mobileUI bool
 
-// fs: rozmiar tekstu — na telefonie +2, żeby drobne podpisy były czytelne
+// fs: text size — on mobile +2 so small captions stay legible
 func fs(s float32) float32 {
 	if mobileUI {
 		return s + 2
@@ -121,10 +121,10 @@ func (t szTheme) Color(n fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 		return cRed
 	case theme.ColorNameScrollBar:
 		return color.NRGBA{0xff, 0xff, 0xff, 0x28}
-	// container.Scroll rysuje gradientowy cień na każdej krawędzi, za którą jest
-	// jeszcze treść (internal/widget/scroller.go) — w rozmowie wyglądało to jak
-	// brudna smuga nad polem tekstowym i pod paskiem tytułu. Cienia nie da się
-	// wyłączyć inaczej niż kolorem, a paski i tak dają warstwy własnym tłem.
+	// container.Scroll draws gradient shadow on every edge with hidden content
+	// (internal/widget/scroller.go) — in chat it looked like a dirty smudge
+	// above text field and below title bar. Shadow cannot be disabled
+	// other than by color, and bars provide layering via their background anyway.
 	case theme.ColorNameShadow:
 		return color.Transparent
 	case theme.ColorNameForegroundOnPrimary:
@@ -139,7 +139,7 @@ func (t szTheme) Icon(n fyne.ThemeIconName) fyne.Resource {
 }
 
 func (t szTheme) Size(n fyne.ThemeSizeName) float32 {
-	// mobile: większy tekst i padding — cele dotykowe ~44dp, czytelność na małym ekranie
+	// mobile: larger text and padding — touch targets ~44dp, legibility on small screen
 	m := func(desktop, mobile float32) float32 {
 		if mobileUI {
 			return mobile
@@ -159,8 +159,8 @@ func (t szTheme) Size(n fyne.ThemeSizeName) float32 {
 		return m(22, 24)
 	case theme.SizeNameSubHeadingText:
 		return m(16, 18)
-	// na telefonie pole tekstowe i przyciski ikonowe mają ~42 px wysokości,
-	// więc promień 20 robi z nich pigułki i kółka — jak w composerze Discorda
+	// on mobile text field and icon buttons are ~42 px high,
+	// so radius 20 makes them pill-shaped and circular — like Discord composer
 	case theme.SizeNameInputRadius, theme.SizeNameButtonRadius:
 		return m(10, 20)
 	case theme.SizeNameSelectionRadius:
@@ -180,9 +180,9 @@ type chatRow struct {
 	unread int
 }
 
-// chatPrev: podgląd ostatniej wiadomości na liście czatów. Trzymamy go w cache
-// pod liczbą zdarzeń — inaczej każde odświeżenie odszyfrowywałoby całą historię
-// każdego czatu, a to na telefonie widać.
+// chatPrev: preview of last message on chat list. Cached under
+// event count — otherwise every refresh would decrypt full history
+// of every chat, which is noticeable on mobile.
 type chatPrev struct {
 	n    int
 	text string
@@ -197,25 +197,25 @@ type ui struct {
 	cfgFile string
 	mobile  bool
 
-	// mobilna powłoka: root to Stack, gdzie [0] jest ekranem głównym,
-	// a kolejne warstwy to pełnoekranowe strony (nav.go)
+	// mobile shell: root is Stack, where [0] is main screen,
+	// and stacked layers are full-screen pages (nav.go)
 	root     *fyne.Container
 	tabBody  *fyne.Container
 	tabViews []fyne.CanvasObject
 	tabs     []*navTab
 	tab      int
-	convPage *fyne.Container // strona rozmowy (mobile)
+	convPage *fyne.Container // conversation page (mobile)
 
 	rows      []chatRow
 	sel       int
-	chatBox   *fyne.Container    // dotykowe wiersze czatów (obie platformy)
-	friendBox *fyne.Container    // lista znajomych
-	meBox     *fyne.Container    // zakładka „Ty” (profil + ustawienia)
-	nav       *container.AppTabs // desktop: Czaty | Znajomi
+	chatBox   *fyne.Container    // touch chat rows (both platforms)
+	friendBox *fyne.Container    // friend list
+	meBox     *fyne.Container    // "You" tab (profile + settings)
+	nav       *container.AppTabs // desktop: Chats | Friends
 	msgBox    *fyne.Container
 	msgScr    *flingScroll
-	center    *fyne.Container   // desktop: przełącza welcome <-> rozmowa
-	convRoot  fyne.CanvasObject // widok rozmowy
+	center    *fyne.Container   // desktop: toggles welcome <-> conversation
+	convRoot  fyne.CanvasObject // conversation view
 
 	title      *clipText
 	subtitle   *clipText
@@ -229,77 +229,77 @@ type ui struct {
 	bannerLbl  *canvas.Text
 	bannerDot  *canvas.Circle
 	bannerAnim *fyne.Animation
-	callBar    *fyne.Container // mic/kamera/ekran/rozłącz — tylko w trakcie rozmowy
+	callBar    *fyne.Container // mic/camera/screen/hangup — only during call
 
-	entry   *cmdEntry       // pole wiadomości; "/" odpala komendy (commands.go)
-	hintBox *fyne.Container // podpowiedzi komend nad polem
-	hints   []cmdDef        // aktualnie dopasowane
-	hintSel int             // podświetlona podpowiedź
+	entry   *cmdEntry       // message field; "/" triggers commands (commands.go)
+	hintBox *fyne.Container // command hints above field
+	hints   []cmdDef        // currently matched
+	hintSel int             // highlighted hint
 	sys     map[string][]sysMsg
 
-	clipBar  *fyne.Container // "wykryto kod w schowku"
+	clipBar  *fyne.Container // "detected code in clipboard"
 	clipLbl  *canvas.Text
 	clipCode string
-	clipSeen string // kod już odrzucony/użyty — nie pokazuj drugi raz
+	clipSeen string // code already dismissed/used — don't show twice
 
 	statusDot *canvas.Circle
 	statusLbl *canvas.Text
 	statusBar *fyne.Container
 
-	seen   map[string]int      // chatID -> liczba eventów przy ostatnim obejrzeniu
-	unread map[string]int      // chatID -> badge z poprzedniego odświeżenia
-	prev   map[string]chatPrev // chatID -> podgląd ostatniej wiadomości
+	seen   map[string]int      // chatID -> event count at last view
+	unread map[string]int      // chatID -> badge from previous refresh
+	prev   map[string]chatPrev // chatID -> preview of last message
 
-	shown     int    // ile wiadomości rysujemy w otwartym czacie
-	grew      bool   // właśnie doładowaliśmy starsze — przewijanie ma zostać na miejscu
-	msgSig    string // odcisk narysowanej rozmowy — bez zmian nie ruszamy przewijania
-	lastCount int    // wiadomości w wybranym czacie (animacja nowej)
-	lastChat  string // do wykrycia zmiany czatu (bez fałszywego flasha)
+	shown     int    // how many messages rendered in open chat
+	grew      bool   // just loaded older — scroll should stay in place
+	msgSig    string // fingerprint of rendered conversation — skip scroll if unchanged
+	lastCount int    // messages in selected chat (new message animation)
+	lastChat  string // detect chat change (prevent false flash)
 	booted    bool
 
 	vidWin  fyne.Window
-	vidDlg  dialog.Dialog // mobile: dialog zamiast drugiego okna
+	vidDlg  dialog.Dialog // mobile: dialog instead of second window
 	vidGrid *fyne.Container
 	vidImgs map[string]*canvas.Image // peer+kind -> image
 
-	anims    []*anim        // GIF-y awatarów — lista ginie z każdym odświeżeniem list
-	msgAnims []*anim        // GIF-y w dymkach — żyją, dopóki rozmowa nie jest rysowana od nowa
-	decoded  map[string]any // cache rozpakowanych obrazków, klucz = skrót bloba
+	anims    []*anim        // avatar GIFs — list cleared on every list refresh
+	msgAnims []*anim        // bubble GIFs — persist until conversation is redrawn
+	decoded  map[string]any // cache of unpacked images, key = blob hash
 }
 
 func main() {
-	dataFlag := flag.String("data", "", "katalog danych")
-	connFlag := flag.String("connector", "", "adres connectora")
+	dataFlag := flag.String("data", "", "data directory")
+	connFlag := flag.String("connector", "", "connector address")
 	flag.Parse()
 
-	// stałe ID = katalog Preferences i tożsamość aplikacji. To samo ID siedzi
-	// w FyneApp.toml, więc na Androidzie nic się nie przenosi.
+	// fixed ID = Preferences directory and app identity. Same ID is in
+	// FyneApp.toml, so on Android nothing moves.
 	a := app.NewWithID("chat.szept")
-	// ikona okna: X11 i Windows biorą ją stąd. Wayland nie ma takiego protokołu —
-	// tam ikona idzie z app_id + pliku .desktop, a app_id fyne nie ustawia.
+	// window icon: X11 and Windows take it from here. Wayland lacks this protocol —
+	// there icon comes from app_id + .desktop file, which fyne doesn't set.
 	a.SetIcon(fyne.NewStaticResource("icon.png", iconPNG))
-	// SZEPT_MOBILE=1 wymusza układ telefonu na pulpicie. Bez tego jedyny sposób
-	// zobaczyć mobilny widok to zbudować APK i wgrać go na telefon, więc każda
-	// poprawka wyglądu kosztowała pełny cykl pakowania.
+	// SZEPT_MOBILE=1 forces mobile layout on desktop. Without this, only way
+	// to view mobile UI was building APK and deploying to phone, costing
+	// a full build cycle for every tweak.
 	phoneTest := os.Getenv("SZEPT_MOBILE") == "1"
 	mobileUI = fyne.CurrentDevice().IsMobile() || phoneTest
 	a.Settings().SetTheme(szTheme{base: theme.DefaultTheme()})
 	w := a.NewWindow("szept")
-	// Bez tego fyne wciska całą treść o theme.Padding() od każdej krawędzi
-	// (mobile: internal/driver/mobile/canvas.go sizeContent). Efekt: pasek z
-	// polem wiadomości i dolna nawigacja wisiały jako prostokąt nieprzylegający
-	// do dołu ani do boków telefonu. Marginesy rozdajemy sami, tam gdzie trzeba.
+	// Without this fyne pushes all content by theme.Padding() from every edge
+	// (mobile: internal/driver/mobile/canvas.go sizeContent). Result: message input
+	// bar and bottom navigation floated as detached rectangles.
+	// We distribute margins ourselves where needed.
 	w.SetPadded(false)
 	switch {
 	case phoneTest:
-		w.Resize(fyne.NewSize(411, 820)) // typowy Android w dp
+		w.Resize(fyne.NewSize(411, 820)) // typical Android in dp
 	case !mobileUI:
 		w.Resize(fyne.NewSize(1060, 680))
 	}
 
 	cfgFile, dataDir := boot.Dirs()
 	if mobileUI {
-		// scoped storage: tylko katalog aplikacji jest zapisywalny
+		// scoped storage: only app directory is writable
 		root := a.Storage().RootURI().Path()
 		cfgFile = filepath.Join(root, "config.json")
 		dataDir = filepath.Join(root, "data")
@@ -359,7 +359,7 @@ func main() {
 	}
 }
 
-// ---- małe klocki ----
+// ---- small building blocks ----
 
 func brand(size float32) *canvas.Text {
 	t := canvas.NewText("szept", cAccent)
@@ -374,7 +374,7 @@ func mutedText(s string, size float32) *canvas.Text {
 	return t
 }
 
-// mutedWrap: szary opis, który zawija się na wąskim ekranie (canvas.Text nie umie)
+// mutedWrap: gray caption wrapping on narrow screen (canvas.Text cannot)
 func mutedWrap(s string) *widget.RichText {
 	t := widget.NewRichText(&widget.TextSegment{
 		Text: s,
@@ -387,8 +387,8 @@ func mutedWrap(s string) *widget.RichText {
 	return t
 }
 
-// startScaffold: desktop centruje kartę; telefon dostaje pełną szerokość
-// i przewijanie (klawiatura), bo Center pozwala treści wystawać poza ekran
+// startScaffold: desktop centers card; mobile gets full width
+// and scrolling (keyboard), because Center lets content overflow screen
 func (u *ui) startScaffold(content fyne.CanvasObject) fyne.CanvasObject {
 	if u.mobile {
 		return vscroll(container.NewPadded(content))
@@ -408,14 +408,14 @@ func vspace(h float32) fyne.CanvasObject {
 	return r
 }
 
-// card: zaokrąglony panel na ciemniejszym tle
+// card: rounded panel on darker background
 func card(content fyne.CanvasObject) fyne.CanvasObject {
 	bg := canvas.NewRectangle(cSurface)
 	bg.CornerRadius = 14
 	return container.NewStack(bg, container.NewPadded(container.NewPadded(content)))
 }
 
-// ---- ekrany startowe ----
+// ---- startup screens ----
 
 func (u *ui) setupScreen(cfgFile string, done func(*identity.Identity)) {
 	name := widget.NewEntry()
@@ -506,15 +506,15 @@ func (u *ui) askConnector(cfgFile string, done func()) {
 	)))
 }
 
-// ---- główny układ ----
+// ---- main layout ----
 
 func (u *ui) buildMain() {
-	u.buildConv()   // wspólny widok rozmowy (chat.go)
-	u.startAnims()  // jeden zegar na wszystkie GIF-y (media.go)
-	u.buildStatus() // pasek połączenia
+	u.buildConv()   // shared conversation view (chat.go)
+	u.startAnims()  // single ticker for all GIFs (media.go)
+	u.buildStatus() // connection bar
 	u.buildClipBar()
 
-	// zakładka Znajomi
+	// Friends tab
 	u.friendBox = container.NewVBox()
 	addFriend := bigButton("Dodaj znajomego", theme.ContentAddIcon(), u.codePage)
 	friendsTab := container.NewBorder(nil, container.NewPadded(addFriend), nil, nil,
@@ -531,7 +531,7 @@ func (u *ui) buildMain() {
 	u.a.Lifecycle().SetOnEnteredForeground(func() { fyne.Do(u.checkClipboard) })
 }
 
-// buildMobileShell: dolne zakładki Czaty | Znajomi | Ty i stos stron nad nimi.
+// buildMobileShell: bottom tabs Chats | Friends | You and stacked pages above.
 func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 	u.chatBox = container.NewVBox()
 	chatsTab := container.NewBorder(
@@ -541,8 +541,8 @@ func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 		nil, nil, nil, vscroll(u.chatBox))
 
 	u.tabViews = []fyne.CanvasObject{chatsTab, friendsTab, u.mePage()}
-	// tabBody ma własny slideLayout, żeby przełączenie zakładki dało się wsunąć
-	// z boku zamiast podmienić widok w jednej klatce
+	// tabBody has its own slideLayout so tab switches can slide
+	// in from the side instead of swapping view in one frame
 	u.tabBody = slidePage(u.tabViews[0])
 	nav := u.buildBottomNav(
 		[]string{"Czaty", "Znajomi", "Ty"},
@@ -567,7 +567,7 @@ func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 	})
 }
 
-// buildDesktopShell: lewy panel z zakładkami + rozmowa w splicie (jak dotąd).
+// buildDesktopShell: left panel with tabs + conversation in split (as before).
 func (u *ui) buildDesktopShell(friendsTab fyne.CanvasObject) {
 	u.chatBox = container.NewVBox()
 	chatsTab := container.NewBorder(nil,
@@ -590,9 +590,9 @@ func (u *ui) buildDesktopShell(friendsTab fyne.CanvasObject) {
 	u.w.SetContent(container.NewBorder(u.clipBar, u.statusBar, nil, nil, split))
 }
 
-// buildStatus: kropka i etykieta połączenia. Na telefonie siedzą w nagłówku,
-// na pulpicie w pasku na dole — ten sam obiekt nie może wisieć w dwóch
-// kontenerach, więc pasek powstaje tylko tam, gdzie jest używany.
+// buildStatus: connection dot and label. On mobile they sit in header,
+// on desktop in bottom bar — same object cannot sit in two
+// containers, so bar is created only where used.
 func (u *ui) buildStatus() {
 	u.statusDot = canvas.NewCircle(cOrange)
 	u.statusLbl = mutedText("łączenie…", 12)
@@ -606,8 +606,8 @@ func (u *ui) buildStatus() {
 		container.NewCenter(me), hspace(4))
 }
 
-// mobileBack: Wstecz zdejmuje po kolei stronę, potem wraca na zakładkę Czaty.
-// Domyślnie fyne od razu ubija aktywność — dialogu nie dało się cofnąć.
+// mobileBack: Back button pops pages one by one, then returns to Chats tab.
+// By default fyne kills activity immediately — dialog couldn't be backed out.
 func (u *ui) mobileBack() {
 	ov := u.w.Canvas().Overlays()
 	if top := ov.Top(); top != nil {
@@ -626,7 +626,7 @@ func (u *ui) mobileBack() {
 	}
 }
 
-// ---- odświeżanie ----
+// ---- refresh ----
 
 func (u *ui) cur() *core.ChatInfo {
 	if u.sel >= 0 && u.sel < len(u.rows) {
@@ -635,9 +635,9 @@ func (u *ui) cur() *core.ChatInfo {
 	return nil
 }
 
-// watch: jedno odświeżenie na serię zdarzeń. Synchronizacja DAG sypie ich
-// setkami w sekundę, a refresh() przebudowuje listy — bez zlania w paczki
-// telefon stoi na przebudowach zamiast rysować przewijanie.
+// watch: single refresh per event burst. DAG sync fires hundreds per
+// second, and refresh() rebuilds lists — without batching,
+// mobile freezes on rebuilds instead of rendering scroll.
 func (u *ui) watch() {
 	ch := u.c.Subscribe()
 	for range ch {
@@ -688,8 +688,8 @@ func (u *ui) updateStatus() {
 }
 
 func (u *ui) refresh() {
-	// awatary rysujemy od nowa w każdym odświeżeniu, więc ich animacje też;
-	// GIF-y w dymkach mają własną listę, bo rozmowa często NIE jest przerysowywana
+	// avatars rendered fresh on every refresh, so their animations too;
+	// bubble GIFs have separate list, as conversation is often NOT redrawn
 	u.anims = u.anims[:0]
 	chats := u.c.Chats()
 	u.rows = u.rows[:0]
@@ -697,7 +697,7 @@ func (u *ui) refresh() {
 		key := string(ci.ID)
 		cnt := u.c.St.EventCount(ci.ID)
 		if !u.booted {
-			u.seen[key] = cnt // start bez lawiny badge'ów za historię
+			u.seen[key] = cnt // start without avalanche of unread badges for history
 		}
 		row := chatRow{info: ci}
 		if cnt > u.seen[key] {
@@ -710,7 +710,7 @@ func (u *ui) refresh() {
 	if u.sel >= len(u.rows) {
 		u.sel = 0
 	}
-	// otwarty czat = obejrzany; o pozostałych powiadamiamy systemowo
+	// open chat = viewed; remaining notified via system notifications
 	open := u.chatOpen()
 	total := 0
 	for i := range u.rows {
@@ -736,8 +736,8 @@ func (u *ui) refresh() {
 	if !u.mobile {
 		u.hideWelcome()
 	}
-	// pasek i dymki tylko gdy rozmowa jest na ekranie — na telefonie z listy
-	// czatów nikt ich nie widzi, a awatar w pasku to dekodowanie obrazka
+	// app bar and bubbles rendered only when conversation is on screen — on mobile
+	// from chat list nobody sees them, and avatar in app bar causes image decode
 	if open {
 		u.updateConvHeader(ch)
 		u.renderMessages(ch)
@@ -745,10 +745,10 @@ func (u *ui) refresh() {
 	u.renderCallState(ch)
 }
 
-// rebuildVisible: na telefonie zakładki leżą jedna pod drugą i tylko jedna jest
-// widoczna. Przebudowa wszystkich trzech przy każdym zdarzeniu to było
-// odszyfrowywanie zajawek, dekodowanie awatarów i setki nowych widgetów za nic —
-// najlepiej widoczne jako zacinanie w trakcie przewijania.
+// rebuildVisible: on mobile tabs sit stacked beneath each other and only one is
+// visible. Rebuilding all three on every event decrypted previews,
+// decoded avatars, and created hundreds of new widgets for nothing —
+// most visible as stutter during scrolling.
 func (u *ui) rebuildVisible() {
 	if !u.mobile {
 		u.rebuildChats()
@@ -766,8 +766,8 @@ func (u *ui) rebuildVisible() {
 	}
 }
 
-// chatOpen: czy rozmowa jest teraz na ekranie. Na telefonie to osobna strona,
-// więc gdy jej nie ma, nie ma sensu rysować dymków ani gasić odznaki.
+// chatOpen: whether conversation is currently on screen. On mobile it's a separate page,
+// so when absent, rendering bubbles or clearing badges is useless.
 func (u *ui) chatOpen() bool {
 	if !u.mobile {
 		return u.cur() != nil
@@ -791,7 +791,7 @@ func (u *ui) onStack(o fyne.CanvasObject) bool {
 
 func (u *ui) showWelcome() {
 	if u.mobile {
-		return // na telefonie zakładka Czaty sama pokazuje, co robić dalej
+		return // on mobile Chats tab shows what to do next
 	}
 	step := func(icon fyne.Resource, title, desc string, act func()) fyne.CanvasObject {
 		b := widget.NewButtonWithIcon(title, icon, act)
@@ -823,14 +823,14 @@ func (u *ui) hideWelcome() {
 	}
 }
 
-// ---- drobne narzędzia ----
+// ---- small utilities ----
 
 func spaced(s string) string {
 	return strings.Join(strings.Split(s, ""), " ")
 }
 
-// trunc przycina po runach, nie bajtach — „ż” zajmuje dwa bajty i cięcie
-// w środku dawało krzaki.
+// trunc cuts by runes, not bytes — Polish characters take 2 bytes and middle
+// split resulted in corrupted text.
 func trunc(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
@@ -839,15 +839,15 @@ func trunc(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// vcenter: wyśrodkowanie w pionie BEZ zwężania w poziomie. container.NewCenter
-// ustawia dziecku dokładnie jego MinSize, a clipText ma minimalną szerokość
-// celowo małą, żeby dał się ścisnąć — w Center kończył jako samo „…”.
+// vcenter: vertical centering WITHOUT narrowing horizontally. container.NewCenter
+// sets child size strictly to MinSize, and clipText has small min width
+// intentionally so it compresses — in Center it ended up as just "…".
 func vcenter(o fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewVBox(layout.NewSpacer(), o, layout.NewSpacer())
 }
 
-// twoLine: tytuł i podpis w jednej, ciasnej kolumnie — obie linie przycinają się
-// do tego, ile miejsca faktycznie zostało w wierszu (clipText, scroll.go).
+// twoLine: title and subtitle in single compact column — both lines clip
+// to remaining row space (clipText, scroll.go).
 func twoLine(title, desc string, titleSize, descSize float32) fyne.CanvasObject {
 	t := newClipText(title, fs(titleSize), cFg).bold()
 	if desc == "" {
@@ -856,8 +856,8 @@ func twoLine(title, desc string, titleSize, descSize float32) fyne.CanvasObject 
 	return container.NewVBox(t, newClipText(desc, fs(descSize), cMuted))
 }
 
-// appVersion: metadane wstrzykuje `fyne package` (FyneApp.toml); zwykłe
-// `go build` ich nie ma — wtedy "dev". Format zgodny z versionName w APK.
+// appVersion: metadata injected by `fyne package` (FyneApp.toml); plain
+// `go build` lacks them — fallback to "dev". Format matches versionName in APK.
 func appVersion(a fyne.App) string {
 	m := a.Metadata()
 	if m.Version == "" {
@@ -866,7 +866,7 @@ func appVersion(a fyne.App) string {
 	return fmt.Sprintf("%s.%d", m.Version, m.Build)
 }
 
-// dlgSize: dialogi (pulpit) nie mogą wystawać poza okno.
+// dlgSize: dialogs (desktop) cannot exceed window size.
 func (u *ui) dlgSize(w, h float32) fyne.Size {
 	cs := u.w.Canvas().Size()
 	if cs.Width > 60 {
@@ -878,8 +878,8 @@ func (u *ui) dlgSize(w, h float32) fyne.Size {
 	return fyne.NewSize(w, h)
 }
 
-// toast: krótka informacja bez zabierania ekranu. Na telefonie dialog byłby
-// tu przesadą, a użytkownik i tak chce tylko potwierdzenia.
+// toast: brief notice without taking over screen. On mobile a dialog would be
+// overkill, and user just wants confirmation.
 func (u *ui) toast(text string) {
 	if ch := u.cur(); ch != nil && u.chatOpen() {
 		u.sysOK(text, "")
@@ -888,7 +888,7 @@ func (u *ui) toast(text string) {
 	u.info("szept", text)
 }
 
-// ---- wideo ----
+// ---- video ----
 
 func (u *ui) onFrame(chat, from []byte, kind string, jpg []byte) {
 	img, err := jpeg.Decode(bytes.NewReader(jpg))
@@ -900,7 +900,7 @@ func (u *ui) onFrame(chat, from []byte, kind string, jpg []byte) {
 
 func (u *ui) showFrame(chat, from []byte, kind string, img image.Image) {
 	if u.mobile {
-		// mobile: brak dekoracji okien — dialog z przyciskiem Zamknij
+		// mobile: no window decorations — dialog with Close button
 		if u.vidDlg == nil {
 			u.vidGrid = container.NewGridWithColumns(1)
 			scr := vscroll(u.vidGrid)
@@ -956,7 +956,7 @@ func (u *ui) showFrame(chat, from []byte, kind string, img image.Image) {
 	ci.Refresh()
 }
 
-// ---- schowek: zamiast skanera QR w aplikacji ----
+// ---- clipboard: replacing in-app QR scanner ----
 
 func (u *ui) buildClipBar() {
 	bg := canvas.NewRectangle(color.NRGBA{0x2c, 0x26, 0x4a, 0xff})
@@ -978,14 +978,14 @@ func (u *ui) buildClipBar() {
 	u.clipBar.Hide()
 }
 
-// checkClipboard: aparat telefonu odczytuje QR i wrzuca tekst do schowka —
-// po powrocie do aplikacji podchwytujemy go sami, bez skanera w środku.
+// checkClipboard: phone camera reads QR and places text in clipboard —
+// upon returning to app we pick it up automatically, without in-app scanner.
 func (u *ui) checkClipboard() {
 	if u.clipBar == nil || u.c == nil {
 		return
 	}
 	s := strings.TrimSpace(u.a.Clipboard().Content())
-	own := s == u.c.FriendCode() // własny kod skopiowany ze strony — nie proponuj
+	own := s == u.c.FriendCode() // own code copied from page — don't suggest
 	if own || s == u.clipSeen ||
 		(!strings.HasPrefix(s, "SZF-") && !strings.HasPrefix(s, "SZC-")) {
 		u.clipBar.Hide()

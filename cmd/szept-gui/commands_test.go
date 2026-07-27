@@ -24,11 +24,11 @@ func TestMatchCommands(t *testing.T) {
 	}{
 		{"", desktop, 0},
 		{"hej", desktop, 0},
-		{"/nowy grupa", desktop, 0}, // po spacji podpowiedzi znikają
+		{"/nowy grupa", desktop, 0}, // suggestions disappear after space
 		{"/", desktop, len(commands)},
-		{"/", phone, len(commands) - 2}, // /cam i /ekran nie mają źródła na Androidzie
+		{"/", phone, len(commands) - 2}, // /cam and /ekran have no source on Android
 		{"/wyczysc", desktop, 1},
-		{"/WYCZ", desktop, 1}, // wielkość liter bez znaczenia
+		{"/WYCZ", desktop, 1}, // case insensitive
 		{"/zzz", desktop, 0},
 	}
 	for _, c := range cases {

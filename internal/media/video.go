@@ -34,10 +34,10 @@ func encodeJPEG(img image.Image, maxW int, quality int) []byte {
 // X11/Windows OK; Wayland needs XWayland (portal capture is the upgrade path).
 func StartScreen(fps int, cb func(jpegFrame []byte)) (stop func(), err error) {
 	if screenshot.NumActiveDisplays() == 0 {
-		return nil, errors.New("brak wykrytych ekranów (Wayland bez XWayland?)")
+		return nil, errors.New("no displays detected (Wayland without XWayland?)")
 	}
 	if _, err := screenshot.CaptureDisplay(0); err != nil {
-		return nil, fmt.Errorf("przechwytywanie ekranu: %w", err)
+		return nil, fmt.Errorf("screen capture: %w", err)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -82,7 +82,7 @@ func ffmpegArgs(device string) []string {
 // SOI/EOI markers. Zero cgo, works wherever ffmpeg does.
 func startFFmpegCamera(device string, cb func([]byte)) (func(), error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, errors.New("kamera: brak sterownika v4l2 i brak ffmpeg w PATH")
+		return nil, errors.New("camera: missing v4l2 driver and ffmpeg not found in PATH")
 	}
 	cmd := exec.Command("ffmpeg", append([]string{"-loglevel", "quiet"}, ffmpegArgs(device)...)...)
 	out, err := cmd.StdoutPipe()

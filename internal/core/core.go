@@ -18,6 +18,7 @@ import (
 	"szept/internal/connector"
 	"szept/internal/crypt"
 	"szept/internal/event"
+	"szept/internal/i18n"
 	"szept/internal/identity"
 	"szept/internal/p2p"
 	"szept/internal/store"
@@ -27,9 +28,9 @@ type Config struct {
 	Connector string   `json:"connector"`
 	STUN      []string `json:"stun,omitempty"`
 	DataDir   string   `json:"-"`
-	// MediaDir: katalog, po którym chodzi wbudowana galeria (Android nie ma
-	// jednego oczywistego miejsca na zdjęcia, a systemowy wybór plików nie
-	// pokazuje siatki miniatur).
+	// MediaDir: directory browsed by built-in gallery (Android doesn't have
+	// single obvious place for photos, and system file picker doesn't
+	// show thumbnail grid).
 	MediaDir string `json:"media_dir,omitempty"`
 }
 
@@ -92,13 +93,18 @@ type Core struct {
 	stopScreen   func()
 }
 
+const langKey = "lang"
+
 func Open(cfg Config, id *identity.Identity) (*Core, error) {
 	st, err := store.Open(filepath.Join(cfg.DataDir, "szept.db"), id.StorageKey())
 	if err != nil {
 		return nil, err
 	}
 	if nick := st.Meta(nickKey); len(nick) > 0 {
-		id.Name = string(nick) // zmiana nazwy z profilu wygrywa z plikiem tożsamości
+		id.Name = string(nick) // name change in profile overrides identity file
+	}
+	if lang := st.Meta(langKey); len(lang) > 0 {
+		i18n.SetLang(string(lang))
 	}
 	conn := connector.NewClient(cfg.Connector, id.Priv)
 	c := &Core{
@@ -159,13 +165,13 @@ func (c *Core) SetConnector(url string) {
 
 func (c *Core) Start() {
 	go c.Conn.Run()
-	go c.rescanAttachments() // po restarcie: czego brakuje z poprzedniej sesji
+	go c.rescanAttachments() // startup rescan: missing blobs from previous session
 	go func() {
 		for {
 			time.Sleep(30 * time.Second)
 			c.connectAll()
 			c.retryWants(false)
-			c.announceProfile() // czaty, do których profil jeszcze nie dotarł
+			c.announceProfile() // chats where profile hasn't arrived yet
 		}
 	}()
 }
@@ -234,28 +240,28 @@ func (c *Core) chatIDs() map[string]store.ChatMeta {
 	return m
 }
 
-// foldedState: wynik ostatniego foldu czatu. Fold weryfikuje całą historię, a
-// pytamy o stan na każdy pakiet mediów (głos = 50 ramek/s) i na każde odebrane
-// zdarzenie — bez cache'u czat z tysiącem zdarzeń zjada procesor w całości.
+// foldedState: cached result of last chat fold. Fold verifies full history, and
+// we query state per media packet (audio = 50 frames/s) and per received
+// event — without cache a chat with 1000 events consumes full CPU.
 type foldedState struct {
 	st  *event.State
 	err error
 }
 
-// invalidate: wołać po każdym zapisie zdarzenia albo klucza epoki tego czatu.
+// invalidate: call after writing an event or epoch key for this chat.
 func (c *Core) invalidate(chat []byte) {
 	c.mu.Lock()
 	delete(c.states, string(chat))
 	c.mu.Unlock()
 }
 
-// ChatState zwraca złożony stan czatu. Wynik jest tylko do odczytu — jest
-// współdzielony przez wszystkich czytelników aż do najbliższego zapisu.
+// ChatState returns folded state of chat. Result is read-only — shared by
+// all readers until next state mutation.
 //
-// Fold nadal przelatuje całą historię, tylko rzadziej (i bez
-// sprawdzania podpisów, bo baza trzyma wyłącznie zweryfikowane zdarzenia).
-// Przy historii idącej w dziesiątki tysięcy zdarzeń kolejnym krokiem jest fold
-// przyrostowy albo migawka stanu co N zdarzeń.
+// Fold still walks entire history, just less frequently (and without
+// verifying signatures, as store contains only validated events).
+// For histories scaling to tens of thousands of events, next step is incremental
+// fold or state snapshot every N events.
 func (c *Core) ChatState(chat []byte) (*event.State, error) {
 	c.mu.Lock()
 	cached := c.states[string(chat)]
@@ -326,14 +332,13 @@ func (c *Core) Chats() []ChatInfo {
 	return out
 }
 
-// MaxName: sufit na nazwę przychodzącą z sieci (SetNick pilnuje tego u siebie,
-// ale peer wysyła co chce).
+// MaxName: ceiling on network-provided name (SetNick enforces this locally,
+// but peer sends arbitrary payload).
 const MaxName = 64
 
-// safeText czyści tekst z sieci przed pokazaniem go w UI: znaki sterujące
-// wycinamy, bo TUI wypisuje treść prosto na terminal, a sekwencje ANSI/OSC
-// potrafią przerysować ekran, podszyć się pod cudzą wiadomość albo ruszyć
-// schowek. Nowa linia i tabulator zostają — to normalna treść wiadomości.
+// safeText cleanses incoming network text before rendering in UI: control characters
+// are stripped because TUI outputs text directly to terminal, and ANSI/OSC sequences
+// could redraw screen, spoof messages or tamper with clipboard. Newlines and tabs remain.
 func safeText(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
@@ -346,7 +351,7 @@ func safeText(s string) string {
 	}, s)
 }
 
-// safeName: jednolinijkowa nazwa (autor, czat, znajomy) o ograniczonej długości.
+// safeName: single-line name (author, chat, friend) with capped length.
 func safeName(s string) string {
 	s = strings.ReplaceAll(safeText(s), "\n", " ")
 	s = strings.ReplaceAll(s, "\t", " ")
@@ -368,7 +373,7 @@ func (c *Core) displayName(st *event.State) string {
 		}
 	}
 	if len(others) == 0 {
-		return "(pusty czat)"
+		return "(empty chat)"
 	}
 	return strings.Join(others, ", ")
 }
@@ -393,30 +398,30 @@ func (c *Core) memberName(st *event.State, pub []byte) string {
 }
 
 type Msg struct {
-	ID        []byte // ID zdarzenia — klucz do „ukryj u mnie”
+	ID        []byte // event ID — key for "hide locally"
 	Author    []byte
 	Name      string
 	Text      string
 	TS        time.Time
 	Kind      string // msg | info | file
-	Info      string // dla Kind == "info": event.Kind* — klient dobiera ikonę i kolor
-	Deleted   bool   // usunięte u wszystkich w DAG
+	Info      string // for Kind == "info": event.Kind* — client selects icon and color
+	Deleted   bool   // deleted for everyone in DAG
 	Reactions map[string]string // pubKeyStr -> emoji
 	ACK       string // "" | "delivered" | "read"
 
-	// tylko dla Kind == "file"
-	Blob []byte // sha256 treści
+	// for Kind == "file" only
+	Blob []byte // sha256 content hash
 	Mime string
-	File string // nazwa (już oczyszczona przez attach.SafeName)
+	File string // filename (cleaned by attach.SafeName)
 	Size int64
 	W, H int
-	Have bool // pełna treść leży już u nas; false = trzeba (albo trwa) pobieranie
+	Have bool // full content available locally; false = downloading needed or in progress
 
-	// duży plik: replikuje się tylko miniatura, pełne bajty na żądanie
+	// large file: thumbnail auto-replicates, full bytes on demand
 	Prev     []byte
 	PrevMime string
 	HavePrev bool
-	Getting  bool // pełne bajty są właśnie w kolejce
+	Getting  bool // full bytes currently in queue
 }
 
 func (c *Core) Messages(chat []byte) []Msg {
@@ -439,7 +444,7 @@ func (c *Core) Messages(chat []byte) []Msg {
 		}
 		id := e.ID()
 		if hidden[string(id)] {
-			continue // schowane u nas (soft delete) — bajty zostają w DAG-u
+			continue // hidden locally (soft delete) — bytes remain in DAG
 		}
 		b, err := e.Decrypt(key)
 		if err != nil {
@@ -458,15 +463,15 @@ func (c *Core) Messages(chat []byte) []Msg {
 			m.HavePrev = len(b.Prev) > 0 && c.St.HasBlob(b.Prev)
 			m.Getting = !m.Have && c.Fetching(b.Blob)
 		case event.KindCreate:
-			m.Kind, m.Info, m.Text = "info", e.Kind, name+" utworzył(a) czat"
+			m.Kind, m.Info, m.Text = "info", e.Kind, name+" created the chat"
 		case event.KindAdd:
-			m.Kind, m.Info, m.Text = "info", e.Kind, name+" dodał(a) "+safeName(b.Name)
+			m.Kind, m.Info, m.Text = "info", e.Kind, name+" added "+safeName(b.Name)
 		case event.KindRemove:
-			m.Kind, m.Info, m.Text = "info", e.Kind, name+" usunął(-ęła) członka"
+			m.Kind, m.Info, m.Text = "info", e.Kind, name+" removed a member"
 		case event.KindRekey:
-			m.Kind, m.Info, m.Text = "info", e.Kind, "rotacja klucza (nowa epoka)"
+			m.Kind, m.Info, m.Text = "info", e.Kind, "key rotation (new epoch)"
 		default:
-			continue // awatar, nick, rename, react, delete — nie są osobną treścią rozmowy
+			continue // avatar, nick, rename, react, delete — not separate message items
 		}
 		if st.Deleted != nil && st.Deleted[string(id)] {
 			m.Deleted = true
@@ -592,10 +597,10 @@ func (c *Core) SearchChat(chat []byte, query string) ([]Msg, error) {
 	return res, nil
 }
 
-// ---- soft delete: „usuń u mnie” ----
+// ---- soft delete: "hide locally" ----
 //
-// DAG jest podpisany i replikowany, więc z historii nic nie znika. HideMsg
-// zapamiętuje lokalnie, czego nie rysować — na tym jednym urządzeniu.
+// DAG is signed and replicated, so nothing disappears from history. HideMsg
+// remembers locally what not to render — on this device only.
 
 func (c *Core) HideMsg(chat, id []byte) error {
 	if err := c.St.HideEvent(chat, id); err != nil {
@@ -605,7 +610,7 @@ func (c *Core) HideMsg(chat, id []byte) error {
 	return nil
 }
 
-// UnhideAll przywraca wszystko, co schowaliśmy w danym czacie.
+// UnhideAll restores all hidden items in the given chat.
 func (c *Core) UnhideAll(chat []byte) error {
 	if err := c.St.ShowAllHidden(chat); err != nil {
 		return err
@@ -616,14 +621,14 @@ func (c *Core) UnhideAll(chat []byte) error {
 
 func (c *Core) HiddenCount(chat []byte) int { return len(c.St.Hidden(chat)) }
 
-// ---- własny profil ----
+// ---- local profile ----
 
-// nickKey: nazwa wyświetlana żyje w bazie, nie w pliku tożsamości — ten drugi
-// jest zaszyfrowany hasłem, którego po odblokowaniu już nie trzymamy.
+// nickKey: display name lives in database, not in identity file — identity
+// is passphrase-encrypted and passphrase is not retained after unlock.
 const nickKey = "nick"
 
-// SetNick zmienia naszą nazwę wyświetlaną i ogłasza ją w każdym czacie, więc
-// widzą ją też ci, którzy dołączą później albo są teraz offline.
+// SetNick updates display name and announces it in every chat, so
+// peers joining later or currently offline receive it too.
 func (c *Core) SetNick(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -651,12 +656,12 @@ func (c *Core) SetNick(name string) error {
 	return lastErr
 }
 
-// announceProfile dopisuje nasz awatar i nazwę do czatów, w których wpis
-// członka ich jeszcze nie ma. Bez tego profil ustawiony PRZED dołączeniem do
-// czatu nigdy by tam nie dotarł (ogłoszenie leci tylko do czatów istniejących
-// w chwili zmiany). Porównanie ze złożonym stanem czyni to idempotentnym, więc
-// można wołać w pętli — i tak robimy, bo świeżo dołączony czat może jeszcze nie
-// mieć klucza epoki i pierwsza próba się nie udaje.
+// announceProfile appends avatar and name to chats where member entry
+// does not have them yet. Without this, profile set BEFORE joining a
+// chat would never reach it (announcements are sent only to existing chats
+// at the moment of change). Comparison with folded state keeps this idempotent,
+// so it can be called in loops — which we do, as a newly joined chat might
+// not have epoch key yet and first attempt fails.
 func (c *Core) announceProfile() {
 	av, haveAv := c.St.Avatar(c.ID.Pub)
 	nick := string(c.St.Meta(nickKey))
@@ -699,8 +704,8 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 	if !ok {
 		return nil, fmt.Errorf("brak klucza epoki %d", st.Epoch)
 	}
-	// heads i lamport z jednego odczytu: Fold wymaga Lamport = max(rodzice)+1,
-	// więc te dwie wartości muszą pochodzić z tej samej migawki
+	// heads and lamport from single read: Fold requires Lamport = max(parents)+1,
+	// so these two values must come from the same snapshot
 	heads := c.St.Heads(chat)
 	e, err := event.New(c.ID.Priv, chat, kind, body, c.St.LamportAfter(chat, heads), heads, st.Epoch, key)
 	if err != nil {
@@ -738,7 +743,7 @@ func (c *Core) CreateChat(name string) ([]byte, error) {
 		return nil, err
 	}
 	c.invalidate(chat)
-	c.announceProfile() // awatar i nazwa od razu, nie po najbliższym cyklu
+	c.announceProfile() // avatar and name immediately, without waiting for next loop
 	c.Notify()
 	return chat, nil
 }
@@ -780,8 +785,8 @@ func (c *Core) Rename(chat []byte, name string) error {
 }
 
 // Kick removes a member (owner only, enforced by Fold) and rotates the key.
-// Usunięcie kaskaduje na wpuszczonych przez niego (event.Fold), a otwarte
-// łącze zrywamy od razu — inaczej wyrzucony dalej rozmawia z naszymi handlerami.
+// Removal cascades to invited members (event.Fold), and active connection is dropped
+// immediately — otherwise kicked member continues communicating with handlers.
 func (c *Core) Kick(chat []byte, pub []byte) error {
 	if _, err := c.appendEvent(chat, event.KindRemove, event.Body{Pub: pub, TS: time.Now().Unix()}); err != nil {
 		return err
@@ -791,8 +796,8 @@ func (c *Core) Kick(chat []byte, pub []byte) error {
 	return err
 }
 
-// dropUnauthorized zamyka łącza do peerów, z którymi nie chcemy już rozmawiać
-// (ta sama reguła, co przy wpuszczaniu — acceptPeer).
+// dropUnauthorized closes connections to peers we no longer accept
+// (same rule as inbound — acceptPeer).
 func (c *Core) dropUnauthorized() {
 	for _, p := range c.P2P.Peers() {
 		if !c.acceptPeer(p.Pub) {
@@ -916,4 +921,17 @@ func (c *Core) onPeerDown(pub []byte) {
 	}
 	c.mu.Unlock()
 	c.Notify()
+}
+
+func (c *Core) SetLang(lang string) error {
+	l := i18n.SetLang(lang)
+	if err := c.St.PutMeta(langKey, []byte(l)); err != nil {
+		return err
+	}
+	c.Notify()
+	return nil
+}
+
+func (c *Core) Lang() string {
+	return i18n.Lang()
 }

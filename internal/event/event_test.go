@@ -57,8 +57,8 @@ func TestDAGFoldAndAuth(t *testing.T) {
 	}
 }
 
-// Porządek foldu musi wynikać z DAG-u, usunięcie musi kaskadować, a zły klucz
-// epoki nie może wywracać całego czatu.
+// Fold order must derive from DAG, removal must cascade, and bad epoch key
+// must not break entire chat.
 func TestFoldOrderingAndRemoval(t *testing.T) {
 	_, owner, _ := ed25519.GenerateKey(nil)
 	malPub, mallory, _ := ed25519.GenerateKey(nil)
@@ -71,17 +71,17 @@ func TestFoldOrderingAndRemoval(t *testing.T) {
 	add, _ := New(owner, chatID, KindAdd, Body{Pub: malPub, Name: "mallory"}, 2, [][]byte{chatID}, 1, key)
 	rm, _ := New(owner, chatID, KindRemove, Body{Pub: malPub}, 3, [][]byte{add.ID()}, 1, key)
 
-	// antydatowanie: "add" z lamportem sprzed usunięcia nie może wejść w stan
+	// backdating: "add" with lamport prior to removal cannot enter state
 	backdated, _ := New(mallory, chatID, KindAdd, Body{Pub: sockPub}, 3, [][]byte{add.ID()}, 1, key)
 	if st, err := Fold([]*Event{gen, add, rm, backdated}, chatID, keys); err == nil && st.IsMember(sockPub) {
-		t.Fatal("antydatowany add wpuścił usuniętego z powrotem")
+		t.Fatal("backdated add admitted removed member back in")
 	}
-	// lamport musi być max(rodzice)+1 — inaczej 2^64-1 przewija licznik i blokuje dopisywanie
+	// lamport must be max(parents)+1 — otherwise 2^64-1 rolls counter and blocks appending
 	if _, err := Fold([]*Event{gen, mustNew(t, owner, chatID, KindMsg, Body{Text: "x"}, ^uint64(0), [][]byte{chatID}, key)},
 		chatID, keys); err == nil {
-		t.Fatal("zdarzenie z dowolnym lamportem weszło do DAG-u")
+		t.Fatal("event with arbitrary lamport entered DAG")
 	}
-	// usunięcie kaskaduje na tych, których usuwany wpuścił
+	// removal cascades to those introduced by removed member
 	sock, _ := New(mallory, chatID, KindAdd, Body{Pub: sockPub, Name: "sock"}, 3, [][]byte{add.ID()}, 1, key)
 	rm2, _ := New(owner, chatID, KindRemove, Body{Pub: malPub}, 4, [][]byte{sock.ID()}, 1, key)
 	st, err := Fold([]*Event{gen, add, sock, rm2}, chatID, keys)
@@ -89,16 +89,16 @@ func TestFoldOrderingAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if st.IsMember(malPub) || st.IsMember(sockPub) {
-		t.Fatalf("kick nie kaskaduje: mallory=%v sock=%v", st.IsMember(malPub), st.IsMember(sockPub))
+		t.Fatalf("kick does not cascade: mallory=%v sock=%v", st.IsMember(malPub), st.IsMember(sockPub))
 	}
-	// podrzucony klucz epoki: treść pomijamy, czat ma działać dalej
+	// bad epoch key: skip content, chat remains operational
 	if _, err := Fold([]*Event{gen, add}, chatID, map[uint32][]byte{1: key, 7: crypt.NewKey()}); err != nil {
-		t.Fatalf("zły klucz epoki zabił fold: %v", err)
+		t.Fatalf("bad epoch key killed fold: %v", err)
 	}
-	// drugi "create" nie przejmuje własności czatu
+	// second "create" does not take ownership of chat
 	takeover, _ := New(mallory, chatID, KindCreate, Body{Name: "moje", Text: "m"}, 3, [][]byte{add.ID()}, 1, key)
 	if st, err := Fold([]*Event{gen, add, takeover}, chatID, keys); err == nil && !bytes.Equal(st.Owner, gen.Author) {
-		t.Fatal("drugi genesis przejął własność")
+		t.Fatal("second genesis took ownership")
 	}
 }
 
@@ -131,9 +131,9 @@ func TestReactAndDeleteEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if st.Reactions[string(msgID)][string(alicePub)] != "👍" {
-		t.Fatalf("brak reakcji w stanie: %v", st.Reactions)
+		t.Fatalf("missing reaction in state: %v", st.Reactions)
 	}
 	if !st.Deleted[string(msgID)] {
-		t.Fatalf("brak oznaczenia usunięcia w stanie: %v", st.Deleted)
+		t.Fatalf("missing deletion flag in state: %v", st.Deleted)
 	}
 }
