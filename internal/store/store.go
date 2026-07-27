@@ -30,7 +30,7 @@ var (
 	bFriends = []byte("friends") // pub -> enc(json Friend)
 	bInvites = []byte("invites") // sha256(secret) -> enc(json Invite)
 	bBlobs   = []byte("blobs")   // sha256(plaintext) -> enc(bytes) — attachment content
-	bAvatars = []byte("avatars") // pub -> enc(json AvatarMeta) — handy avatar index
+	bAvatars = []byte("avatars") // pub -> enc(json ProfileMeta) — handy profile index
 	bHidden  = []byte("hidden")  // nested: chatID -> (eventID -> nil) — hidden locally
 	bMeta    = []byte("meta")    // key -> enc(value): own nick etc.
 )
@@ -569,19 +569,28 @@ func (s *Store) HasBlob(hash []byte) bool {
 
 // ---- avatars ----
 
-// AvatarMeta points to avatar image blob and its mime type (image/png or image/gif).
-type AvatarMeta struct {
-	Blob []byte `json:"blob"`
-	Mime string `json:"mime"`
+// ProfileMeta: someone's profile card — avatar blob with its mime type
+// (image/png or image/gif), status line, description and banner blob.
+type ProfileMeta struct {
+	Blob       []byte `json:"blob"`
+	Mime       string `json:"mime"`
+	Status     string `json:"status,omitempty"`
+	Bio        string `json:"bio,omitempty"`
+	Banner     []byte `json:"banner,omitempty"`
+	BannerMime string `json:"bmime,omitempty"`
 }
 
-// PutAvatar stores avatar for given public key. Real source
+func (p ProfileMeta) empty() bool {
+	return len(p.Blob) == 0 && len(p.Banner) == 0 && p.Status == "" && p.Bio == ""
+}
+
+// PutProfile stores the profile card for given public key. Real source
 // of truth is signed events in chats — this is an index so friend list
-// doesn't have to traverse entire DAG. Empty Blob deletes entry.
-func (s *Store) PutAvatar(pub []byte, a AvatarMeta) error {
+// doesn't have to traverse entire DAG. An empty card deletes the entry.
+func (s *Store) PutProfile(pub []byte, a ProfileMeta) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bAvatars)
-		if len(a.Blob) == 0 {
+		if a.empty() {
 			return b.Delete(pub)
 		}
 		j, _ := json.Marshal(a)
@@ -589,8 +598,8 @@ func (s *Store) PutAvatar(pub []byte, a AvatarMeta) error {
 	})
 }
 
-func (s *Store) Avatar(pub []byte) (AvatarMeta, bool) {
-	var a AvatarMeta
+func (s *Store) Profile(pub []byte) (ProfileMeta, bool) {
+	var a ProfileMeta
 	ok := false
 	s.db.View(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bAvatars).Get(pub)
@@ -601,7 +610,7 @@ func (s *Store) Avatar(pub []byte) (AvatarMeta, bool) {
 		if err != nil {
 			return nil
 		}
-		ok = json.Unmarshal(pt, &a) == nil && len(a.Blob) > 0
+		ok = json.Unmarshal(pt, &a) == nil && !a.empty()
 		return nil
 	})
 	return a, ok
@@ -613,6 +622,7 @@ func (s *Store) Avatar(pub []byte) (AvatarMeta, bool) {
 var quietKinds = [][]byte{
 	[]byte(`"kind":"` + event.KindAvatar + `"`),
 	[]byte(`"kind":"` + event.KindNick + `"`),
+	[]byte(`"kind":"` + event.KindProfile + `"`),
 }
 
 func quietWire(v []byte) bool {

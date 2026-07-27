@@ -20,6 +20,7 @@ import (
 
 	"szept/internal/attach"
 	"szept/internal/core"
+	"szept/internal/event"
 	"szept/internal/identity"
 )
 
@@ -226,9 +227,107 @@ func (u *ui) buildConv() {
 	bar := container.NewStack(canvas.NewRectangle(cDeep),
 		container.NewVBox(container.NewPadded(head), line))
 
+	var members fyne.CanvasObject
+	if !u.mobile {
+		members = u.buildMemberPane()
+	}
 	u.convBottom = container.NewVBox(u.hintBox, u.banner, composer)
-	u.convRoot = container.NewBorder(bar, u.convBottom, nil, nil,
+	u.convRoot = container.NewBorder(bar, u.convBottom, nil, members,
 		container.NewStack(canvas.NewRectangle(cBg), u.msgScr))
+}
+
+// ---- member column ----
+
+// buildMemberPane: fixed-width column on the right of the conversation —
+// who belongs to the chat and who is around right now. Mobile keeps
+// membersPage instead: a phone screen has no width to give away.
+func (u *ui) buildMemberPane() fyne.CanvasObject {
+	u.memberBox = container.NewVBox()
+	u.memberHead = newClipText("", fs(11), cMuted).bold()
+	line := canvas.NewRectangle(cSep)
+	line.SetMinSize(fyne.NewSize(1, 1))
+	body := container.NewBorder(container.NewPadded(u.memberHead), nil, line, nil,
+		vscroll(u.memberBox))
+	// hspace pins the column width: Stack takes the widest child's MinSize,
+	// and clipText shrinks to a single letter on its own (scroll.go).
+	return container.NewStack(canvas.NewRectangle(cDeep), hspace(196), body)
+}
+
+// renderMembers: online first, offline below. Signature guard, because refresh()
+// runs on every event burst and each row decodes an avatar.
+func (u *ui) renderMembers(ch *core.ChatInfo) {
+	if u.memberBox == nil {
+		return
+	}
+	call := u.c.CallState(ch.ID)
+	type row struct {
+		m    event.Member
+		call bool
+	}
+	var on, off []row
+	var sig strings.Builder
+	fmt.Fprintf(&sig, "%x;", ch.ID) // two chats can hold the same pair of people
+	for _, m := range ch.Members {
+		me := bytes.Equal(m.Pub, u.c.ID.Pub)
+		r := row{m: m}
+		if call != nil {
+			r.call = call.Members[string(m.Pub)] || (me && call.Joined)
+		}
+		live := me || u.c.Online(m.Pub)
+		if live {
+			on = append(on, r)
+		} else {
+			off = append(off, r)
+		}
+		status, _ := u.c.StatusOf(m.Pub)
+		fmt.Fprintf(&sig, "%x/%s/%s/%t%t;", m.Pub, m.Name, status, live, r.call)
+	}
+	if sig.String() == u.memSig {
+		return
+	}
+	u.memSig = sig.String()
+
+	u.memberHead.setText(fmt.Sprintf("CZŁONKOWIE — %d", len(ch.Members)))
+	u.memberBox.RemoveAll()
+	for _, grp := range []struct {
+		title string
+		rows  []row
+	}{{"ONLINE", on}, {"OFFLINE", off}} {
+		if len(grp.rows) == 0 {
+			continue
+		}
+		u.memberBox.Add(section(fmt.Sprintf("%s — %d", grp.title, len(grp.rows))))
+		for _, r := range grp.rows {
+			u.memberBox.Add(u.memberRow(r.m, ch, grp.title == "ONLINE", r.call))
+		}
+	}
+	u.memberBox.Refresh()
+}
+
+// memberRow: compact entry in the column — dot, avatar, name and, underneath,
+// founder tag or call status. Tap opens the same profile as the members page.
+func (u *ui) memberRow(m event.Member, ch *core.ChatInfo, live, inCall bool) fyne.CanvasObject {
+	dot := canvas.NewText("●", cMuted)
+	dot.TextSize = fs(9)
+	if live {
+		dot.Color = cGreen
+	}
+	sub, _ := u.c.StatusOf(m.Pub)
+	if sub == "" && bytes.Equal(m.Pub, ch.Owner) {
+		sub = "założyciel"
+	}
+	if inCall {
+		sub = "🎧 w rozmowie"
+	}
+	row := container.NewBorder(nil, nil,
+		container.NewHBox(container.NewCenter(dot), hspace(4),
+			container.NewCenter(u.avatarView(m.Pub, m.Name, avatarSmall)), hspace(6)),
+		nil, vcenter(twoLine(m.Name, sub, 13, 10)))
+	kick := bytes.Equal(ch.Owner, u.c.ID.Pub) && !bytes.Equal(m.Pub, u.c.ID.Pub)
+	pub, name := bytes.Clone(m.Pub), m.Name
+	return tappable(container.NewPadded(row), func() {
+		u.profilePage(pub, name, kick, ch)
+	}, nil)
 }
 
 // buildCallControls: the call panel — green connection status with chat name

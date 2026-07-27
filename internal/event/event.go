@@ -31,12 +31,17 @@ const (
 	KindNick   = "nick"   // {Name} author renames themselves in this chat
 	KindReact  = "react"  // {Target, Text=emoji} reaction to an event
 	KindDelete = "delete" // {Target} deletes/revokes an event
+	// KindProfile: {Text=status, Bio, Blob/Mime=banner} author's own profile card.
+	// Empty field clears it; all three travel together, so one event carries
+	// the whole card.
+	KindProfile = "profile"
 )
 
 // QuietKinds: profile and modifying events. Not separate conversation items —
 // we don't render them as separate lines and they don't increment unread badges.
 func QuietKind(kind string) bool {
-	return kind == KindAvatar || kind == KindNick || kind == KindReact || kind == KindDelete
+	return kind == KindAvatar || kind == KindNick || kind == KindReact ||
+		kind == KindDelete || kind == KindProfile
 }
 
 type Event struct {
@@ -56,6 +61,7 @@ type Body struct {
 	Pub    []byte `json:"pub,omitempty"`
 	TS     int64  `json:"ts,omitempty"`     // author's clock, display only (inside AEAD)
 	Target []byte `json:"target,omitempty"` // ID of target event (KindReact / KindDelete)
+	Bio    string `json:"bio,omitempty"`    // KindProfile: description under the name
 
 	// attachments (KindFile / KindAvatar): only the sha256 of the content
 	// travels in the DAG; the bytes are fetched on demand from peers.
@@ -166,6 +172,10 @@ type Member struct {
 	AddedBy    []byte // who added this member (nil for genesis owner) — removal cascades
 	Avatar     []byte // sha256 of the avatar blob ("" = default initials)
 	AvatarMime string
+	Status     string // short "what am I up to" line
+	Bio        string // longer description shown on the profile
+	Banner     []byte // sha256 of the profile banner blob
+	BannerMime string
 }
 
 type State struct {
@@ -250,7 +260,8 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 		if !ok {
 			// Can't decrypt: tolerate only content kinds; membership must be readable.
 			switch e.Kind {
-			case KindMsg, KindRename, KindFile, KindAvatar, KindNick, KindReact, KindDelete:
+			case KindMsg, KindRename, KindFile, KindAvatar, KindNick, KindReact,
+				KindDelete, KindProfile:
 				continue
 			}
 			return nil, fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
@@ -298,6 +309,12 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 			// only your own avatar, and only while you are a member
 			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
 				m.Avatar, m.AvatarMime = body.Blob, body.Mime
+			}
+		case KindProfile:
+			// status, description and banner — your own card, nobody else's
+			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
+				m.Status, m.Bio = body.Text, body.Bio
+				m.Banner, m.BannerMime = body.Blob, body.Mime
 			}
 		case KindNick:
 			// your own display name, nobody else's

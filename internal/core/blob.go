@@ -178,7 +178,9 @@ func (c *Core) SetAvatarPath(path string) error {
 func (c *Core) ClearAvatar() error { return c.announceAvatar(nil, "") }
 
 func (c *Core) announceAvatar(hash []byte, mime string) error {
-	if err := c.St.PutAvatar(c.ID.Pub, store.AvatarMeta{Blob: hash, Mime: mime}); err != nil {
+	card, _ := c.St.Profile(c.ID.Pub)
+	card.Blob, card.Mime = hash, mime
+	if err := c.St.PutProfile(c.ID.Pub, card); err != nil {
 		return err
 	}
 	// one event per chat — avatar is part of signed history, visible
@@ -202,7 +204,7 @@ func (c *Core) announceAvatar(hash []byte, mime string) error {
 // AvatarOf returns avatar bytes, mime type and content hash; nil if not yet available.
 // Hash serves as UI cache key — image update changes hash.
 func (c *Core) AvatarOf(pub []byte) (data []byte, mime string, hash []byte) {
-	a, ok := c.St.Avatar(pub)
+	a, ok := c.St.Profile(pub)
 	if !ok {
 		return nil, "", nil
 	}
@@ -213,7 +215,107 @@ func (c *Core) AvatarOf(pub []byte) (data []byte, mime string, hash []byte) {
 	return data, a.Mime, a.Blob
 }
 
+// ---- profile card: status, description, banner ----
+
+// MaxStatus / MaxBio: ceilings on network-provided profile text.
+const (
+	MaxStatus = MaxName
+	MaxBio    = 400
+)
+
+// SetStatus sets the short line under the name ("" clears it).
+func (c *Core) SetStatus(text string) error {
+	text = safeName(strings.TrimSpace(text))
+	if len(text) > MaxStatus {
+		return fmt.Errorf("status może mieć najwyżej %d znaków", MaxStatus)
+	}
+	return c.editCard(func(p *store.ProfileMeta) { p.Status = text })
+}
+
+// SetBio sets the longer description on the profile ("" clears it).
+func (c *Core) SetBio(text string) error {
+	text = safeBio(strings.TrimSpace(text))
+	if len(text) > MaxBio {
+		return fmt.Errorf("opis może mieć najwyżej %d znaków", MaxBio)
+	}
+	return c.editCard(func(p *store.ProfileMeta) { p.Bio = text })
+}
+
+// SetBanner normalizes the wide image, stores it and announces it.
+func (c *Core) SetBanner(data []byte) error {
+	out, mime, err := attach.Banner(data)
+	if err != nil {
+		return err
+	}
+	hash, err := c.St.PutBlob(out)
+	if err != nil {
+		return err
+	}
+	return c.editCard(func(p *store.ProfileMeta) { p.Banner, p.BannerMime = hash, mime })
+}
+
+// ClearBanner removes the banner (locally and for peers).
+func (c *Core) ClearBanner() error {
+	return c.editCard(func(p *store.ProfileMeta) { p.Banner, p.BannerMime = nil, "" })
+}
+
+// editCard: mutate own card in the index, then announce the whole card.
+// One event kind carries status, description and banner together, so a peer
+// missing earlier events still ends up with a consistent profile.
+func (c *Core) editCard(f func(*store.ProfileMeta)) error {
+	card, _ := c.St.Profile(c.ID.Pub)
+	f(&card)
+	if err := c.St.PutProfile(c.ID.Pub, card); err != nil {
+		return err
+	}
+	var lastErr error
+	for idStr := range c.chatIDs() {
+		chat := []byte(idStr)
+		if st, err := c.ChatState(chat); err != nil || !st.IsMember(c.ID.Pub) {
+			continue
+		}
+		if _, err := c.appendEvent(chat, event.KindProfile, cardBody(card)); err != nil {
+			lastErr = err
+		}
+	}
+	c.Notify()
+	return lastErr
+}
+
+func cardBody(card store.ProfileMeta) event.Body {
+	return event.Body{Text: card.Status, Bio: card.Bio,
+		Blob: card.Banner, Mime: card.BannerMime, TS: time.Now().Unix()}
+}
+
+// StatusOf returns someone's status line and description (empty when unknown).
+func (c *Core) StatusOf(pub []byte) (status, bio string) {
+	card, ok := c.St.Profile(pub)
+	if !ok {
+		return "", ""
+	}
+	return card.Status, card.Bio
+}
+
+// BannerOf returns banner bytes, mime type and content hash (nil when absent
+// or not downloaded yet).
+func (c *Core) BannerOf(pub []byte) (data []byte, mime string, hash []byte) {
+	card, ok := c.St.Profile(pub)
+	if !ok {
+		return nil, "", nil
+	}
+	data, ok = c.St.GetBlob(card.Banner)
+	if !ok {
+		return nil, "", nil
+	}
+	return data, card.BannerMime, card.Banner
+}
+
 // ---- want registry ----
+
+// blobKind: event kinds whose body points at bytes we may need to fetch.
+func blobKind(kind string) bool {
+	return kind == event.KindFile || kind == event.KindAvatar || kind == event.KindProfile
+}
 
 // noteAttachment: after ingesting attachment event we decrypt it to
 // read content hash and queue missing bytes.
@@ -230,9 +332,17 @@ func (c *Core) noteAttachment(chat []byte, e *event.Event) {
 	if err != nil {
 		return
 	}
-	if e.Kind == event.KindAvatar {
-		// avatar index: friend list does not need to traverse DAG
-		c.St.PutAvatar(e.Author, store.AvatarMeta{Blob: b.Blob, Mime: b.Mime})
+	// profile index: friend list and member column do not need to traverse DAG.
+	// Text arrives from the network, so it is cleansed here, once, before storage.
+	if e.Kind == event.KindAvatar || e.Kind == event.KindProfile {
+		card, _ := c.St.Profile(e.Author)
+		if e.Kind == event.KindAvatar {
+			card.Blob, card.Mime = b.Blob, b.Mime
+		} else {
+			card.Status, card.Bio = safeName(b.Text), safeBio(b.Bio)
+			card.Banner, card.BannerMime = b.Blob, b.Mime
+		}
+		c.St.PutProfile(e.Author, card)
 	}
 	// large file: download thumbnail only, full bytes on explicit request
 	if len(b.Prev) == sha256.Size {
@@ -358,7 +468,7 @@ func (c *Core) rescanAttachments() {
 		}
 		event.SortCanonical(evs) // latest avatar wins
 		for _, e := range evs {
-			if e.Kind == event.KindFile || e.Kind == event.KindAvatar {
+			if blobKind(e.Kind) {
 				c.noteAttachment(chat, e)
 			}
 		}

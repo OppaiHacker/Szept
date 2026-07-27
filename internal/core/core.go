@@ -383,6 +383,15 @@ func safeName(s string) string {
 	return s
 }
 
+// safeBio: multi-line profile description — newlines survive, length capped.
+func safeBio(s string) string {
+	s = safeText(s)
+	if len(s) > MaxBio {
+		s = strings.ToValidUTF8(s[:MaxBio], "")
+	}
+	return s
+}
+
 // displayName: direct 2-person unnamed chat shows the other side's name.
 func (c *Core) displayName(st *event.State) string {
 	if st.Name != "" {
@@ -485,11 +494,11 @@ type Msg struct {
 	Name      string
 	Text      string
 	TS        time.Time
-	Kind      string // msg | info | file
-	Info      string // for Kind == "info": event.Kind* — client selects icon and color
-	Deleted   bool   // deleted for everyone in DAG
+	Kind      string            // msg | info | file
+	Info      string            // for Kind == "info": event.Kind* — client selects icon and color
+	Deleted   bool              // deleted for everyone in DAG
 	Reactions map[string]string // pubKeyStr -> emoji
-	ACK       string // "" | "delivered" | "read"
+	ACK       string            // "" | "delivered" | "read"
 
 	// for Kind == "file" only
 	Blob []byte // sha256 content hash
@@ -745,7 +754,7 @@ func (c *Core) SetNick(name string) error {
 // so it can be called in loops — which we do, as a newly joined chat might
 // not have epoch key yet and first attempt fails.
 func (c *Core) announceProfile() {
-	av, haveAv := c.St.Avatar(c.ID.Pub)
+	av, haveAv := c.St.Profile(c.ID.Pub)
 	nick := string(c.St.Meta(nickKey))
 	if !haveAv && nick == "" {
 		return
@@ -760,9 +769,12 @@ func (c *Core) announceProfile() {
 		if me == nil || me.Removed {
 			continue
 		}
-		if haveAv && !bytes.Equal(me.Avatar, av.Blob) {
+		if haveAv && len(av.Blob) > 0 && !bytes.Equal(me.Avatar, av.Blob) {
 			c.appendEvent(chat, event.KindAvatar,
 				event.Body{Blob: av.Blob, Mime: av.Mime, TS: time.Now().Unix()})
+		}
+		if me.Status != av.Status || me.Bio != av.Bio || !bytes.Equal(me.Banner, av.Banner) {
+			c.appendEvent(chat, event.KindProfile, cardBody(av))
 		}
 		if nick != "" && me.Name != nick {
 			c.appendEvent(chat, event.KindNick,
