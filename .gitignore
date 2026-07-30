@@ -2,6 +2,7 @@
 bin/
 /szept
 /szept-gui
+/szept-wails
 /szept-connector
 *.exe
 *.apk
