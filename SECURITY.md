@@ -100,6 +100,9 @@ Settings keeps a **saved list of connector URLs** to switch between, and optiona
 | Accepted lines | Only those starting `ws://` or `wss://`; everything else dropped |
 | Effect of a refresh | New URLs are **appended to your saved list — never connected automatically** |
 
+![Settings — connector and lists](assets/shots/settings-connectors.png)
+*Saved addresses and list endpoints are both empty by default; a refresh only appends URLs to the saved list.*
+
 What a list host learns: your IP and the fact that a Szept client asked, exactly like any web request. What it can do: offer connectors it controls, which — if you then pick one — puts it in the same position as any connector (`pubkey ↔ IP` and who signals whom). What it cannot do: read messages, keys, membership, or impersonate anybody. Use lists you'd trust with your IP, or don't use them at all — the feature is opt-in and empty by default.
 
 ### What the connector sees (honestly)
@@ -178,6 +181,9 @@ Without the cascade, an attacker adds a second identity before being kicked — 
 
 ![Szept Security — Profile Card Flow](assets/profile_card_flow.svg)
 
+![Profile card as a peer sees it](assets/shots/profile-card.png)
+*Status, description and banner as they arrive at a peer — one signed `profile` event, encrypted under the chat's epoch key.*
+
 A profile card is a `profile` event: status line, description and banner travel **together**, so a peer who missed an earlier event still ends up with a consistent card instead of a half-updated one. An empty field clears that field.
 
 | Guard | Value |
@@ -248,6 +254,9 @@ POST /send   Authorization: Bearer <token>   {"chat": "...", "text": "..."}
 | Headers | `ReadHeaderTimeout` 5 s |
 | Lifecycle | Stopped on `Core.Close()` and before an account switch, so the port is free for the next process |
 
+![Settings — bots](assets/shots/settings-bots.png)
+*The whole local surface: one toggle, one port on `127.0.0.1`, one bearer token. "New token" invalidates the old one immediately.*
+
 **What this genuinely means:** any process on your computer that can read `config.json` can send messages that are signed by your key and indistinguishable from ones you typed. That is the intended feature (that's how you write a bot), and it is also its whole risk. Leave it off unless you use it; "New token" invalidates the old one immediately.
 
 ### Files
@@ -267,6 +276,9 @@ POST /send   Authorization: Bearer <token>   {"chat": "...", "text": "..."}
 ![Szept Security — Accounts and Backups](assets/accounts_backup.svg)
 
 ### Accounts (profiles)
+
+![Settings — accounts](assets/shots/settings-accounts.png)
+*Each account is its own directory with its own identity and database; the page also shows the active data directory, including when `-data` overrides the choice.*
 
 - An account is a directory. Separate identity, separate database, separate contacts and history — nothing is shared between them.
 - The active account is recorded in `config.json`; the unlock screen and Settings → Accounts both switch it.
@@ -300,6 +312,9 @@ The **entire database is encrypted** — not just message bodies. Event envelope
 Only **record keys are plaintext**: event IDs (hashes), blob content-addresses, friend pubkeys — all hashes themselves.
 
 Every value is **bound to its storage location** (bucket + key as AEAD associated data) — you can't rearrange encrypted records, e.g. swap a blob under a different hash or move an epoch key to another chat.
+
+![Settings — passphrase and backup](assets/shots/settings-pass.png)
+*The passphrase is the only thing standing between a copied `identity.key` and the whole database — the backup zip inherits exactly that protection.*
 
 > ⚠️ **A password is optional, but without one there is no encryption at rest.**
 > An unprotected `identity.key` can be read by anyone with file access. The storage key derives from its seed — meaning the entire database becomes readable.

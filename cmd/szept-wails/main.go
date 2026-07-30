@@ -1,0 +1,97 @@
+// szept-wails: desktop client rendered by a webview (Wails v3) instead of Fyne.
+//
+// The whole UI lives in frontend/ as plain HTML/CSS/JS — no bundler, no npm.
+// Go keeps doing what it did before: it owns core and exposes it through the
+// App service (api.go) plus a few HTTP routes for bytes too big for the
+// JSON bridge (media.go).
+package main
+
+import (
+	_ "embed"
+	"embed"
+	"flag"
+	"log"
+	"log/slog"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
+
+	"szept/internal/boot"
+	"szept/internal/core"
+)
+
+//go:embed all:frontend
+var assets embed.FS
+
+//go:embed Icon.png
+var iconPNG []byte
+
+func main() {
+	dataFlag := flag.String("data", "", "data directory")
+	connFlag := flag.String("connector", "", "connector address")
+	devtools := flag.Bool("devtools", false, "open the webview inspector")
+	flag.Parse()
+
+	cfgFile, dataDir := boot.Dirs()
+	if *dataFlag != "" {
+		dataDir = *dataFlag
+	}
+	cfg, _ := boot.LoadConfig(cfgFile)
+	if cfg == nil {
+		cfg = &core.Config{}
+	}
+	if *connFlag != "" {
+		cfg.Connector = *connFlag
+	}
+	cfg.DataDir = dataDir
+
+	api := newApp(cfg, cfgFile, dataDir, *dataFlag != "")
+	notifier := notifications.New()
+	api.notify = notifier
+
+	app := application.New(application.Options{
+		Name:        "szept",
+		Description: "szyfrowany komunikator P2P",
+		Icon:        iconPNG,
+		LogLevel:    slog.LevelWarn,
+		Services: []application.Service{
+			application.NewService(api),
+			application.NewService(notifier),
+		},
+		Assets: application.AssetOptions{
+			Handler:        application.BundledAssetFileServer(assets),
+			Middleware:     api.routes,
+			DisableLogging: true,
+		},
+		OnShutdown: api.shutdown,
+	})
+	api.app = app
+
+	// Frameless: the title bar is drawn in HTML (see .titlebar) so the window
+	// chrome matches the app instead of the desktop theme.
+	win := app.Window.NewWithOptions(application.WebviewWindowOptions{
+		Title:            "szept",
+		Width:            1180,
+		Height:           760,
+		MinWidth:         420,
+		MinHeight:        520,
+		Frameless:        true,
+		URL:              "/",
+		BackgroundColour: application.NewRGB(15, 16, 20),
+		DevToolsEnabled:  *devtools,
+		Linux: application.LinuxWindow{
+			Icon:             iconPNG,
+			WebviewGpuPolicy: application.WebviewGpuPolicyOnDemand,
+		},
+	})
+	api.win = win
+
+	// The frontend asks for its first snapshot once the DOM is up; nothing to
+	// do here beyond making sure a late-arriving core still repaints.
+	win.RegisterHook(events.Common.WindowDidResize, func(*application.WindowEvent) {})
+
+	if err := app.Run(); err != nil {
+		log.Fatal(err)
+	}
+}

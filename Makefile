@@ -6,12 +6,20 @@ FYNE ?= $(HOME)/go/bin/fyne
 PREFIX ?= $(HOME)/.local
 APPID  := chat.szept
 
+# Wails v3 targets GTK4 + webkitgtk-6.0. Distros still shipping only GTK3 +
+# webkit2gtk-4.1 need the gtk3 build tag, and without it every `go build ./...`
+# in the module fails at pkg-config — hence the probe rather than a fixed value.
+#   Arch:   sudo pacman -S webkit2gtk-4.1     (GTK3)  |  webkitgtk-6.0 (GTK4)
+#   Debian: libwebkit2gtk-4.1-dev             (GTK3)  |  libwebkitgtk-6.0-dev
+WAILS_TAGS ?= $(shell pkg-config --exists webkitgtk-6.0 2>/dev/null || echo gtk3)
+GOTAGS := $(if $(WAILS_TAGS),-tags $(WAILS_TAGS),)
+
 # Binaries are intentionally .PHONY: rules have no source file lists, so without this `make`
 # after code edits does nothing and leaves the old binary. `go build` caches anyway.
 .PHONY: all test clean linux windows connector-windows android install uninstall \
-	$(BIN)/szept-connector $(BIN)/szept $(BIN)/szept-gui
+	$(BIN)/szept-connector $(BIN)/szept $(BIN)/szept-gui $(BIN)/szept-wails
 
-all: $(BIN)/szept-connector $(BIN)/szept $(BIN)/szept-gui
+all: $(BIN)/szept-connector $(BIN)/szept $(BIN)/szept-wails $(BIN)/szept-gui
 
 $(BIN)/szept-connector:
 	go build -o $@ ./cmd/connector
@@ -19,10 +27,12 @@ $(BIN)/szept:
 	go build -o $@ ./cmd/szept
 $(BIN)/szept-gui:
 	go build -o $@ ./cmd/szept-gui
+$(BIN)/szept-wails:
+	go build $(GOTAGS) -o $@ ./cmd/szept-wails
 
 test:
-	go vet ./...
-	go test ./... -timeout 180s
+	go vet $(GOTAGS) ./...
+	go test $(GOTAGS) ./... -timeout 180s
 
 # Connector is pure Go — cross-compilation with no dependencies:
 connector-windows:
@@ -30,11 +40,15 @@ connector-windows:
 
 # Clients use cgo (audio/GUI) — mingw-w64 is required:
 #   Arch: sudo pacman -S mingw-w64-gcc
+# The wails client renders through WebView2, which ships with Windows 11 and is
+# a small runtime install on 10 — no GTK/webkit story there.
 windows:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
 		go build -ldflags -H=windowsgui -o $(BIN)/szept.exe ./cmd/szept
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
 		go build -ldflags -H=windowsgui -o $(BIN)/szept-gui.exe ./cmd/szept-gui
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+		go build -ldflags -H=windowsgui -o $(BIN)/szept-wails.exe ./cmd/szept-wails
 
 # APK: requires Android SDK+NDK and fyne tool (go install fyne.io/tools/cmd/fyne@latest).
 # Permissions/manifest: cmd/szept-gui/AndroidManifest.xml
@@ -56,11 +70,12 @@ android:
 
 # Installation to app menu (without root, XDG user dirs).
 # Re-running `make install` = update: overwrites binary and .desktop entry.
-# StartupWMClass must match app.NewWithID in main.go, otherwise launcher won't
-# associate window with icon and displays it as a separate unnamed taskbar item.
-install: $(BIN)/szept-gui
-	install -Dm755 $(BIN)/szept-gui $(PREFIX)/bin/szept-gui
-	install -Dm644 cmd/szept-gui/Icon.png \
+# StartupWMClass must match the WM class the toolkit reports (for wails on Linux
+# that is the executable name), otherwise the launcher won't associate the
+# window with the icon and shows it as a separate unnamed taskbar item.
+install: $(BIN)/szept-wails
+	install -Dm755 $(BIN)/szept-wails $(PREFIX)/bin/szept-wails
+	install -Dm644 cmd/szept-wails/Icon.png \
 		$(PREFIX)/share/icons/hicolor/512x512/apps/$(APPID).png
 	install -d $(PREFIX)/share/applications
 	printf '%s\n' \
@@ -68,19 +83,19 @@ install: $(BIN)/szept-gui
 		'Type=Application' \
 		'Name=szept' \
 		'Comment=Szyfrowany komunikator P2P' \
-		'Exec=$(PREFIX)/bin/szept-gui' \
+		'Exec=$(PREFIX)/bin/szept-wails' \
 		'Icon=$(APPID)' \
 		'Terminal=false' \
 		'Categories=Network;InstantMessaging;' \
-		'StartupWMClass=$(APPID)' \
+		'StartupWMClass=szept-wails' \
 		> $(PREFIX)/share/applications/$(APPID).desktop
 	-desktop-file-validate $(PREFIX)/share/applications/$(APPID).desktop
 	-update-desktop-database $(PREFIX)/share/applications
 	-gtk-update-icon-cache -qtf $(PREFIX)/share/icons/hicolor
-	@echo "zainstalowane: $(PREFIX)/bin/szept-gui — szept jest w menu aplikacji"
+	@echo "zainstalowane: $(PREFIX)/bin/szept-wails — szept jest w menu aplikacji"
 
 uninstall:
-	rm -f $(PREFIX)/bin/szept-gui \
+	rm -f $(PREFIX)/bin/szept-wails $(PREFIX)/bin/szept-gui \
 		$(PREFIX)/share/applications/$(APPID).desktop \
 		$(PREFIX)/share/icons/hicolor/512x512/apps/$(APPID).png
 	-update-desktop-database $(PREFIX)/share/applications

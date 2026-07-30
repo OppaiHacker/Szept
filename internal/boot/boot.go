@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"szept/internal/core"
 	"szept/internal/identity"
@@ -75,6 +78,43 @@ func ChangePass(dataDir string, oldPass, newPass []byte) error {
 		return err
 	}
 	return id.Save(IdentityPath(dataDir), newPass)
+}
+
+// ---- listy connectorów ----
+
+// FetchConnectorLists pobiera listy i zwraca znalezione adresy ws://…
+func FetchConnectorLists(urls []string) (found []string, errs int) {
+	cl := &http.Client{Timeout: 8 * time.Second}
+	for _, url := range urls {
+		resp, err := cl.Get(url)
+		if err != nil {
+			errs++
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		if err != nil {
+			errs++
+			continue
+		}
+		for _, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "ws://") || strings.HasPrefix(line, "wss://") {
+				found = append(found, core.NormalizeWS(line))
+			}
+		}
+	}
+	return found, errs
+}
+
+// AppendUnique dokłada wartość, jeśli jeszcze jej nie ma.
+func AppendUnique(s []string, v string) []string {
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(s, v)
 }
 
 // ---- konta (profile): osobne katalogi danych na jednym urządzeniu ----

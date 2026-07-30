@@ -18,7 +18,7 @@
 | **Cebulion Network** | Distributed mesh of connectors with SNDP gossip discovery, Dijkstra-routed signaling, and automatic failover — if any connector goes down, the network keeps running. |
 | **DPI-Proof Obfuscation** | Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream with variable random padding — STUN/DTLS headers vanish, leaving only high-entropy noise. |
 | **DAG History** | Every chat is a signed, SHA-256 hash-linked DAG with Lamport-ordered events. History syncs automatically when peers reconnect. |
-| **Voice, Video & Screen** | Real-time mesh calls with camera and desktop sharing (up to ~8 peers), an in-call control panel, per-person volume, deafen, and a **3D scene** where position drives the mix. |
+| **Voice, Video & Screen** | Real-time mesh calls with camera and desktop sharing (up to ~8 peers), an in-call control panel, per-person volume, deafen, and a **spatial room** where position drives the mix (3D on Android, top-down on the desktop). |
 | **Profiles** | Avatar, animated banner, status line and description — one signed event, framed in-app before it is sent. |
 | **File Attachments** | Inline previews for images, GIFs, video. Large files (>10 MB) replicate a thumbnail first; full payload pulled on demand in 16 KB chunks. |
 | **Multiple Accounts** | Several identities on one device, each with its own database — switch from the unlock screen. Backup and restore as a zip. |
@@ -41,7 +41,7 @@
 |---|---|
 | ![Accounts](assets/shots/settings-accounts.png) | ![Bots](assets/shots/settings-bots.png) |
 
-| 3D voice scene | Scene, person selected |
+| 3D voice scene (Android) | Scene, person selected |
 |---|---|
 | ![3D scene](assets/shots/spatial-scene.png) | ![Scene selection](assets/shots/spatial-selected.png) |
 
@@ -162,6 +162,8 @@ gain = 1 − 0.85·dist             pan = 0.8·dx
 
 Tapping a person opens their own volume slider and mute. All of it is **local** — your arrangement of the room is never transmitted, and muting someone tells them nothing.
 
+The desktop client shows the same room flattened to a top-down stage (call panel → the people button): dragging still sets gain and pan, only the depth axis is a straight line instead of perspective.
+
 ---
 
 ## ⚙️ Settings
@@ -202,7 +204,7 @@ An account is a directory with its own identity and its own encrypted database. 
 - Restore reads exactly two entry names and unpacks into a **new** account — the open database is never overwritten.
 - Backups are exactly as protected as your passphrase. Without one, they are plaintext to anyone who finds them.
 
-![Settings — backup](assets/shots/settings-backup.png)
+![Settings — passphrase and backup](assets/shots/settings-pass.png)
 
 Android keeps a single account: the platform already sandboxes the app per install.
 
@@ -237,10 +239,24 @@ Bound to `127.0.0.1` only, off by default, 32-byte token compared in constant ti
 
 ### Build from source
 
-Requirements: **Go ≥ 1.22**, gcc, X11/GL headers (Linux GUI).
+Requirements: **Go ≥ 1.22**, gcc, X11/GL headers (fyne client), and
+GTK + WebKitGTK for the desktop client:
+
+| Toolkit | Packages | Build tag |
+|---|---|---|
+| GTK4 (default) | `webkitgtk-6.0` / `libwebkitgtk-6.0-dev` | — |
+| GTK3 | `webkit2gtk-4.1` / `libwebkit2gtk-4.1-dev` | `gtk3` |
+
+The Makefile probes `pkg-config` and adds `-tags gtk3` by itself; override with
+`make WAILS_TAGS=gtk3` (or `WAILS_TAGS=` to force GTK4).
+
+The desktop client is pinned to `github.com/wailsapp/wails/v3` — the v3 line is
+an alpha, but it is the newest one there is (there is no v4), and v2 has no
+service bindings this UI is built on. `go get github.com/wailsapp/wails/v3/pkg/application@latest`
+moves the pin; the frontend needs no build step either way.
 
 ```bash
-make          # builds bin/szept-connector, bin/szept (TUI), bin/szept-gui
+make          # bin/szept-connector, bin/szept (TUI), bin/szept-wails, bin/szept-gui
 make test     # go vet + full test suite
 make install  # desktop entry + icon into ~/.local (re-run to update)
 ```
@@ -276,7 +292,7 @@ make android             # APK, needs Android SDK/NDK + the fyne tool
 
 ### Launch & add friends
 
-1. Start `./bin/szept` (TUI) or `./bin/szept-gui` (GUI).
+1. Start `./bin/szept` (TUI) or `./bin/szept-wails` (desktop).
 2. First run asks for a name, a connector and an optional passphrase.
 
    ![First run](assets/shots/first-run.png)
@@ -358,7 +374,8 @@ Both clients accept English and Polish aliases. Availability differs where the U
 ```
 cmd/connector     the rendezvous relay (pure Go, cross-compiles anywhere)
 cmd/szept         terminal client (bubbletea)
-cmd/szept-gui     desktop + Android client (fyne)
+cmd/szept-wails   desktop client (wails v3 — webview UI in cmd/szept-wails/frontend)
+cmd/szept-gui     Android client, and the fyne desktop build it grew out of
 internal/core     the brain: identity, store, connector link, sync, invites, calls
 internal/event    the chat DAG — signed, hash-linked, epoch-encrypted events
 internal/store    bbolt persistence; every value encrypted and location-bound
@@ -380,14 +397,15 @@ internal/i18n     interface strings (pl/en)
 make test    # go vet ./... && go test ./... -timeout 180s
 ```
 
-The screenshots in this README are produced by the app's own renderer, so they cannot drift from the UI:
+The screenshots in this README are produced by the app itself, so they cannot drift from the UI:
 
 ```bash
+tools/shots-wails.sh                                  # desktop (wails)
 SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots \
-  go test ./cmd/szept-gui -run TestShots -v
+  go test ./cmd/szept-gui -run TestShots -v           # mobile (fyne)
 ```
 
-It builds a throwaway data directory with sample chats, renders every screen through fyne's software canvas (no X11, no GL) and writes PNGs. Layout regressions fail there before anyone sees them on a phone.
+Both start from a throwaway data directory with sample chats. The mobile ones render through fyne's software canvas (no X11, no GL); the desktop ones drive a real build on a virtual `Xvfb` screen — your own desktop is never touched and never ends up in a picture. Layout regressions fail there before anyone sees them.
 
 ---
 
@@ -417,7 +435,7 @@ The threat model, the guarantees and the honest limits are in **[SECURITY.md](SE
 | **Sieć Cebulion** | Rozproszona siatka connectorów z gossipem SNDP, routingiem Dijkstry i automatycznym failoverem — padnięcie dowolnego connectora nie zatrzymuje komunikatora. |
 | **Obfuskacja DPI** | Każdy datagram UDP owinięty ChaCha20 ze zmiennym paddingiem — nagłówki STUN/DTLS znikają, ruch wygląda jak losowy szum. |
 | **DAG** | Każdy czat to podpisany, powiązany hashami SHA-256 graf acykliczny z porządkiem Lamporta. Historia synchronizuje się automatycznie. |
-| **Głos i wideo** | Rozmowy w siatce P2P (do ~8 osób), panel sterowania w rozmowie, głośność i wyciszanie pojedynczych osób, **scena 3D** sterująca miksem. |
+| **Głos i wideo** | Rozmowy w siatce P2P (do ~8 osób), panel sterowania w rozmowie, głośność i wyciszanie pojedynczych osób, **przestrzeń dźwięku** sterująca miksem (scena 3D na Androidzie, pokój z góry na pulpicie). |
 | **Profil** | Awatar, animowany baner, status i opis — jedno podpisane zdarzenie, kadrowane w aplikacji przed wysyłką. |
 | **Pliki** | Podgląd inline dla grafik, GIF-ów i wideo. Duże pliki ładowane na żądanie fragmentami po 16 KB. |
 | **Wiele kont** | Kilka tożsamości na jednym urządzeniu, każda z własną bazą — przełączanie z ekranu logowania. Kopia zapasowa i przywracanie z zipa. |
@@ -440,7 +458,7 @@ The threat model, the guarantees and the honest limits are in **[SECURITY.md](SE
 |---|---|
 | ![Konta](assets/shots/settings-accounts.png) | ![Boty](assets/shots/settings-bots.png) |
 
-| Scena 3D | Scena z wybraną osobą |
+| Scena 3D (Android) | Scena z wybraną osobą |
 |---|---|
 | ![Scena 3D](assets/shots/spatial-scene.png) | ![Wybrana osoba](assets/shots/spatial-selected.png) |
 
@@ -553,6 +571,8 @@ gain = 1 − 0.85·dist             pan = 0.8·dx
 
 Dotknięcie osoby otwiera jej suwak głośności i wyciszenie. Całość jest **lokalna** — twoje ustawienie pokoju nigdzie nie leci, a wyciszenie kogoś nie mówi mu o tym nic.
 
+Klient na pulpicie pokazuje ten sam pokój spłaszczony do widoku z góry (panel rozmowy → przycisk z osobami): przeciąganie dalej ustawia głośność i panoramę, tylko oś głębi jest linią zamiast perspektywy.
+
 ---
 
 ## ⚙️ Ustawienia
@@ -593,7 +613,7 @@ Konto to katalog z własną tożsamością i własną zaszyfrowaną bazą. Konta
 - Przywracanie czyta dokładnie dwie nazwy wpisów i rozpakowuje je do **nowego** konta — otwarta baza nigdy nie jest nadpisywana.
 - Kopia jest dokładnie tak chroniona jak twoje hasło. Bez hasła to jawny plik dla każdego, kto go znajdzie.
 
-![Ustawienia — kopia zapasowa](assets/shots/settings-backup.png)
+![Ustawienia — hasło i kopia](assets/shots/settings-pass.png)
 
 Android trzyma jedno konto — system i tak izoluje aplikację.
 
@@ -628,10 +648,24 @@ Nasłuch tylko na `127.0.0.1`, domyślnie wyłączony, 32-bajtowy token porówny
 
 ### Budowanie ze źródeł
 
-Wymagania: **Go ≥ 1.22**, gcc, nagłówki X11/GL (GUI na Linuksie).
+Wymagania: **Go ≥ 1.22**, gcc, nagłówki X11/GL (klient fyne) oraz
+GTK + WebKitGTK dla klienta pulpitowego:
+
+| Toolkit | Pakiety | Tag budowania |
+|---|---|---|
+| GTK4 (domyślnie) | `webkitgtk-6.0` / `libwebkitgtk-6.0-dev` | — |
+| GTK3 | `webkit2gtk-4.1` / `libwebkit2gtk-4.1-dev` | `gtk3` |
+
+Makefile sam sprawdza `pkg-config` i w razie potrzeby dokłada `-tags gtk3`;
+nadpiszesz to przez `make WAILS_TAGS=gtk3` (albo `WAILS_TAGS=` dla GTK4).
+
+Klient pulpitowy stoi na `github.com/wailsapp/wails/v3` — linia v3 jest alfą,
+ale nowszej nie ma (v4 nie istnieje), a v2 nie ma bindowania serwisów, na
+którym opiera się ten interfejs. `go get github.com/wailsapp/wails/v3/pkg/application@latest`
+przesuwa wersję; frontend i tak nie potrzebuje żadnego kroku budowania.
 
 ```bash
-make          # bin/szept-connector, bin/szept (TUI), bin/szept-gui
+make          # bin/szept-connector, bin/szept (TUI), bin/szept-wails, bin/szept-gui
 make test     # go vet + testy
 make install  # wpis w menu aplikacji i ikona w ~/.local
 ```
@@ -660,7 +694,7 @@ make android             # APK, wymaga Android SDK/NDK i narzędzia fyne
 
 ### Start i dodawanie znajomych
 
-1. Uruchom `./bin/szept` (TUI) albo `./bin/szept-gui` (GUI).
+1. Uruchom `./bin/szept` (TUI) albo `./bin/szept-wails` (pulpit).
 2. Pierwsze uruchomienie pyta o nazwę, connector i opcjonalne hasło.
 
    ![Pierwsze uruchomienie](assets/shots/first-run.png)
@@ -742,7 +776,8 @@ Oba klienty przyjmują polskie i angielskie aliasy. Dostępność różni się t
 ```
 cmd/connector     relay spotkań (czysty Go, kompiluje się wszędzie)
 cmd/szept         klient terminalowy (bubbletea)
-cmd/szept-gui     klient pulpitowy i Android (fyne)
+cmd/szept-wails   klient pulpitowy (wails v3 — interfejs w cmd/szept-wails/frontend)
+cmd/szept-gui     klient Android i pulpitowa wersja fyne, z której wyrósł
 internal/core     mózg: tożsamość, baza, łącze do connectora, sync, zaproszenia, rozmowy
 internal/event    DAG czatu — podpisane, powiązane hashami, szyfrowane zdarzenia
 internal/store    trwałość bbolt; każda wartość szyfrowana i związana z miejscem
@@ -764,14 +799,15 @@ internal/i18n     teksty interfejsu (pl/en)
 make test    # go vet ./... && go test ./... -timeout 180s
 ```
 
-Zrzuty ekranu w tym README renderuje sama aplikacja, więc nie mogą się rozjechać z interfejsem:
+Zrzuty ekranu w tym README robi sama aplikacja, więc nie mogą się rozjechać z interfejsem:
 
 ```bash
+tools/shots-wails.sh                                  # pulpit (wails)
 SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots \
-  go test ./cmd/szept-gui -run TestShots -v
+  go test ./cmd/szept-gui -run TestShots -v           # telefon (fyne)
 ```
 
-Test buduje jednorazowy katalog danych z przykładowymi czatami, rysuje każdy ekran programowym płótnem fyne (bez X11 i GL) i zapisuje PNG-i. Zepsuty układ wywala się tam, zanim ktokolwiek zobaczy go na telefonie.
+Oba zaczynają od jednorazowego katalogu danych z przykładowymi czatami. Mobilne rysuje programowe płótno fyne (bez X11 i GL), a pulpitowe — prawdziwy klient na wirtualnym ekranie `Xvfb`: twój pulpit nie jest ruszany i nie trafia na żaden obrazek. Zepsuty układ wywala się tam, zanim ktokolwiek go zobaczy.
 
 ---
 

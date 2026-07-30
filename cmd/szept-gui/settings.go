@@ -7,8 +7,6 @@ package main
 import (
 	"fmt"
 	"image/color"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -196,7 +194,7 @@ func (u *ui) connectorsPage() {
 			if url == "" {
 				return
 			}
-			u.cfg.Connectors = appendUnique(u.cfg.Connectors, url)
+			u.cfg.Connectors = boot.AppendUnique(u.cfg.Connectors, url)
 			u.saveCfg()
 			reopen()
 		}), newC))
@@ -225,7 +223,7 @@ func (u *ui) connectorsPage() {
 				u.fail(fmt.Errorf("adres listy musi zaczynać się od http(s)://"))
 				return
 			}
-			u.cfg.ConnectorLists = appendUnique(u.cfg.ConnectorLists, url)
+			u.cfg.ConnectorLists = boot.AppendUnique(u.cfg.ConnectorLists, url)
 			u.saveCfg()
 			reopen()
 		}), newL))
@@ -233,12 +231,12 @@ func (u *ui) connectorsPage() {
 		rows.Add(bigButton("Odśwież listy teraz", theme.ViewRefreshIcon(), func() {
 			lists := append([]string(nil), u.cfg.ConnectorLists...)
 			go func() {
-				found, errs := fetchConnectorLists(lists)
+				found, errs := boot.FetchConnectorLists(lists)
 				fyne.Do(func() {
 					added := 0
 					for _, cn := range found {
 						before := len(u.cfg.Connectors)
-						u.cfg.Connectors = appendUnique(u.cfg.Connectors, cn)
+						u.cfg.Connectors = boot.AppendUnique(u.cfg.Connectors, cn)
 						added += len(u.cfg.Connectors) - before
 					}
 					u.saveCfg()
@@ -253,40 +251,6 @@ func (u *ui) connectorsPage() {
 		}))
 	}
 	u.page("Connectory", rows)
-}
-
-// fetchConnectorLists pobiera listy i zwraca znalezione adresy ws://…
-func fetchConnectorLists(urls []string) (found []string, errs int) {
-	cl := &http.Client{Timeout: 8 * time.Second}
-	for _, url := range urls {
-		resp, err := cl.Get(url)
-		if err != nil {
-			errs++
-			continue
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		resp.Body.Close()
-		if err != nil {
-			errs++
-			continue
-		}
-		for _, line := range strings.Split(string(body), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "ws://") || strings.HasPrefix(line, "wss://") {
-				found = append(found, core.NormalizeWS(line))
-			}
-		}
-	}
-	return found, errs
-}
-
-func appendUnique(s []string, v string) []string {
-	for _, x := range s {
-		if x == v {
-			return s
-		}
-	}
-	return append(s, v)
 }
 
 func without(s []string, v string) []string {
