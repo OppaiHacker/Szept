@@ -390,6 +390,10 @@ type assembly struct {
 	born  time.Time
 }
 
+// maxFramesInFlight: frames being assembled per peer and label. A caller sends
+// one frame at a time; a handful of concurrent ones covers reordering.
+const maxFramesInFlight = 8
+
 func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 	kind, chat, ok := parseLabel(label)
 	if !ok {
@@ -437,6 +441,12 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		}
 		a := frames[frameID]
 		if a == nil {
+			// frameID is picked by the sender, so a peer could open a fresh buffer
+			// per packet; past the cap we drop instead of allocating
+			if len(frames) >= maxFramesInFlight {
+				c.mu.Unlock()
+				return
+			}
 			a = &assembly{parts: make([][]byte, total), total: total, born: time.Now()}
 			frames[frameID] = a
 		}

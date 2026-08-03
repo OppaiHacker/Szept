@@ -335,13 +335,13 @@ func store2friend(pub []byte, name string) store.Friend {
 // when list starts to lag noticeably.
 func (u *ui) rebuildFriends() {
 	friends, _ := u.c.St.Friends()
-	sort.Slice(friends, func(i, j int) bool { return friends[i].Name < friends[j].Name })
+	sort.Slice(friends, func(i, j int) bool { return friends[i].Display() < friends[j].Display() })
 	u.friendBox.RemoveAll()
 	for _, f := range friends {
 		f := f
 		status, _ := u.c.StatusOf(f.Pub)
-		u.friendBox.Add(u.personRow(f.Pub, f.Name, status, u.c.Online(f.Pub), func() {
-			u.profilePage(f.Pub, f.Name, false, nil)
+		u.friendBox.Add(u.personRow(f.Pub, f.Display(), status, u.c.Online(f.Pub), func() {
+			u.profilePage(f.Pub, f.Display(), false, nil)
 		}))
 	}
 	if len(friends) == 0 {

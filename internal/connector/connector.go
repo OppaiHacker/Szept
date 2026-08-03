@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,24 @@ type client struct {
 	ws *websocket.Conn
 	mu sync.Mutex
 	ts int64 // registration timestamp holding slot — see "register"
+
+	lookups   int       // lookups used in the current window (rate limit, see SZ-19)
+	lookupWin time.Time // start of that window
+}
+
+// maxLookupsPerMinute throttles the presence oracle. `lookup` answers for any
+// pubkey — the connector cannot tell who is entitled to ask about whom — so the
+// best it can do is make enumerating the whole network expensive.
+const maxLookupsPerMinute = 60
+
+func (c *client) allowLookup() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Since(c.lookupWin) > time.Minute {
+		c.lookupWin, c.lookups = time.Now(), 0
+	}
+	c.lookups++
+	return c.lookups <= maxLookupsPerMinute
 }
 
 func (c *client) send(m Msg) error {
@@ -73,21 +92,27 @@ func (c *client) send(m Msg) error {
 }
 
 type Server struct {
-	mu        sync.Mutex
-	peers     map[string]*client
-	ips       map[string]int // IP address -> open WS sessions
-	up        websocket.Upgrader
-	start     time.Time
-	MaxPeers  int
-	PublicURL string
-	mesh      *meshManager
+	mu         sync.Mutex
+	peers      map[string]*client
+	ips        map[string]int // IP address -> open WS sessions
+	up         websocket.Upgrader
+	start      time.Time
+	MaxPeers   int
+	PublicURL  string
+	TrustProxy bool // read the client IP from X-Forwarded-For (only behind our own proxy)
+	mesh       *meshManager
 }
+
+// checkOrigin: the connector has no browser clients. Native clients send no
+// Origin header at all, so a present Origin means a web page is dialing us —
+// that is cross-site WebSocket hijacking, not a user.
+func checkOrigin(r *http.Request) bool { return r.Header.Get("Origin") == "" }
 
 func NewServer() *Server {
 	s := &Server{
 		peers: map[string]*client{},
 		ips:   map[string]int{},
-		up:    websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
+		up:    websocket.Upgrader{CheckOrigin: checkOrigin},
 		start: time.Now(),
 	}
 	s.mesh = newMeshManager(s, "", nil)
@@ -95,19 +120,39 @@ func NewServer() *Server {
 }
 
 func (s *Server) SetSeeds(seeds []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mesh.mu.Lock()
 	s.mesh.seeds = seeds
-	if len(seeds) > 0 {
-		go s.mesh.loop()
-	}
+	s.mesh.mu.Unlock()
+	s.mesh.start()
 }
 
 func (s *Server) SetPublicURL(rawURL string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.PublicURL = rawURL
+	s.mu.Unlock()
+	s.mesh.mu.Lock()
 	s.mesh.publicURL = rawURL
+	s.mesh.mu.Unlock()
+	s.mesh.start()
+}
+
+// SetMeshSecret enables the connector mesh. An empty secret keeps it off, which
+// is the right default for a standalone connector: no socket can then reach
+// mesh_signal or ndp_gossip at all.
+func (s *Server) SetMeshSecret(secret string) {
+	s.mesh.mu.Lock()
+	s.mesh.secret = []byte(secret)
+	s.mesh.mu.Unlock()
+	s.mesh.start()
+}
+
+// SetTrustProxy makes clientIP honour X-Forwarded-For on loopback connections.
+// Deployment decision, never a guess: without a proxy in front, any client can
+// forge the header and dodge the per-IP limit.
+func (s *Server) SetTrustProxy(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TrustProxy = v
 }
 
 func (s *Server) SetMaxPeers(max int) {
@@ -120,15 +165,24 @@ func (s *Server) SetMaxPeers(max int) {
 // we count sessions per IP address.
 const MaxSessionsPerIP = 64
 
-// clientIP returns "" when rate limiting should not apply.
-// ponytail: behind reverse proxy all requests arrive from loopback, so we bypass it;
-// if proxy is ever remote, inspect trusted X-Forwarded-For.
-func clientIP(r *http.Request) string {
+// clientIP returns the address the per-IP limit applies to, "" when none can be
+// established. Behind a reverse proxy every connection arrives from loopback;
+// trusting X-Forwarded-For there is a deployment decision (--trust-proxy), not a
+// default — exempting loopback unconditionally disabled the limit outright.
+func (s *Server) clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if ip := net.ParseIP(host); ip == nil || ip.IsLoopback() {
+	s.mu.Lock()
+	trust := s.TrustProxy
+	s.mu.Unlock()
+	if ip := net.ParseIP(host); trust && ip != nil && ip.IsLoopback() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			host = strings.TrimSpace(strings.Split(xff, ",")[0])
+		}
+	}
+	if net.ParseIP(host) == nil {
 		return ""
 	}
 	return host
@@ -170,26 +224,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !websocket.IsWebSocketUpgrade(r) {
 		if r.URL.Path == "/ndp/neighbors" {
 			w.Header().Set("Content-Type", "application/json")
-			neighbors := make([]NeighborInfo, 0)
-			for _, url := range s.mesh.activeNeighborURLs() {
-				neighbors = append(neighbors, NeighborInfo{URL: url})
-			}
-			s.mesh.mu.Lock()
-			topCopy := make(map[string]map[string]int64)
-			for u, edges := range s.mesh.topology {
-				topCopy[u] = make(map[string]int64)
-				for v, w := range edges {
-					topCopy[u][v] = w
-				}
-			}
-			s.mesh.mu.Unlock()
-
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"url":         s.PublicURL,
 				"peer_count":  s.Count(),
 				"max_clients": s.MaxPeers,
-				"neighbors":   neighbors,
-				"topology":    topCopy,
+				"neighbors":   s.mesh.neighborInfos(),
 			})
 			return
 		}
@@ -198,6 +237,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.Count(), time.Since(s.start).Round(time.Second), len(s.mesh.activeNeighborURLs()))
 		return
 	}
+	// per-IP slot first: the overload path below also upgrades the socket, so
+	// taking the slot after it left MaxSessionsPerIP bypassable under load.
+	ip := s.clientIP(r)
+	if !s.takeSlot(ip) {
+		http.Error(w, "too many connections", http.StatusTooManyRequests)
+		return
+	}
+	defer s.freeSlot(ip)
 	if s.MaxPeers > 0 && s.Count() >= s.MaxPeers {
 		ws, err := s.up.Upgrade(w, r, nil)
 		if err == nil {
@@ -210,18 +257,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	ip := clientIP(r)
-	if !s.takeSlot(ip) {
-		http.Error(w, "too many connections", http.StatusTooManyRequests)
-		return
-	}
-	defer s.freeSlot(ip)
 	ws, err := s.up.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	c := &client{ws: ws}
 	var pub []byte
+	// meshPeer stays false for every ordinary client socket, which is what keeps
+	// mesh_signal / ndp_gossip off the client plane entirely.
+	var meshPeer bool
 	defer func() {
 		ws.Close()
 		if pub != nil {
@@ -257,11 +301,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ws.SetReadDeadline(time.Now().Add(90 * time.Second))
 		switch m.Op {
+		case "mesh_hello":
+			if !s.mesh.auth(m.TS, m.Sig) {
+				c.send(Msg{Op: "error", Err: "mesh auth"})
+				continue
+			}
+			meshPeer = true
+			c.send(Msg{Op: "ok"})
 		case "ndp_gossip":
+			if !meshPeer {
+				continue // not the client plane
+			}
 			if len(m.From) > 0 {
 				s.mesh.addNeighbor(string(m.From), 0, 0)
 			}
 		case "mesh_signal":
+			if !meshPeer {
+				continue // not the client plane
+			}
 			if s.mesh.markTraceSeen(m.TraceID) {
 				continue
 			}
@@ -269,10 +326,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			dst := s.peers[string(m.To)]
 			s.mu.Unlock()
 			if dst != nil {
+				// `From` on a relayed frame is a routing hint, never an identity:
+				// only the Ed25519 signature inside Payload (p2p.onSignal) proves
+				// who sent it.
 				dst.send(Msg{Op: "signal", From: m.From, To: m.To, Payload: m.Payload})
 			} else if m.TTL > 0 {
-				targetConnector := s.mesh.routingCache[string(m.To)]
-				s.mesh.relayMeshSignal(m, targetConnector)
+				s.mesh.relayMeshSignal(m)
 			}
 		case "register":
 			if len(m.Pub) != ed25519.PublicKeySize ||
@@ -301,6 +360,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				c.send(Msg{Op: "error", Err: "register first"})
 				continue
 			}
+			if !c.allowLookup() {
+				c.send(Msg{Op: "error", Err: "lookup rate limit"})
+				continue
+			}
 			s.mu.Lock()
 			_, online := s.peers[string(m.Pub)]
 			s.mu.Unlock()
@@ -314,15 +377,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			dst := s.peers[string(m.To)]
 			s.mu.Unlock()
 			if dst == nil {
-				// ponytail: missing locally - find optimal path using Dijkstra in Cebulion Network
-				targetConnector := s.mesh.routingCache[string(m.To)]
+				// not ours — hand it to the mesh (no-op when the mesh is off)
 				s.mesh.relayMeshSignal(Msg{
 					Op:      "mesh_signal",
 					From:    pub,
 					To:      m.To,
 					Payload: m.Payload,
 					TTL:     5,
-				}, targetConnector)
+				})
 				continue
 			}
 			dst.send(Msg{Op: "signal", From: pub, To: m.To, Payload: m.Payload})
@@ -368,6 +430,41 @@ func NewClient(url string, priv ed25519.PrivateKey) *Client {
 	return &Client{URL: url, Priv: priv, Pub: priv.Public().(ed25519.PublicKey), lookups: make(chan Msg, 16)}
 }
 
+// maxFallbacks caps the redirect list; a hostile connector must not be able to
+// grow it without bound, since every session walks the whole list.
+const maxFallbacks = 8
+
+// sameScheme rejects a wss:// -> ws:// downgrade. Signalling stays end-to-end
+// signed either way, but the metadata (who talks to whom, from which IP, when)
+// would go out in the clear.
+func sameScheme(current, next string) bool {
+	cur, err1 := url.Parse(current)
+	nxt, err2 := url.Parse(next)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	ns := strings.ToLower(nxt.Scheme)
+	if strings.EqualFold(cur.Scheme, "wss") {
+		return ns == "wss"
+	}
+	return ns == "ws" || ns == "wss"
+}
+
+// addFallbacks accepts a server-supplied redirect list under three rules:
+// same-or-better scheme, no duplicates, hard cap.
+func (c *Client) addFallbacks(urls []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range urls {
+		if len(c.FallbackURLs) >= maxFallbacks || r == c.URL || !sameScheme(c.URL, r) {
+			continue
+		}
+		if !slices.Contains(c.FallbackURLs, r) {
+			c.FallbackURLs = append(c.FallbackURLs, r)
+		}
+	}
+}
+
 // Run connects, registers and reads until closed; reconnects with backoff.
 func (c *Client) Run() {
 	backoff := time.Second
@@ -396,7 +493,9 @@ func (c *Client) Run() {
 }
 
 func (c *Client) session() error {
+	c.mu.Lock()
 	urlsToTry := append([]string{c.URL}, c.FallbackURLs...)
+	c.mu.Unlock()
 	var ws *websocket.Conn
 	var dialErr error
 
@@ -421,9 +520,7 @@ func (c *Client) session() error {
 			if err := conn.ReadJSON(&ack); err == nil {
 				if ack.Op == "redirect" {
 					conn.Close()
-					if len(ack.Redirect) > 0 {
-						c.FallbackURLs = append(c.FallbackURLs, ack.Redirect...)
-					}
+					c.addFallbacks(ack.Redirect)
 					continue
 				} else if ack.Op == "ok" {
 					conn.SetReadDeadline(time.Time{})

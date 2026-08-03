@@ -142,15 +142,15 @@ func (u *ui) cmdDM(arg string) {
 	}
 	friends, _ := u.c.St.Friends()
 	for _, f := range friends {
-		if strings.EqualFold(f.Name, arg) ||
-			strings.HasPrefix(strings.ToLower(f.Name), strings.ToLower(arg)) {
+		if strings.EqualFold(f.Display(), arg) ||
+			strings.HasPrefix(strings.ToLower(f.Display()), strings.ToLower(arg)) {
 			id, err := u.c.CreateDirect(f)
 			if err != nil {
 				u.sysErr(err.Error())
 				return
 			}
 			u.openChat(id)
-			u.sysOK("Czat z "+f.Name, "Piszcie — wiadomości szyfrowane od końca do końca.")
+			u.sysOK("Czat z "+f.Display(), "Piszcie — wiadomości szyfrowane od końca do końca.")
 			return
 		}
 	}

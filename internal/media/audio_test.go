@@ -1,6 +1,9 @@
 package media
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func pcm(v int16, n int) []byte {
 	b := make([]byte, 2*n)
@@ -62,5 +65,28 @@ func TestMix(t *testing.T) {
 	p.MuteSource("a", false)
 	if l, _ := frame(p); l != 0 {
 		t.Fatalf("buffer drained during mute, got %d", l)
+	}
+}
+
+// A configured camera name must never turn into an ffmpeg flag, and on Linux a
+// camera is always a /dev node.
+func TestSafeDevice(t *testing.T) {
+	for _, bad := range []string{"-f", "-i /etc/passwd"} {
+		if got := safeDevice(bad); got != "" {
+			t.Errorf("safeDevice(%q) = %q, chciano odrzucenia", bad, got)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		for _, bad := range []string{"/etc/passwd", "video0"} {
+			if got := safeDevice(bad); got != "" {
+				t.Errorf("safeDevice(%q) = %q, poza /dev/ ma odpaść", bad, got)
+			}
+		}
+		if got := safeDevice("/dev/video1"); got != "/dev/video1" {
+			t.Errorf("poprawne urządzenie odrzucone: %q", got)
+		}
+	}
+	if got := safeDevice(""); got != "" {
+		t.Errorf("pusta wartość ma zostać pusta, jest %q", got)
 	}
 }

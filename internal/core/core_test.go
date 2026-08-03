@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"image"
 	"image/color"
@@ -15,7 +16,9 @@ import (
 
 	"szept/internal/attach"
 	"szept/internal/connector"
+	"szept/internal/crypt"
 	"szept/internal/identity"
+	"szept/internal/p2p"
 )
 
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
@@ -436,4 +439,147 @@ func TestDirectChatViaFriendCode(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// SZ-04: an epoch key is only accepted when the signed DAG vouches for it.
+// Pre-filling a future epoch used to lock the real key out forever, and the
+// first membership event landing in that epoch killed the chat outright.
+func TestEpochKeyBoundToRekey(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	c := newCore(t, "ala", url)
+	chat, err := c.CreateChat("grupa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Rekey(chat); err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.ChatState(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := c.St.ChatKeys(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real2 := keys[2]
+	if len(real2) != 32 || len(st.KeyHash[2]) == 0 {
+		t.Fatalf("rekey nie ogłosił skrótu klucza epoki 2 (klucz %d B, skrót %d B)", len(real2), len(st.KeyHash[2]))
+	}
+	if !c.keyMatchesDAG(st, 2, real2) {
+		t.Fatal("prawdziwy klucz epoki odrzucony")
+	}
+	if c.keyMatchesDAG(st, 2, crypt.NewKey()) {
+		t.Fatal("podrobiony klucz epoki przyjęty mimo niezgodnego skrótu")
+	}
+	// an epoch nobody announced is refused outright — that is the pre-poisoning path
+	if c.keyMatchesDAG(st, 9, crypt.NewKey()) {
+		t.Fatal("klucz dla nieogłoszonej epoki przyjęty")
+	}
+	// legacy chats have no hash: the fallback still refuses future epochs
+	st.KeyHash = nil
+	if c.keyMatchesDAG(st, st.Epoch+1, crypt.NewKey()) {
+		t.Fatal("stara ścieżka zgodności przyjęła klucz z przyszłości")
+	}
+	if !c.keyMatchesDAG(st, 1, keys[1]) {
+		t.Fatal("stara ścieżka zgodności odrzuciła klucz ogłoszonej epoki")
+	}
+}
+
+// SZ-05: bBlobs is global, so membership in one chat must not be a pass to
+// attachments announced in another.
+func TestServeBlobCrossChat(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	c := newCore(t, "ala", url)
+	secret, err := c.CreateChat("tajny")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := c.CreateChat("wspolny")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := testImagePNG(t)
+	if err := c.SendFile(secret, "tajne.png", img, ""); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := c.St.PutBlob(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.St.BlobInChat(secret, hash) {
+		t.Fatal("załącznik nie trafił do indeksu swojego czatu")
+	}
+	if c.St.BlobInChat(shared, hash) {
+		t.Fatal("hash z tajnego czatu wygląda na ogłoszony we wspólnym — IDOR nadal otwarty")
+	}
+	// deleting the chat takes its blobs with it (SZ-25)
+	if err := c.St.DeleteChat(secret); err != nil {
+		t.Fatal(err)
+	}
+	if c.St.HasBlob(hash) {
+		t.Fatal("załącznik przeżył usunięcie czatu")
+	}
+}
+
+// SZ-08: chunks are only accepted from a member of the chat the download
+// belongs to, and a packet with a contradictory Total is dropped instead of
+// wiping the buffer that is already half full.
+func TestBlobPartFromNonMember(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	c := newCore(t, "ala", url)
+	chat, err := c.CreateChat("grupa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := testImagePNG(t)
+	hash := sha256.Sum256(data)
+	total := (len(data) + blobChunk - 1) / blobChunk
+	if total < 2 {
+		t.Fatalf("obrazek testowy mieści się w jednej części (%d B)", len(data))
+	}
+	c.mu.Lock()
+	c.wants[string(hash[:])] = &blobWant{chat: bytes.Clone(chat), mime: "image/png", size: int64(len(data))}
+	c.mu.Unlock()
+
+	part := func(idx, tot int) Ctrl {
+		end := min((idx+1)*blobChunk, len(data))
+		return Ctrl{T: "blobpart", Chat: chat, Blob: hash[:], Idx: idx, Total: tot, Part: data[idx*blobChunk : end]}
+	}
+
+	stranger := &p2p.Peer{Pub: identity.Create().Pub}
+	c.handleBlobPart(stranger, part(0, total))
+	c.mu.Lock()
+	got := c.incoming[string(hash[:])]
+	c.mu.Unlock()
+	if got != nil {
+		t.Fatal("część od nie-członka założyła bufor składania")
+	}
+
+	me := &p2p.Peer{Pub: c.ID.Pub}
+	c.handleBlobPart(me, part(0, total))
+	c.mu.Lock()
+	a := c.incoming[string(hash[:])]
+	c.mu.Unlock()
+	if a == nil || a.got != 1 {
+		t.Fatalf("część od członka nie została przyjęta: %+v", a)
+	}
+
+	// crafted packet claiming a different Total
+	c.handleBlobPart(me, Ctrl{T: "blobpart", Chat: chat, Blob: hash[:], Idx: 0, Total: total + 1, Part: []byte("x")})
+	c.mu.Lock()
+	after := c.incoming[string(hash[:])]
+	c.mu.Unlock()
+	if after != a || after.got != 1 {
+		t.Fatal("sprzeczny Total skasował trwające pobieranie")
+	}
 }

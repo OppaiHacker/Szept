@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -186,16 +187,7 @@ func Restore(zipPath, destDir string) error {
 		if !want[f.Name] {
 			continue // obce wpisy (w tym ścieżki z ../) ignorujemy w całości
 		}
-		src, err := f.Open()
-		if err != nil {
-			return err
-		}
-		data, err := io.ReadAll(io.LimitReader(src, 1<<31))
-		src.Close()
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(destDir, f.Name), data, 0o600); err != nil {
+		if err := unzipEntry(f, filepath.Join(destDir, f.Name)); err != nil {
 			return err
 		}
 		found++
@@ -204,4 +196,32 @@ func Restore(zipPath, destDir string) error {
 		return errors.New("to nie jest kopia szeptu (brak identity.key/szept.db)")
 	}
 	return nil
+}
+
+// maxRestoreBytes: sufit na rozpakowany wpis. „Kopia od znajomego” to realny
+// scenariusz, a zip potrafi rozprężyć się dowolnie — czytamy strumieniowo
+// (żadnego ReadAll całości do RAM) i przerywamy po przekroczeniu limitu.
+const maxRestoreBytes = 512 << 20
+
+func unzipEntry(f *zip.File, dest string) error {
+	src, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	// limit+1: gdy uda się przepisać o bajt więcej niż limit, wpis jest za duży
+	n, err := io.Copy(out, io.LimitReader(src, maxRestoreBytes+1))
+	if err != nil {
+		return err
+	}
+	if n > maxRestoreBytes {
+		os.Remove(dest)
+		return fmt.Errorf("wpis %s w kopii jest za duży (limit %d MB)", f.Name, maxRestoreBytes>>20)
+	}
+	return out.Close()
 }

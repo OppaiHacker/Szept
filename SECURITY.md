@@ -69,16 +69,19 @@ A single connector works as a stateless signaling relay (~200 lines). It maps `p
 
 ### Cebulion mesh
 
-Connectors can join the **Cebulion Network** — a distributed mesh providing fault tolerance and load balancing:
+Connectors can join the **Cebulion Network** — a distributed mesh providing fault tolerance and load balancing.
+
+**The mesh is a separate, authenticated plane and it is off by default.** It exists only when the operator starts the connector with `--mesh-secret`. A socket becomes a mesh peer by sending `mesh_hello` with `HMAC-SHA256(secret, "szept-mesh-v1" || timestamp)` inside a ±60 s window; until then `mesh_signal` and `ndp_gossip` are silently dropped. Ordinary client sockets never become mesh peers, so no client — registered or not — can inject a neighbour or have a frame relayed on its behalf.
 
 | Mechanism | Details |
 |---|---|
-| **SNDP Gossip** | Every 15s, connectors exchange neighbor lists, peer counts, RTT latencies, and full topology via `/ndp/neighbors` (JSON, max 128 KB response). |
-| **Topology graph** | BGP-like link-state: `nodeA → nodeB → RTT(ms)`. Max 256 nodes, 64 neighbors. RTT clamped to [1, 100000] ms. |
-| **Dijkstra routing** | When `signal`'s destination is not local, `mesh_signal` is forwarded to the optimal next hop (RTT-weighted shortest path). If no route is known, broadcast to all active neighbors. |
-| **Loop prevention** | Each `mesh_signal` carries a random 16-char hex `TraceID` and `TTL` (default 5, decremented per hop). Seen traces deduplicated for 5 minutes. |
+| **SNDP Gossip** | Every 15s, connectors exchange neighbor lists, peer counts and RTT latencies via `/ndp/neighbors` (JSON, max 128 KB response). |
+| **Neighbour URLs** | `ws://` / `wss://` only, max 128 chars, and never a non-public address: loopback, RFC1918, link-local (incl. `169.254.169.254`), multicast and unspecified are all refused. The check is repeated **after DNS resolution**, right before the socket opens, and HTTP redirects during gossip are refused outright — a hostname resolving to an internal IP does not get through. |
+| **Relaying** | When a `signal`'s destination is not local, `mesh_signal` goes to at most 4 active neighbours. There is no routing table and no shortest-path computation; the previous Dijkstra/topology machinery was never fed a destination, so it only ever broadcast — it was removed rather than left as an amplifier with a public topology endpoint. |
+| **Loop prevention** | Each `mesh_signal` carries a random 16-char hex `TraceID` (max 64 chars accepted) and `TTL` (default 5, decremented per hop). Seen traces are deduplicated for 5 minutes and capped at 100 000 entries — past the cap frames are dropped, never queued. |
+| **`from` on a relayed frame** | A routing hint, not an identity. Only the Ed25519 signature inside the payload (`p2p.onSignal`) says who sent something. |
 | **Load shedding** | When `--max-peers` is hit, new clients get a `redirect` message with active neighbor URLs and the connection closes. Client appends these to `FallbackURLs` and retries. |
-| **Client failover** | `Client.Run()` reconnects with exponential backoff (1s → 30s, reset after 15s uptime). Tries primary URL, then all `FallbackURLs` in order. On `redirect`, neighbor URLs are appended. |
+| **Client failover** | `Client.Run()` reconnects with exponential backoff (1s → 30s, reset after 15s uptime). Tries primary URL, then all `FallbackURLs` in order. A `redirect` is **validated before use**: no `wss://` → `ws://` downgrade, no duplicates, at most 8 fallbacks total. Changing the connector in Settings builds a fresh client, so an old fallback list never survives the switch. |
 | **DNS resilience** | On `no such host`: fallback to `1.1.1.1:53`. If port 53 blocked: DNS-over-HTTPS to `https://1.1.1.1/dns-query` (Cloudflare cert has IP SAN, so DNS is not required to query DNS). |
 
 ### Registration security
@@ -86,7 +89,10 @@ Connectors can join the **Cebulion Network** — a distributed mesh providing fa
 - Registration requires Ed25519 signature over `"szept-register-v1" || pubkey || timestamp(BE64)`.
 - Timestamp must be within ±1 minute.
 - One socket = one pubkey. Claiming an occupied slot requires a **fresher timestamp** — replaying a captured frame is not enough.
-- Per-IP session limit: **64 concurrent WebSockets** per IP address (loopback bypassed for reverse proxy).
+- Per-IP session limit: **64 concurrent WebSockets** per IP address, taken **before** the upgrade — including on the overloaded `redirect` path, which used to hand out unlimited handshakes.
+- Behind a reverse proxy every connection arrives from loopback. The client IP is read from `X-Forwarded-For` **only** with `--trust-proxy`; without the flag loopback counts like any other address, because an unconditional exemption disabled the limit entirely.
+- `lookup` is rate-limited to 60 queries per minute per session. It still answers for any pubkey — see Known trade-offs.
+- The WebSocket upgrade **rejects any request carrying an `Origin` header**. Native clients send none; a browser always does, so a web page cannot open a socket to the connector (CSWSH).
 - `ReadLimit`: 256 KB per WebSocket message. `ReadHeaderTimeout`: 10s (Slowloris mitigation).
 
 ### Switching connectors, and dynamic connector lists
@@ -114,7 +120,7 @@ What a list host learns: your IP and the fact that a Szept client asked, exactly
 | `pubkey ↔ IP` mapping | Message contents |
 | Who signals whom | Chat names & membership |
 | Connection timestamps | Epoch keys |
-| Mesh topology (RTT between connectors) | Attachments, avatars & banners |
+| Neighbour connectors and their RTT | Attachments, avatars & banners |
 | | Friend relationships |
 | | Profile status / description |
 | | DAG structure or event history |
@@ -130,13 +136,15 @@ Events are validated **before** persistence (`ingest` → `Fold`):
 | Event kind | Authorized author |
 |---|---|
 | `create` (genesis) | Chat owner (exactly one per chat) |
-| `add` | Any current member |
+| `add` | Any current member — **but only for a pubkey not already in the chat** |
 | `remove` / `rekey` | Owner only |
 | `msg` / `file` / `react` / `delete` | Any current member |
 | `avatar` / `nick` / `profile` | Any current member — **own profile only** |
 | `rename` | Any current member |
 
-Validation: signature check → parent presence → `Fold` replays entire DAG with the new event included → authorization failure rejects the event.
+Validation: event size (256 KB max) → signature check → parent presence → `Fold` replays entire DAG with the new event included → authorization failure rejects the event. One `events` frame carries at most 2 000 events, mirroring the outbound cap.
+
+`add` **adds; it never rewrites an existing row.** Overwriting used to let any member resurrect an account the owner had kicked, rename the owner inside signed state, and — by rewriting the owner's `AddedBy` — make the owner's next kick cascade onto themselves and lock the chat for everyone. Re-admitting a removed member is the owner's decision alone.
 
 `Fold` applies profile-shaped events by looking up `st.Members[e.Author]` — the author's own row and nothing else. There is no addressing field to point one somewhere else, so "change someone else's status" is not an operation the protocol can express.
 
@@ -153,7 +161,10 @@ This prevents antedating attacks — e.g. inserting an `add` at Lamport 2 that a
 
 - Epoch keys travel **only over authenticated E2E channels** (DTLS ctrl channel) to verified members.
 - Keys are **never overwritten** in the store: `if _, have := existing[ep]; have { continue }`.
-- A key that fails AEAD decryption is treated as absent: content-kind events (`msg`, `file`, `avatar`, `nick`, `profile`, `react`, `delete`, `rename`) are tolerated without a key; membership events (`create`, `add`, `remove`, `rekey`) require a valid key or the entire fold fails.
+- **Each epoch key is vouched for by the signed DAG.** `KindCreate` and `KindRekey` carry `sha256(key)` of the epoch they open, and an offered key is stored only when its hash matches. Without this binding, a member could pre-fill epochs that did not exist yet; the real key was then locked out permanently by the never-overwrite rule.
+- Chats created before that binding existed have no announced hash. For them the fallback rule applies: **a key for an epoch the signed history has not announced yet is refused** (`ep > st.Epoch` → drop), which closes the pre-poisoning window; the remaining race narrows to the moment a rekey is published.
+- A key that fails AEAD decryption is treated as absent. Only the genesis event is fatal — every other unreadable event is **skipped and its epoch flagged** (`State.MissingKey`), so one bad or not-yet-delivered epoch key degrades the view of the chat instead of destroying it. Membership events in a flagged epoch are parked and the epoch key re-requested rather than applied blind.
+- A degraded state is honest about the cost: a removal you cannot read is a removal you have not applied, exactly like one that has not reached you yet. What it stops is the previous behaviour, where a single unreadable epoch made `ChatState` fail outright — the conversation then vanished from the chat list and refused every sync, key, blob and append, with no way back short of editing the database.
 - Keys are accepted **only from a current member** or, during join, from the inviter / a friend who introduced the chat.
 
 ### Member removal & cascade
@@ -218,7 +229,9 @@ Only metadata: `sha256(content)`, MIME type, filename, size, dimensions, thumbna
 | **Banner transcode** | Decode → crop → 720 × 240 → re-encode PNG, or GIF for an animated one: ≤ 48 frames, ≤ 2 MiB out, frames decimated until it fits. |
 | **Crop rectangle** | Comes from the UI, therefore from the user: intersected with the source bounds, degenerate values fall back to the whole image, aspect trimmed rather than stretched. Never used as given. |
 | **Re-encode, always** | Only our encoder's bytes reach the database — EXIF, ICC profiles and polyglot payloads appended after the image data do not survive the round trip. |
-| **Integrity check** | Receiver computes SHA-256 of received bytes vs. the hash in the signed DAG event. Hash is known only from decrypted history — acts as an access token (without it, you can't even request the file). |
+| **Integrity check** | Receiver computes SHA-256 of received bytes vs. the hash in the signed DAG event. |
+| **Access control** | Serving a blob needs **both**: the asker is a member of the chat they name, and that chat is one the blob was actually announced in (`blobchat` index, rebuilt on startup). Membership alone was not enough — blob storage is content-addressed and global, so any shared chat would otherwise have been a pass to files from every other chat, and a guessable hash a confirmation oracle. |
+| **Inbound chunks** | Accepted only from an active member of the chat the download belongs to, and only for a blob we asked for. A chunk claiming a different `Total` is **dropped**, not acted on — rebuilding the buffer discarded hundreds of already-fetched chunks on one crafted packet. |
 | **Filename** | Generated locally: basename only (no path traversal), control characters stripped, extension **forced by detected MIME**. A network file cannot land as `.sh` or `.exe`. |
 | **Transfer control** | Max 3 concurrent blob transfers per peer (`maxServing`). Total assembly memory capped at 64 MiB (`asmBudget`). Send buffer pauses at 1 MiB high water mark. |
 
@@ -267,7 +280,7 @@ POST /send   Authorization: Bearer <token>   {"chat": "...", "text": "..."}
 | `~/.local/share/szept/szept.db` | `0600` | Fully encrypted database (key derived from the seed) |
 | `~/.local/share/szept/profiles/<name>/` | `0700` | A second account: its own identity + database |
 | `~/.config/szept/config.json` | `0600` | Connector list, UI preferences, **webhook token in plaintext** |
-| System temp directory | OS default | Attachments opened with "Open" are written there **decrypted**, and stay |
+| `$TMPDIR/szept-*/` | `0700` | Per-session scratch: attachments opened with "Open" are written there **decrypted** and the whole directory is removed on exit |
 
 ---
 
@@ -293,7 +306,7 @@ POST /send   Authorization: Bearer <token>   {"chat": "...", "text": "..."}
 - The backup is exactly as protected as your identity passphrase: the database key is derived from the seed, and the seed is what the passphrase encrypts. **No passphrase means a backup anyone can open.**
 - Restore reads **exactly two entry names** (`identity.key`, `szept.db`). Every other entry — including anything with `../` in its path — is skipped in full, so a hand-crafted archive cannot write outside the destination.
 - Restore never touches the running database: it unpacks into a **new account directory**, which you then switch to.
-- Entry size is bounded on read (`io.LimitReader`).
+- Entry size is bounded to 512 MB and **streamed to disk** (`io.Copy`), so a crafted archive cannot be inflated into RAM before anything checks it.
 
 ---
 
@@ -321,7 +334,7 @@ Every value is **bound to its storage location** (bucket + key as AEAD associate
 
 Changing the passphrase re-encrypts **only the identity file** — the database key comes from the seed, which does not change. The old passphrase is verified first, on purpose: without that check a typo would lock the account out permanently.
 
-Attachments opened via the "Open" button land **decrypted in the system temp directory** and stay there.
+Attachments opened via the "Open" button land **decrypted** in a private per-session directory (`0700`, `$TMPDIR/szept-*`), which is removed together with everything in it when the app closes. While it exists, the copy is plaintext.
 
 ---
 
@@ -360,7 +373,8 @@ Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream:
 | **Webhook token** | Plaintext in `config.json` (`0600`). Any local process that reads it can send as you. | OS keyring, or a per-caller token with a scope. |
 | **Connector lists** | Fetching one reveals your IP to its host, and its entries land in your switch list. | Pin the connectors you trust and skip lists entirely. |
 | **Profile card** | Status, description and banner are visible to everyone sharing any chat with you. | Per-chat visibility, if it ever proves worth the complexity. |
-| **Temp files** | "Open" writes a decrypted copy into the system temp directory and leaves it. | Open into a private directory wiped on exit. |
+| **Presence oracle** | The connector answers `lookup` for **any** pubkey — it knows no relationships, so it cannot tell who is entitled to ask about whom. Pubkeys are public (friend codes), so this is a presence oracle for the whole network, rate-limited to 60/min per session. | Blinded presence, or accepting that a rendezvous server knows who is online. |
+| **No passphrase** | Still allowed, now behind an explicit confirmation and a warning in both the CLI and the desktop setup screen. Without one, `identity.key` and the whole database sit on disk unencrypted. | Require one, at the cost of locking out users who lose it. |
 | **Mesh calls** | Each participant sees all streams (full mesh). | SFU relay for larger groups. |
 | **Traffic analysis** | Packet size/timing can reveal activity. | DTLS-level variable padding (Cebulion already adds 0–64B random pad per datagram). |
 | **Orphan flooding** | Capped at 5000 total orphaned events across all chats. | Per-peer rate limiting. |

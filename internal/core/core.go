@@ -5,6 +5,7 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
@@ -112,6 +113,7 @@ type Core struct {
 	stopCam      func()
 	stopScreen   func()
 	webhook      *http.Server
+	tempDir      string // per-session scratch for externally opened attachments
 }
 
 const langKey = "lang"
@@ -198,6 +200,7 @@ func (c *Core) Start() {
 }
 
 func (c *Core) Close() {
+	c.cleanTempDir()
 	c.StopWebhook()
 	c.LeaveAllCalls()
 	c.P2P.Close()
@@ -356,41 +359,13 @@ func (c *Core) Chats() []ChatInfo {
 
 // MaxName: ceiling on network-provided name (SetNick enforces this locally,
 // but peer sends arbitrary payload).
-const MaxName = 64
+const MaxName = event.MaxName
 
-// safeText cleanses incoming network text before rendering in UI: control characters
-// are stripped because TUI outputs text directly to terminal, and ANSI/OSC sequences
-// could redraw screen, spoof messages or tamper with clipboard. Newlines and tabs remain.
-func safeText(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' {
-			return r
-		}
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return -1
-		}
-		return r
-	}, s)
-}
-
-// safeName: single-line name (author, chat, friend) with capped length.
-func safeName(s string) string {
-	s = strings.ReplaceAll(safeText(s), "\n", " ")
-	s = strings.ReplaceAll(s, "\t", " ")
-	if len(s) > MaxName {
-		s = strings.ToValidUTF8(s[:MaxName], "")
-	}
-	return s
-}
-
-// safeBio: multi-line profile description — newlines survive, length capped.
-func safeBio(s string) string {
-	s = safeText(s)
-	if len(s) > MaxBio {
-		s = strings.ToValidUTF8(s[:MaxBio], "")
-	}
-	return s
-}
+// Sanitizing network text lives in the event package so the fold and the UI
+// index agree on one implementation — event cannot import core.
+func safeText(s string) string { return event.SafeText(s) }
+func safeName(s string) string { return event.SafeName(s) }
+func safeBio(s string) string  { return event.SafeBio(s) }
 
 // displayName: direct 2-person unnamed chat shows the other side's name.
 func (c *Core) displayName(st *event.State) string {
@@ -421,7 +396,7 @@ func (c *Core) memberName(st *event.State, pub []byte) string {
 	if fs, err := c.St.Friends(); err == nil {
 		for _, f := range fs {
 			if bytes.Equal(f.Pub, pub) {
-				return safeName(f.Name)
+				return safeName(f.Display())
 			}
 		}
 	}
@@ -814,6 +789,11 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 		return nil, err
 	}
 	c.invalidate(chat)
+	// same bookkeeping as on the receiving side (ingest): an attachment we
+	// authored ourselves must land in the blob-to-chat index too
+	if blobKind(kind) {
+		c.noteAttachment(chat, e)
+	}
 	c.gossip(chat, e, nil)
 	c.Notify()
 	return e, nil
@@ -821,8 +801,11 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 
 func (c *Core) CreateChat(name string) ([]byte, error) {
 	key := crypt.NewKey()
+	// Blob = sha256 of the epoch-1 key: the genesis event vouches for the key,
+	// so a peer cannot hand us a different one later (see handleKeys).
+	sum := sha256.Sum256(key)
 	e, err := event.New(c.ID.Priv, make([]byte, 32), event.KindCreate,
-		event.Body{Name: name, Text: c.ID.Name, TS: time.Now().Unix()}, 1, nil, 1, key)
+		event.Body{Name: name, Text: c.ID.Name, Blob: sum[:], TS: time.Now().Unix()}, 1, nil, 1, key)
 	if err != nil {
 		return nil, err
 	}
@@ -858,7 +841,7 @@ func (c *Core) CreateDirect(friend store.Friend) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.appendEvent(chat, event.KindAdd, event.Body{Pub: friend.Pub, Name: friend.Name, TS: time.Now().Unix()}); err != nil {
+	if _, err := c.appendEvent(chat, event.KindAdd, event.Body{Pub: friend.Pub, Name: friend.Display(), TS: time.Now().Unix()}); err != nil {
 		return nil, err
 	}
 	go c.ensurePeer(friend.Pub)
@@ -908,10 +891,14 @@ func (c *Core) Rekey(chat []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := c.appendEvent(chat, event.KindRekey, event.Body{TS: time.Now().Unix()}); err != nil {
+	// the rekey event announces sha256 of the key the next epoch will use, so
+	// members can tell the real key from one a peer made up
+	newKey := crypt.NewKey()
+	sum := sha256.Sum256(newKey)
+	if _, err := c.appendEvent(chat, event.KindRekey,
+		event.Body{Blob: sum[:], TS: time.Now().Unix()}); err != nil {
 		return err
 	}
-	newKey := crypt.NewKey()
 	if err := c.St.PutChatKey(chat, st.Epoch+1, newKey); err != nil {
 		return err
 	}

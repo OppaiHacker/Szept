@@ -71,11 +71,21 @@ func main() {
 		for cfg.Connector == "" {
 			cfg.Connector = prompt(r, "Adres connectora (np. ws://1.2.3.4:7777)", "")
 		}
-		pass := promptPass("Hasło do klucza (Enter = bez hasła)")
+		// Bez hasła klucz tożsamości i cała baza leżą na dysku jawnie — to ma
+		// być świadomy wybór, a nie domyślne „Enter i lecimy”.
+		pass := promptPass("Hasło do klucza (Enter = BEZ szyfrowania)")
 		if len(pass) > 0 {
 			again := promptPass("Powtórz hasło")
 			if string(pass) != string(again) {
 				fmt.Println("Hasła się różnią.")
+				os.Exit(1)
+			}
+		} else {
+			fmt.Println("UWAGA: bez hasła identity.key i baza (cała historia rozmów)")
+			fmt.Println("       zapisują się bez szyfrowania — kto ma dostęp do tego")
+			fmt.Println("       urządzenia lub kopii pliku, przeczyta wszystko.")
+			if strings.ToLower(prompt(r, "Na pewno bez hasła? [t/N]", "n")) != "t" {
+				fmt.Println("Przerwane — uruchom ponownie i podaj hasło.")
 				os.Exit(1)
 			}
 		}

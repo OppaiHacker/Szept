@@ -1080,7 +1080,7 @@ func (u *ui) applyCode(s string) {
 			return
 		}
 		u.refresh()
-		u.toast("Dodano znajomego: " + f.Name)
+		u.toast("Dodano znajomego: " + f.Display())
 	case strings.HasPrefix(s, "SZC-"):
 		pin := widget.NewEntry()
 		pin.PlaceHolder = "6 cyfr od zapraszającego"

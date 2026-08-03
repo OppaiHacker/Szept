@@ -33,16 +33,46 @@ var (
 	bAvatars = []byte("avatars") // pub -> enc(json ProfileMeta) — handy profile index
 	bHidden  = []byte("hidden")  // nested: chatID -> (eventID -> nil) — hidden locally
 	bMeta    = []byte("meta")    // key -> enc(value): own nick etc.
+	// bBlobChat: nested chatID -> (blobHash -> nil). bBlobs is global and keyed by
+	// content hash, so without this index "is the caller allowed to see this blob"
+	// could only be answered for the chat named in the request, not the chat the
+	// blob was actually announced in. Also makes blob GC on DeleteChat cheap.
+	bBlobChat = []byte("blobchat")
 )
 
 type ChatMeta struct {
 	Name string `json:"name"`
 }
 
+// Friend keeps two names apart on purpose. Name is what *this user* decided to
+// call the person; PeerName is whatever the other side last announced over
+// "hello". A compromised or malicious account can change what it calls itself —
+// it must not be able to change what you called it, which is the whole setup of
+// "hi, it's me, the admin".
 type Friend struct {
 	Pub       []byte `json:"pub"`
-	Name      string `json:"name"`
+	Name      string `json:"name"`                // given locally — always wins
+	PeerName  string `json:"peer_name,omitempty"` // last name from "hello"
 	Connector string `json:"connector,omitempty"`
+}
+
+// Display is the name to show: the local one if there is one, otherwise the
+// peer's own.
+func (f Friend) Display() string {
+	if f.Name != "" {
+		return f.Name
+	}
+	return f.PeerName
+}
+
+// Alias returns the peer's self-chosen name when it differs from the local one,
+// so a UI can show "introduces themselves as …" instead of silently hiding a
+// rename. Empty when there is nothing to warn about.
+func (f Friend) Alias() string {
+	if f.Name == "" || f.PeerName == "" || f.Name == f.PeerName {
+		return ""
+	}
+	return f.PeerName
 }
 
 type Invite struct {
@@ -78,7 +108,7 @@ func Open(path string, storageKey []byte) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bEvents, bHeads, bKeys, bChats, bFriends, bInvites, bBlobs, bAvatars, bHidden, bMeta} {
+		for _, b := range [][]byte{bEvents, bHeads, bKeys, bChats, bFriends, bInvites, bBlobs, bAvatars, bHidden, bMeta, bBlobChat} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -300,8 +330,73 @@ func (s *Store) DeleteChat(chat []byte) error {
 		tx.Bucket(bHeads).DeleteBucket(chat)
 		tx.Bucket(bKeys).DeleteBucket(chat)
 		tx.Bucket(bHidden).DeleteBucket(chat)
+		// blobs of this chat go too, unless another chat still announces them
+		// (content addressing means one file can be shared by several chats)
+		root := tx.Bucket(bBlobChat)
+		mine := root.Bucket(chat)
+		if mine == nil {
+			return nil
+		}
+		var orphaned [][]byte
+		mine.ForEach(func(hash, _ []byte) error {
+			if !blobUsedElsewhere(root, chat, hash) {
+				orphaned = append(orphaned, bytes.Clone(hash))
+			}
+			return nil
+		})
+		if err := root.DeleteBucket(chat); err != nil {
+			return err
+		}
+		for _, h := range orphaned {
+			if err := tx.Bucket(bBlobs).Delete(h); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
+}
+
+func blobUsedElsewhere(root *bolt.Bucket, chat, hash []byte) bool {
+	used := false
+	root.ForEachBucket(func(other []byte) error {
+		if used || bytes.Equal(other, chat) {
+			return nil
+		}
+		if b := root.Bucket(other); b != nil && b.Get(hash) != nil {
+			used = true
+		}
+		return nil
+	})
+	return used
+}
+
+// NoteBlobChat records that this chat announced this blob. Called wherever an
+// attachment, avatar or banner enters a chat.
+func (s *Store) NoteBlobChat(chat, hash []byte) error {
+	if len(hash) == 0 || len(chat) == 0 {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b, err := sub(tx, bBlobChat, chat, true)
+		if err != nil {
+			return err
+		}
+		return b.Put(hash, nil)
+	})
+}
+
+// BlobInChat reports whether this blob was announced in this chat. Serving a
+// blob to a chat member requires it — a shared chat must not become a key to
+// files from every other chat.
+func (s *Store) BlobInChat(chat, hash []byte) bool {
+	ok := false
+	s.db.View(func(tx *bolt.Tx) error {
+		if b, _ := sub(tx, bBlobChat, chat, false); b != nil {
+			ok = b.Get(hash) != nil
+		}
+		return nil
+	})
+	return ok
 }
 
 // ---- hidden events (soft delete locally only) ----
@@ -527,9 +622,8 @@ func (s *Store) TakeInvite(secretHash, pin []byte) (Invite, error) {
 // Content-addressed: key = sha256(plaintext bytes), so the same image
 // sent in five chats is stored once, and recipient verifies if they got what
 // signed event promised. Value is encrypted with storage key.
-// ponytail: no GC — DeleteChat leaves blobs. We will add cleanup when
-// someone's DB swells; today deleting them risks removing an attachment
-// still visible in another chat.
+// DeleteChat drops the blobs of the deleted chat, keeping any the bBlobChat
+// index still shows in another conversation.
 
 // PutBlob saves content under its hash and returns the hash.
 func (s *Store) PutBlob(data []byte) ([]byte, error) {

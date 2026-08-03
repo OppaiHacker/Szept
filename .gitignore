@@ -25,3 +25,9 @@ graphify-out/
 .idea/
 .vscode/
 .DS_Store
+
+# markdown: notes, plans and audit reports stay local.
+# Only the two docs that describe the project to the outside are tracked.
+*.md
+!/README.md
+!/SECURITY.md

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/kbinani/screenshot"
@@ -61,7 +62,22 @@ func StartScreen(fps int, cb func(jpegFrame []byte)) (stop func(), err error) {
 
 // ---- ffmpeg camera fallback (works on Windows/dshow and Linux/v4l2) ----
 
+// safeDevice keeps a configured camera name from turning into an ffmpeg flag.
+// There is no shell here, so this is not command injection — but a value
+// starting with "-" lands in argv as an option, and on Linux a camera is always
+// a /dev node. An unusable value falls back to the platform default.
+func safeDevice(device string) string {
+	if strings.HasPrefix(device, "-") {
+		return ""
+	}
+	if runtime.GOOS != "windows" && device != "" && !strings.HasPrefix(device, "/dev/") {
+		return ""
+	}
+	return device
+}
+
 func ffmpegArgs(device string) []string {
+	device = safeDevice(device)
 	switch runtime.GOOS {
 	case "windows":
 		if device == "" {

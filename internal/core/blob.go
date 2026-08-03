@@ -140,6 +140,33 @@ func (c *Core) SaveAttachment(hash []byte, name, dir string) (string, error) {
 	}
 }
 
+// TempDir returns a private, per-session scratch directory for attachments a
+// user opens in an external viewer. Plaintext in the shared os.TempDir() stayed
+// readable to every local account until reboot; this one is 0700 and Close()
+// deletes it with everything in it.
+func (c *Core) TempDir() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tempDir == "" {
+		d, err := os.MkdirTemp("", "szept-")
+		if err != nil {
+			return os.TempDir() // no scratch space: better a shared dir than none
+		}
+		c.tempDir = d
+	}
+	return c.tempDir
+}
+
+func (c *Core) cleanTempDir() {
+	c.mu.Lock()
+	d := c.tempDir
+	c.tempDir = ""
+	c.mu.Unlock()
+	if d != "" {
+		os.RemoveAll(d)
+	}
+}
+
 // BlobBytes returns attachment content if available locally.
 func (c *Core) BlobBytes(hash []byte) ([]byte, bool) { return c.St.GetBlob(hash) }
 
@@ -222,7 +249,7 @@ func (c *Core) AvatarOf(pub []byte) (data []byte, mime string, hash []byte) {
 // MaxStatus / MaxBio: ceilings on network-provided profile text.
 const (
 	MaxStatus = MaxName
-	MaxBio    = 400
+	MaxBio    = event.MaxBio
 )
 
 // SetStatus sets the short line under the name ("" clears it).
@@ -334,6 +361,13 @@ func (c *Core) noteAttachment(chat []byte, e *event.Event) {
 	b, err := e.Decrypt(key)
 	if err != nil {
 		return
+	}
+	// remember which chat announced these bytes — serveBlob checks it before
+	// handing anything over
+	for _, h := range [][]byte{b.Blob, b.Prev} {
+		if len(h) == sha256.Size {
+			c.St.NoteBlobChat(chat, h)
+		}
 	}
 	// profile index: friend list and member column do not need to traverse DAG.
 	// Text arrives from the network, so it is cleansed here, once, before storage.
@@ -480,14 +514,17 @@ func (c *Core) rescanAttachments() {
 
 // ---- transport ----
 
-// serveBlob: someone requested an attachment. We provide it only to members of the chat
-// in which the blob was announced.
-// ponytail: we don't verify whether this exact blob is in an event of this chat —
-// hash is known only from decrypted history, so the hash itself acts as a pass. Verification
-// would require decrypting the entire DAG on demand.
+// serveBlob: someone requested an attachment. Two conditions, both required —
+// the asker is a member of the chat they name, AND that chat is one the blob was
+// announced in. Membership alone was not enough: bBlobs is global, so any shared
+// chat used to be a pass to files from every other chat (the hash is guessable
+// for a known document, which also made it a confirmation oracle).
 func (c *Core) serveBlob(p *p2p.Peer, m Ctrl) {
 	st, err := c.ChatState(m.Chat)
 	if err != nil || !st.IsMember(p.Pub) {
+		return
+	}
+	if !c.St.BlobInChat(m.Chat, m.Blob) {
 		return
 	}
 	data, ok := c.St.GetBlob(m.Blob)
@@ -534,6 +571,12 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 		len(m.Part) == 0 || len(m.Part) > blobChunk {
 		return
 	}
+	// parts only from an active member of the chat the blob belongs to: onCtrl
+	// gates this on known(), which is any friend — including one who has nothing
+	// to do with this conversation
+	if st, err := c.ChatState(m.Chat); err != nil || !st.IsMember(p.Pub) {
+		return
+	}
 	key := string(m.Blob)
 	c.mu.Lock()
 	w := c.wants[key]
@@ -550,9 +593,14 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 		return // assembly memory budget exhausted
 	}
 	a := c.incoming[key]
-	if a == nil || len(a.parts) != m.Total {
+	if a == nil {
 		a = &blobAsm{parts: make([][]byte, m.Total), born: time.Now()}
 		c.incoming[key] = a
+	} else if len(a.parts) != m.Total {
+		// a contradictory Total is dropped, never acted on: rebuilding the buffer
+		// here threw away hundreds of already-fetched chunks on one crafted packet
+		c.mu.Unlock()
+		return
 	}
 	if a.parts[m.Idx] == nil {
 		a.parts[m.Idx] = bytes.Clone(m.Part)

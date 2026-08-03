@@ -86,12 +86,14 @@ func (c *Core) onCtrl(p *p2p.Peer, data []byte) {
 	}
 	switch m.T {
 	case "hello":
+		// a peer names itself, never you: "hello" only ever writes PeerName, so a
+		// name the user gave this contact stays put (see store.Friend)
 		if m.Name != "" && c.St.IsFriend(p.Pub) {
 			fs, _ := c.St.Friends()
 			name := safeName(m.Name)
 			for _, f := range fs {
-				if bytes.Equal(f.Pub, p.Pub) && f.Name != name {
-					f.Name = name
+				if bytes.Equal(f.Pub, p.Pub) && f.PeerName != name {
+					f.PeerName = name
 					c.St.PutFriend(f)
 				}
 			}
@@ -129,6 +131,21 @@ func (c *Core) knownChat(chat []byte) bool {
 	return ok
 }
 
+// maxPendingChats: chats a peer has announced but which never folded into a
+// usable state (no genesis, or we are not in them). They cost disk and CPU, so
+// the number a peer can leave lying around is capped.
+const maxPendingChats = 32
+
+func (c *Core) pendingChats() int {
+	n := 0
+	for idStr := range c.chatIDs() {
+		if _, err := c.ChatState([]byte(idStr)); err != nil {
+			n++
+		}
+	}
+	return n
+}
+
 func (c *Core) handleSync(p *p2p.Peer, m Ctrl) {
 	if !c.knownChat(m.Chat) {
 		// bootstrap: only friends or our inviter can introduce a new chat
@@ -137,6 +154,12 @@ func (c *Core) handleSync(p *p2p.Peer, m Ctrl) {
 		c.mu.Unlock()
 		fromInviter := r != nil && bytes.Equal(r.Inviter, p.Pub) && bytes.Equal(r.Chat, m.Chat)
 		if !c.St.IsFriend(p.Pub) && !fromInviter {
+			return
+		}
+		if len(m.Chat) != sha256.Size || c.pendingChats() >= maxPendingChats {
+			// a friend introducing chats in a loop would otherwise fill the
+			// database with empty ones, and every one of them is then walked by
+			// connectAll, announceProfile, rescanAttachments and known()
 			return
 		}
 		c.St.PutChat(m.Chat, store.ChatMeta{})
@@ -208,6 +231,9 @@ func (c *Core) handleEvents(p *p2p.Peer, m Ctrl) {
 		return
 	}
 	fresh := 0
+	if len(m.Events) > maxEventsPerFrame {
+		m.Events = m.Events[:maxEventsPerFrame] // symmetric with handleWant
+	}
 	for _, w := range m.Events {
 		e, err := event.Unmarshal(w)
 		if err != nil {
@@ -239,9 +265,21 @@ func (c *Core) redeemDone(chat []byte) {
 	c.mu.Unlock()
 }
 
+const (
+	// maxEventBytes: the DAG is append-only and replicated, so anything accepted
+	// here sits on every member's disk forever. Body.Text/Name/Bio are only capped
+	// on the *sending* side, which a hostile client simply ignores.
+	maxEventBytes = 256 << 10
+	// maxEventsPerFrame mirrors the outbound cap in handleWant.
+	maxEventsPerFrame = 2000
+)
+
 // ingest verifies and persists one event; returns true if newly stored.
 // Missing parents or missing epoch keys park the event in the orphan buffer.
 func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
+	if len(event.Marshal(e)) > maxEventBytes {
+		return false
+	}
 	id := e.ID()
 	if c.St.HasEvent(chat, id) {
 		return false
@@ -270,12 +308,17 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	}
 	keys, _ := c.St.ChatKeys(chat)
 	// FoldTrusted: signature of e was checked above, rest is already in database
-	if _, err := event.FoldTrusted(append(evs, e), chat, keys); err != nil {
-		if strings.Contains(err.Error(), "missing key") {
-			c.park(chat, e)
-			if from != nil {
-				from.SendCtrl(Ctrl{T: "keyreq", Chat: chat})
-			}
+	folded, err := event.FoldTrusted(append(evs, e), chat, keys)
+	if err != nil {
+		return false
+	}
+	// A membership event we cannot decrypt would be applied blind, so park it and
+	// ask for the epoch key instead. Content events are stored either way — they
+	// simply stay unreadable until the key shows up.
+	if folded.MissingKey[e.Epoch] && event.MembershipKind(e.Kind) {
+		c.park(chat, e)
+		if from != nil {
+			from.SendCtrl(Ctrl{T: "keyreq", Chat: chat})
 		}
 		return false
 	}
@@ -304,10 +347,30 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	return true
 }
 
+// typingTTL: an entry older than this is stale — the UI only shows 4 s of it
+// anyway, so anything past this point is pure residue.
+const typingTTL = 30 * time.Second
+
 func (c *Core) handleTyping(p *p2p.Peer, m Ctrl) {
+	// membership check: without it any friend could mint an entry for any chat id
+	// they invent, and neither map was ever cleaned
+	if st, err := c.ChatState(m.Chat); err != nil || !st.IsMember(p.Pub) {
+		return
+	}
 	c.mu.Lock()
 	if c.typing == nil {
 		c.typing = make(map[string]map[string]time.Time)
+	}
+	cutoff := time.Now().Add(-typingTTL)
+	for chat, peers := range c.typing {
+		for pub, at := range peers {
+			if at.Before(cutoff) {
+				delete(peers, pub)
+			}
+		}
+		if len(peers) == 0 {
+			delete(c.typing, chat)
+		}
 	}
 	chatStr := string(m.Chat)
 	if c.typing[chatStr] == nil {
@@ -324,7 +387,15 @@ func (c *Core) handleTyping(p *p2p.Peer, m Ctrl) {
 }
 
 func (c *Core) handleAck(p *p2p.Peer, m Ctrl) {
-	if len(m.EventID) == 0 || m.Status == "" {
+	// an ack is only meaningful for an event we hold, in a chat the sender is in.
+	// Unchecked, this map grew one entry per arbitrary EventID a friend made up.
+	if len(m.EventID) != sha256.Size || (m.Status != "delivered" && m.Status != "read") {
+		return
+	}
+	if st, err := c.ChatState(m.Chat); err != nil || !st.IsMember(p.Pub) {
+		return
+	}
+	if !c.St.HasEvent(m.Chat, m.EventID) {
 		return
 	}
 	c.mu.Lock()
@@ -390,14 +461,35 @@ func (c *Core) drainOrphans(chat []byte, from *p2p.Peer) {
 	}
 }
 
-// handleKeys accepts epoch keys. Only from chat member (or during
-// joining, when state does not exist yet — then only from inviter):
-// spoofed key cannot be removed and breaks epoch forever.
+// keyMatchesDAG decides whether an offered epoch key may be stored.
+//
+// An epoch key is not signed and cannot be replaced once written, so a member
+// used to be able to pre-fill epochs that did not exist yet; the real key was
+// then refused forever ("never overwrite known keys") and the chat died the
+// moment a membership event landed in the poisoned epoch.
+//
+// Chats created after this change publish sha256 of every epoch key inside the
+// signed KindCreate / KindRekey event — then the answer is exact. Older chats
+// have no such hash, so the best available rule applies: an epoch the signed
+// history has not announced yet is refused.
+func (c *Core) keyMatchesDAG(st *event.State, ep uint32, k []byte) bool {
+	if want, ok := st.KeyHash[ep]; ok {
+		sum := sha256.Sum256(k)
+		return bytes.Equal(sum[:], want)
+	}
+	return ep <= st.Epoch
+}
+
+// handleKeys accepts epoch keys. Only from a chat member (or during joining,
+// when state does not exist yet — then only from the inviter), and only when the
+// signed DAG vouches for the key: a stored key can never be replaced, so a wrong
+// one breaks its epoch forever.
 func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 	if !c.knownChat(m.Chat) {
 		return
 	}
-	if st, err := c.ChatState(m.Chat); err == nil {
+	st, stErr := c.ChatState(m.Chat)
+	if stErr == nil {
 		if !st.IsMember(p.Pub) {
 			return
 		}
@@ -420,6 +512,9 @@ func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 	for ep, k := range m.Epochs {
 		if _, have := existing[ep]; have || len(k) != 32 {
 			continue // never overwrite known keys
+		}
+		if stErr == nil && !c.keyMatchesDAG(st, ep, k) {
+			continue
 		}
 		if err := c.St.PutChatKey(m.Chat, ep, k); err == nil {
 			added = true
@@ -596,12 +691,13 @@ func (c *Core) AddFriend(code string) (store.Friend, error) {
 	}
 	// v.N: only old codes still carry a name; new ones don't. Until "hello"
 	// brings the real one, the fingerprint stands in — an empty row in the
-	// friend list would be unclickable.
+	// friend list would be unclickable. It goes to PeerName, not Name: the user
+	// has not named this contact yet, so a later "hello" may still fill it in.
 	name := safeName(v.N)
 	if name == "" {
 		name = identity.Fingerprint(v.P)[:9]
 	}
-	f = store.Friend{Pub: v.P, Name: name, Connector: v.U}
+	f = store.Friend{Pub: v.P, PeerName: name, Connector: v.U}
 	if err := c.St.PutFriend(f); err != nil {
 		return f, err
 	}

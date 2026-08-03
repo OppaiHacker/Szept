@@ -35,6 +35,8 @@ func main() {
 	seedsFlag := flag.String("seeds", "", "comma-separated list of seed connector URLs (e.g. ws://c2.szept.io:7777)")
 	publicURLFlag := flag.String("public-url", "", "public URL of this connector for SNDP protocol (e.g. ws://c1.szept.io:7777)")
 	maxPeersFlag := flag.Int("max-peers", 0, "max number of active peers (0 = no limit, exceeding limit triggers redirect)")
+	meshSecretFlag := flag.String("mesh-secret", "", "shared secret for the connector mesh (empty = mesh off)")
+	trustProxyFlag := flag.Bool("trust-proxy", false, "read the client IP from X-Forwarded-For (only behind your own reverse proxy)")
 	flag.Parse()
 
 	addr := normalizeListen(*listen)
@@ -64,6 +66,16 @@ func main() {
 	if *maxPeersFlag > 0 {
 		cServer.SetMaxPeers(*maxPeersFlag)
 		log.Printf("limit peerów ustawiony na: %d", *maxPeersFlag)
+	}
+	if *trustProxyFlag {
+		cServer.SetTrustProxy(true)
+		log.Print("ufam nagłówkowi X-Forwarded-For (--trust-proxy) — używaj TYLKO za własnym reverse proxy")
+	}
+	if *meshSecretFlag != "" {
+		cServer.SetMeshSecret(*meshSecretFlag)
+		log.Print("mesh (Sieć Cebulion) włączony — sąsiedzi muszą znać wspólny sekret")
+	} else {
+		log.Print("mesh (Sieć Cebulion) wyłączony (brak --mesh-secret)")
 	}
 	if *publicURLFlag != "" {
 		cServer.SetPublicURL(*publicURLFlag)

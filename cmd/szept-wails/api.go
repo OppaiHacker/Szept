@@ -279,8 +279,11 @@ type Chat struct {
 }
 
 type Friend struct {
-	Pub    string `json:"pub"`
-	Name   string `json:"name"`
+	Pub  string `json:"pub"`
+	Name string `json:"name"`
+	// Alias: the name the peer announces for itself when it differs from the one
+	// you gave them — a silent rename is exactly the socially engineered part.
+	Alias  string `json:"alias,omitempty"`
 	Online bool   `json:"online"`
 	Avatar string `json:"avatar"`
 	Status string `json:"status"`
@@ -352,7 +355,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 	for _, f := range fs {
 		st, _ := c.StatusOf(f.Pub)
 		s.Friends = append(s.Friends, Friend{
-			Pub: hexs(f.Pub), Name: f.Name, Online: c.Online(f.Pub),
+			Pub: hexs(f.Pub), Name: f.Display(), Alias: f.Alias(), Online: c.Online(f.Pub),
 			Avatar: avatarURL(c, f.Pub), Status: st, Chat: direct[hexs(f.Pub)],
 		})
 	}
@@ -731,7 +734,7 @@ func (a *App) AddFriend(code string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return f.Name, nil
+	return f.Display(), nil
 }
 
 func (a *App) DelFriend(pub string) error {
