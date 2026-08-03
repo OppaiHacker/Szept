@@ -278,11 +278,11 @@ func (m *model) exec(line string) tea.Cmd {
 		fs, _ := m.c.St.Friends()
 		found := false
 		for _, f := range fs {
-			if strings.EqualFold(f.Name, arg) || strings.HasPrefix(strings.ToLower(f.Name), strings.ToLower(arg)) {
+			if strings.EqualFold(f.Display(), arg) || strings.HasPrefix(strings.ToLower(f.Display()), strings.ToLower(arg)) {
 				if _, err := m.c.CreateDirect(f); err != nil {
 					m.logErr(err.Error())
 				} else {
-					m.log("czat z " + f.Name)
+					m.log("czat z " + f.Display())
 				}
 				found = true
 				break
@@ -321,7 +321,7 @@ func (m *model) exec(line string) tea.Cmd {
 		if err != nil {
 			m.logErr(err.Error())
 		} else {
-			m.log("dodano znajomego: " + f.Name)
+			m.log("dodano znajomego: " + f.Display())
 		}
 	case "/connector":
 		if arg == "" {
@@ -603,7 +603,7 @@ func (m *model) View() string {
 		if m.c.Online(f.Pub) {
 			dot = stOnline.Render("● ")
 		}
-		sb.WriteString(dot + truncate(f.Name, 24) + "\n")
+		sb.WriteString(dot + truncate(f.Display(), 24) + "\n")
 	}
 	side := lipgloss.NewStyle().Width(28).Height(m.h - 2).Render(sb.String())
 

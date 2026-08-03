@@ -19,3 +19,9 @@ bin/
 .idea/
 .vscode/
 .DS_Store
+
+# markdown: local notes stay out of the repo.
+# Only the two docs that describe the project to the outside are tracked.
+*.md
+!/README.md
+!/SECURITY.md

@@ -40,6 +40,26 @@ func (a *App) routes(next http.Handler) http.Handler {
 	})
 }
 
+// safeMimes: types we are willing to name on a response served from the app's
+// own origin. The mime of an avatar or banner is copied straight from the peer's
+// event, and attach.Verify only requires it to match the sniffed bytes — so a
+// peer can hand over "text/html" plus HTML and pass both checks. Anything off
+// this list is served as an opaque download instead.
+var safeMimes = map[string]bool{
+	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true,
+}
+
+// writeMedia sets a content type the webview cannot be talked into executing.
+func writeMedia(w http.ResponseWriter, mime string, data []byte) {
+	if !safeMimes[mime] {
+		mime = "application/octet-stream"
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Content-Type", mime)
+	w.Write(data)
+}
+
 func (a *App) serveBlob(w http.ResponseWriter, name string) {
 	c, err := a.live()
 	if err != nil {
@@ -57,8 +77,7 @@ func (a *App) serveBlob(w http.ResponseWriter, name string) {
 	}
 	// Content hashes are immutable, so this can be cached forever.
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.Header().Set("Content-Type", http.DetectContentType(data))
-	w.Write(data)
+	writeMedia(w, http.DetectContentType(data), data)
 }
 
 func (a *App) serveCard(w http.ResponseWriter, pub string, banner bool) {
@@ -83,8 +102,7 @@ func (a *App) serveCard(w http.ResponseWriter, pub string, banner bool) {
 		mime = http.DetectContentType(data)
 	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.Header().Set("Content-Type", mime)
-	w.Write(data)
+	writeMedia(w, mime, data)
 }
 
 // nil2req: http.NotFound needs a request it never reads. Keeps the callers tidy.

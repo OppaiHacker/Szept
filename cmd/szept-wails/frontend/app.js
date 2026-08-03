@@ -272,6 +272,7 @@ function renderGate() {
             <div class="field"><label>Hasło klucza <span style="text-transform:none;color:var(--faint)">(opcjonalne)</span></label>
               <input class="input" id="g-pass" type="password" placeholder="•••••"></div>
             <p class="hint-text" style="padding:0 16px">Connector to lekki serwer spotkań — sam nie widzi treści rozmów.</p>
+            <p class="hint-text err" style="padding:0 16px">Bez hasła klucz i cała historia rozmów leżą na dysku bez szyfrowania — kto ma dostęp do urządzenia, przeczyta wszystko.</p>
           ` : `
             <div class="field"><label>Hasło</label>
               <input class="input" id="g-pass" type="password" placeholder="hasło klucza" autofocus></div>
@@ -357,7 +358,7 @@ function friendRow(f) {
       ${presenceAvatar(f.avatar, f.name, f.pub, f.online)}
       <div class="row-body">
         <div class="row-top"><span class="row-name">${esc(f.name)}</span></div>
-        <div class="row-sub">${esc(f.status || (f.online ? "online" : "offline"))}</div>
+        <div class="row-sub">${f.alias ? `przedstawia się jako „${esc(f.alias)}” · ` : ""}${esc(f.status || (f.online ? "online" : "offline"))}</div>
       </div>
       <div class="row-tail">
         <span class="icon-btn" data-act="dm" data-pub="${f.pub}" title="Napisz">${icon("chat")}</span>

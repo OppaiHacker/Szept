@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"szept/internal/crypt"
 )
@@ -36,6 +37,13 @@ const (
 	// the whole card.
 	KindProfile = "profile"
 )
+
+// MembershipKind: events that decide who belongs to the chat. The fold can only
+// judge authorization once these are readable, so a caller holding no key for
+// one of them should wait for the key rather than store it.
+func MembershipKind(kind string) bool {
+	return kind == KindCreate || kind == KindAdd || kind == KindRemove || kind == KindRekey
+}
 
 // QuietKinds: profile and modifying events. Not separate conversation items —
 // we don't render them as separate lines and they don't increment unread badges.
@@ -163,6 +171,50 @@ func Unmarshal(b []byte) (*Event, error) {
 	return &e, nil
 }
 
+// ---- text arriving from the network ----
+
+const (
+	// MaxName: ceiling on a network-provided name (a peer sends arbitrary bytes).
+	MaxName = 64
+	// MaxBio: ceiling on the longer profile description.
+	MaxBio = 400
+)
+
+// SafeText cleanses incoming network text before it is rendered: control
+// characters are stripped because the TUI writes text straight to the terminal,
+// where ANSI/OSC sequences could redraw the screen, spoof messages or touch the
+// clipboard. Newlines and tabs remain.
+func SafeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// SafeName: single-line name (author, chat, friend) with capped length.
+func SafeName(s string) string {
+	s = strings.ReplaceAll(SafeText(s), "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	if len(s) > MaxName {
+		s = strings.ToValidUTF8(s[:MaxName], "")
+	}
+	return s
+}
+
+// SafeBio: multi-line profile description — newlines survive, length capped.
+func SafeBio(s string) string {
+	s = SafeText(s)
+	if len(s) > MaxBio {
+		s = strings.ToValidUTF8(s[:MaxBio], "")
+	}
+	return s
+}
+
 // ---- membership fold ----
 
 type Member struct {
@@ -185,12 +237,27 @@ type State struct {
 	Members   map[string]*Member           // key: hex-free string(pub)
 	Reactions map[string]map[string]string // key: string(targetID) -> pub -> emoji
 	Deleted   map[string]bool              // key: string(targetID) -> true
+
+	// KeyHash: epoch -> sha256 of the key that epoch is *supposed* to use, as
+	// announced by the signed KindCreate / KindRekey event. Lets the key handler
+	// reject a key that does not match what the DAG promised. Absent for chats
+	// created before this field existed — see handleKeys for the legacy path.
+	KeyHash map[uint32][]byte
+
+	// MissingKey: epochs we hold no usable key for. Membership events in those
+	// epochs were skipped rather than aborting the fold — one bad epoch key must
+	// degrade the view of the chat, never destroy the chat.
+	MissingKey map[uint32]bool
 }
 
 func (s *State) IsMember(pub []byte) bool {
 	m, ok := s.Members[string(pub)]
 	return ok && !m.Removed
 }
+
+// Degraded reports whether part of the history was unreadable, so membership
+// here is incomplete and must not be used to reject events.
+func (s *State) Degraded() bool { return len(s.MissingKey) > 0 }
 
 // Sort events into canonical apply order: (Lamport, ID).
 func SortCanonical(evs []*Event) {
@@ -221,9 +288,11 @@ func FoldTrusted(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, e
 func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*State, error) {
 	SortCanonical(evs)
 	st := &State{
-		Members:   map[string]*Member{},
-		Reactions: map[string]map[string]string{},
-		Deleted:   map[string]bool{},
+		Members:    map[string]*Member{},
+		Reactions:  map[string]map[string]string{},
+		Deleted:    map[string]bool{},
+		KeyHash:    map[uint32][]byte{},
+		MissingKey: map[uint32]bool{},
 	}
 	// parent Lamport: apply order derives from DAG, not internal counter
 	seen := make(map[string]uint64, len(evs))
@@ -258,13 +327,15 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 			}
 		}
 		if !ok {
-			// Can't decrypt: tolerate only content kinds; membership must be readable.
-			switch e.Kind {
-			case KindMsg, KindRename, KindFile, KindAvatar, KindNick, KindReact,
-				KindDelete, KindProfile:
-				continue
+			// Can't decrypt. Genesis is fatal — without it there is no chat at all.
+			// Everything else is skipped and the epoch is flagged: a single bad or
+			// not-yet-delivered epoch key used to abort the whole fold, which made
+			// key poisoning a permanent chat lockout instead of a gap in the view.
+			if isGenesis {
+				return nil, fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
 			}
-			return nil, fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
+			st.MissingKey[e.Epoch] = true
+			continue
 		}
 		switch e.Kind {
 		case KindCreate:
@@ -275,16 +346,34 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 			}
 			// body.Name = chat name, body.Text = creator's display name
 			st.Owner = e.Author
-			st.Name = body.Name
+			st.Name = SafeName(body.Name)
 			st.Epoch = 1
-			st.Members[string(e.Author)] = &Member{Pub: e.Author, Name: body.Text}
+			st.Members[string(e.Author)] = &Member{Pub: e.Author, Name: SafeName(body.Text)}
+			if len(body.Blob) == sha256.Size {
+				st.KeyHash[1] = body.Blob
+			}
 		case KindAdd:
 			if !st.IsMember(e.Author) {
+				if st.Degraded() {
+					continue // membership view has holes; cannot judge the author
+				}
 				return nil, errors.New("add by non-member")
 			}
-			if len(body.Pub) == ed25519.PublicKeySize {
-				st.Members[string(body.Pub)] = &Member{Pub: body.Pub, Name: body.Name, AddedBy: e.Author}
+			if len(body.Pub) != ed25519.PublicKeySize {
+				break
 			}
+			// "add" adds; it never rewrites an existing entry. Overwriting let any
+			// member resurrect someone the owner kicked, rename the owner in signed
+			// state, and — via AddedBy — make the owner's own kick cascade onto
+			// themselves, locking the chat for everyone. Re-admitting a removed
+			// member is the owner's call alone.
+			if prev, exists := st.Members[string(body.Pub)]; exists {
+				if prev.Removed && bytes.Equal(e.Author, st.Owner) {
+					prev.Removed, prev.AddedBy = false, nil
+				}
+				break
+			}
+			st.Members[string(body.Pub)] = &Member{Pub: body.Pub, Name: SafeName(body.Name), AddedBy: e.Author}
 		case KindRemove:
 			if !bytes.Equal(e.Author, st.Owner) {
 				return nil, errors.New("remove by non-owner")
@@ -297,12 +386,19 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 			if e.Epoch+1 > st.Epoch {
 				st.Epoch = e.Epoch + 1
 			}
+			// binds the next epoch's key to signed history (see State.KeyHash)
+			if len(body.Blob) == sha256.Size {
+				st.KeyHash[e.Epoch+1] = body.Blob
+			}
 		case KindRename:
 			if st.IsMember(e.Author) {
-				st.Name = body.Name
+				st.Name = SafeName(body.Name)
 			}
 		case KindMsg, KindFile:
 			if !st.IsMember(e.Author) {
+				if st.Degraded() {
+					continue
+				}
 				return nil, errors.New("msg by non-member")
 			}
 		case KindAvatar:
@@ -311,18 +407,23 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 				m.Avatar, m.AvatarMime = body.Blob, body.Mime
 			}
 		case KindProfile:
-			// status, description and banner — your own card, nobody else's
+			// status, description and banner — your own card, nobody else's.
+			// Text arrives from the network: cleanse and cap it here too, so the
+			// folded state is as safe to render as the profile index.
 			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
-				m.Status, m.Bio = body.Text, body.Bio
+				m.Status, m.Bio = SafeName(body.Text), SafeBio(body.Bio)
 				m.Banner, m.BannerMime = body.Blob, body.Mime
 			}
 		case KindNick:
 			// your own display name, nobody else's
 			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed && body.Name != "" {
-				m.Name = body.Name
+				m.Name = SafeName(body.Name)
 			}
 		case KindReact:
 			if !st.IsMember(e.Author) {
+				if st.Degraded() {
+					continue
+				}
 				return nil, errors.New("react by non-member")
 			}
 			if len(body.Target) > 0 {
@@ -338,6 +439,9 @@ func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*St
 			}
 		case KindDelete:
 			if !st.IsMember(e.Author) {
+				if st.Degraded() {
+					continue
+				}
 				return nil, errors.New("delete by non-member")
 			}
 			if len(body.Target) > 0 {

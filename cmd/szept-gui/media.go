@@ -752,7 +752,7 @@ func (u *ui) saveAttachment(m core.Msg) {
 // system viewer. Name and extension come from detected type,
 // not network — we don't execute anything directly.
 func (u *ui) openExternal(m core.Msg) {
-	path, err := u.c.SaveAttachment(m.Blob, m.File, os.TempDir())
+	path, err := u.c.SaveAttachment(m.Blob, m.File, u.c.TempDir())
 	if err != nil {
 		u.fail(err)
 		return

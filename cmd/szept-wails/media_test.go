@@ -40,6 +40,32 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
+// The mime of an avatar or banner comes from the peer's event, and the
+// route sits in the app's own origin — so anything but a plain image must be
+// served as an opaque download, never as a type the webview would render.
+func TestCardMimeWhitelist(t *testing.T) {
+	for mime, want := range map[string]string{
+		"image/png":                "image/png",
+		"image/jpeg":               "image/jpeg",
+		"image/gif":                "image/gif",
+		"image/webp":               "image/webp",
+		"text/html":                "application/octet-stream",
+		"image/svg+xml":            "application/octet-stream",
+		"application/javascript":   "application/octet-stream",
+		"text/html; charset=utf-8": "application/octet-stream",
+		"":                         "application/octet-stream",
+	} {
+		w := httptest.NewRecorder()
+		writeMedia(w, mime, []byte("bajty"))
+		if got := w.Header().Get("Content-Type"); got != want {
+			t.Errorf("mime %q podany jako %q, chciano %q", mime, got, want)
+		}
+		if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("mime %q: brak nosniff (%q)", mime, got)
+		}
+	}
+}
+
 // Media routes must answer on their own paths and leave everything else to the
 // embedded frontend — a fallthrough bug would serve index.html as a picture.
 func TestRoutes(t *testing.T) {

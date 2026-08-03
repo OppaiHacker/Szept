@@ -15,7 +15,7 @@
 |---|---|
 | **Encryption** | Ed25519 identity · XChaCha20-Poly1305 epoch keys · DTLS 1.2+ transport |
 | **P2P & Serverless** | Content never touches a server. Peers exchange data directly over WebRTC. |
-| **Cebulion Network** | Distributed mesh of connectors with SNDP gossip discovery, Dijkstra-routed signaling, and automatic failover — if any connector goes down, the network keeps running. |
+| **Cebulion Network** | Optional authenticated mesh of connectors with SNDP gossip discovery and automatic failover — if any connector goes down, the network keeps running. |
 | **DPI-Proof Obfuscation** | Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream with variable random padding — STUN/DTLS headers vanish, leaving only high-entropy noise. |
 | **DAG History** | Every chat is a signed, SHA-256 hash-linked DAG with Lamport-ordered events. History syncs automatically when peers reconnect. |
 | **Voice, Video & Screen** | Real-time mesh calls with camera and desktop sharing (up to ~8 peers), an in-call control panel, per-person volume, deafen, and a **spatial room** where position drives the mix (3D on Android, top-down on the desktop). |
@@ -79,19 +79,20 @@ A single connector works fine, but connectors can also join the **Cebulion Netwo
 
 | Component | Mechanism |
 |---|---|
-| **SNDP Gossip** | Every 15 seconds, each connector pings its seeds and known neighbors via `/ndp/neighbors`, exchanging peer counts, RTT latencies, and the full topology graph. |
-| **Topology Map** | A BGP-like link-state graph: `nodeA → nodeB → RTT(ms)`. Max 256 nodes, max 64 neighbors per connector. |
-| **Dijkstra Routing** | When a signal's destination isn't local, the connector computes the shortest path (RTT-weighted) and forwards `mesh_signal` to the optimal next hop. |
-| **Loop Prevention** | Each `mesh_signal` carries a random `TraceID` and a `TTL` (default 5). Seen traces are deduplicated for 5 minutes. |
+| **Shared secret** | The mesh only exists with `--mesh-secret`. A neighbour proves itself with `mesh_hello` (HMAC-SHA256 over the secret and a timestamp) before it may gossip or relay; client sockets never reach those operations. |
+| **SNDP Gossip** | Every 15 seconds, each connector pings its seeds and known neighbors via `/ndp/neighbors`, exchanging peer counts and RTT latencies. Neighbour URLs must be public `ws://`/`wss://` addresses — private and link-local targets are refused before and after DNS resolution. |
+| **Relaying** | When a signal's destination isn't local, `mesh_signal` goes to at most 4 active neighbours. Max 64 neighbours per connector. |
+| **Loop Prevention** | Each `mesh_signal` carries a random `TraceID` and a `TTL` (default 5). Seen traces are deduplicated for 5 minutes, capped at 100 000. |
 | **Load Balancing** | When `--max-peers` is reached, the connector upgrades the WebSocket, sends a `redirect` with active neighbor URLs, and closes — the client reconnects to a neighbor automatically. |
-| **Fallback URLs** | Clients maintain a list of `FallbackURLs` (populated from redirects and invite codes); on disconnect, they try each URL before backing off. |
+| **Fallback URLs** | Clients maintain a list of `FallbackURLs` (populated from redirects and invite codes); on disconnect, they try each URL before backing off. A redirect may not downgrade `wss://` to `ws://`, and the list is capped at 8. |
 | **DNS Resilience** | If system DNS fails (`no such host`), the client falls back to resolving via `1.1.1.1:53`, and if port 53 is blocked, via DNS-over-HTTPS (DoH) to `1.1.1.1`. |
 
 **Starting a connector in the mesh:**
 ```bash
 ./bin/szept-connector --listen :7777 \
   --public-url ws://c1.example.com:7777 \
-  --seeds ws://c2.example.com:7777,ws://c3.example.com:7777
+  --seeds ws://c2.example.com:7777,ws://c3.example.com:7777 \
+  --mesh-secret "$(cat /etc/szept/mesh.secret)"   # ten sam sekret na każdym węźle
 ```
 
 ### Switching connectors from the app
@@ -493,16 +494,18 @@ Connector może działać sam lub dołączyć do **Sieci Cebulion** — rozprosz
 ![Szept — Sieć Cebulion](assets/cebulion_network.jpg)
 
 **Jak działa:**
-- **SNDP Gossip** — connectory co 15 sekund wymieniają listę sąsiadów i topologię (RTT)
-- **Routing Dijkstry** — sygnał trafia do celu najszybszą ścieżką przez siatkę
-- **Failover** — padnięcie węzła = automatyczny rerouting; klient próbuje fallback URL-i
+- **Wspólny sekret** — siatka istnieje tylko z `--mesh-secret`; sąsiad przedstawia się `mesh_hello` (HMAC-SHA256 z sekretu i znacznika czasu), zanim wolno mu cokolwiek przekazać. Gniazda klienckie nigdy tam nie sięgają.
+- **SNDP Gossip** — connectory co 15 sekund wymieniają listę sąsiadów i RTT; adresem sąsiada może być tylko publiczny `ws://`/`wss://`
+- **Przekazywanie** — sygnał do nieznanego lokalnie celu idzie do najwyżej 4 aktywnych sąsiadów (TTL + TraceID ucinają pętle)
+- **Failover** — padnięcie węzła = klient próbuje fallback URL-i (bez degradacji `wss://` do `ws://`)
 - **Load balancing** — przeciążony connector odsyła klienta do sąsiada z wolnymi slotami
 
 **Uruchomienie connectora w siatce:**
 ```bash
 ./bin/szept-connector --listen :7777 \
   --public-url ws://c1.example.com:7777 \
-  --seeds ws://c2.example.com:7777,ws://c3.example.com:7777
+  --seeds ws://c2.example.com:7777,ws://c3.example.com:7777 \
+  --mesh-secret "$(cat /etc/szept/mesh.secret)"   # ten sam sekret na każdym węźle
 ```
 
 ### Przełączanie connectorów w aplikacji
