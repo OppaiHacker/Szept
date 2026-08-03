@@ -67,6 +67,8 @@ Szept requires **no central application server**. The only infrastructure is a l
 3. **Connect** — DTLS 1.2+ handshake directly between peers. Certificate is identity-bound — connector cannot MITM.
 4. **Sync** — Peers exchange DAG head hashes and pull missing events over the authenticated E2E channel.
 
+**Does the connector have to stay up?** Only while a link is being established. Once the DTLS channel exists, messages, files and calls go straight between peers — the connector can die and the conversation continues. It is needed for every *new* link and for every reconnect after one drops (sleep, network change, NAT rebind), because there is no fallback rendezvous: ICE mDNS is disabled and there is no direct-IP dial. Writing while disconnected still works — events land in your local DAG and travel over `sync` once the link is back, though delivery needs both sides online at the same time (no store-and-forward mailbox). Recovery is automatic: the client reconnects with backoff and re-dials known peers every 30 s. Details in [SECURITY.md](SECURITY.md#when-the-connector-is-needed).
+
 ---
 
 ## 🧅 Cebulion Network — Resilient Connector Mesh
@@ -484,6 +486,8 @@ Jedynym elementem infrastruktury jest **Connector** — ~200-liniowy, stateless 
 2. **Sygnalizacja** — oferta SDP (odcisk certyfikatu DTLS + 32-bajtowy klucz obfuskacji) podpisana Ed25519, okno świeżości ±2 minuty, jawny adresat, rozstrzyganie kolizji (wygrywa niższy pubkey).
 3. **Połączenie** — handshake DTLS 1.2+ bezpośrednio między peerami. Certyfikat związany z tożsamością — connector nie zrobi MITM.
 4. **Synchronizacja** — peery wymieniają hashe czół DAG i dociągają brakujące zdarzenia szyfrowanym kanałem.
+
+**Czy connector musi stać cały czas?** Tylko na czas zestawienia łącza. Kiedy kanał DTLS już istnieje, wiadomości, pliki i rozmowy lecą bezpośrednio między peerami — connector może paść, a rozmowa trwa dalej. Potrzebny jest przy każdym *nowym* połączeniu i po każdym zerwaniu (uśpienie, zmiana sieci, rebind NAT), bo nie ma zapasowego punktu spotkania: mDNS w ICE jest wyłączony, a bezpośredniego dzwonienia po IP nie ma. Pisanie bez połączenia działa — zdarzenia lądują w lokalnym DAG i przechodzą przez `sync`, kiedy łącze wróci, ale dostarczenie wymaga, żeby obie strony były online w tym samym czasie (nie ma skrzynki store-and-forward). Powrót dzieje się sam: klient wznawia sesję z backoffem i co 30 s ponawia łączenie ze znanymi peerami. Szczegóły w [SECURITY.md](SECURITY.md#when-the-connector-is-needed).
 
 ---
 

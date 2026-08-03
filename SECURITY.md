@@ -67,6 +67,21 @@ History is **immutable** — modifying any event changes its hash and breaks eve
 
 A single connector works as a stateless signaling relay (~200 lines). It maps `pubkey → WebSocket` and forwards opaque blobs. It stamps `from` from the authenticated registration — clients cannot spoof the sender field.
 
+### When the connector is needed
+
+The connector is a rendezvous point, not a transport. It is needed **while a link is being set up**, never while you talk.
+
+| Connector | What works | What does not |
+|---|---|---|
+| Unreachable, link already up | Everything on that link: messages, files, calls, blob transfers | — |
+| Unreachable, no link to that peer | Local reads and writes — an event is appended to your own DAG and gossiped to peers you are already connected to | Reaching a peer you have no link to. No `lookup`, no signalling, so no new DTLS handshake |
+
+- `ensurePeer` asks `lookup` whether the peer is online and only then dials through `Signal`; both go over the connector socket.
+- **There is no fallback rendezvous.** ICE mDNS is disabled on purpose so no cleartext `.local` multicast leaks alongside the obfuscated flow, and there is no direct-IP dial. The connector — or the Cebulion mesh behind it — is the only way two clients find each other.
+- Links drop for ordinary reasons: sleep, network change, NAT rebind. So a connector has to be reachable most of the time even though not one message byte passes through it.
+- Recovery needs no user action: `Client.Run()` reconnects with exponential backoff (1 s → 30 s), `connectAll` re-dials known friends and chat members every 30 s, and a restored link syncs the DAG from its heads.
+- Nothing written offline is lost. Events wait in the local DAG and travel over `sync`/`want` once the link is back — but delivery still needs **both** sides online at the same time. There is no mailbox; see Known trade-offs.
+
 ### Cebulion mesh
 
 Connectors can join the **Cebulion Network** — a distributed mesh providing fault tolerance and load balancing.
@@ -370,6 +385,7 @@ Every peer-to-peer UDP datagram is wrapped in a ChaCha20 keystream:
 | **Forward secrecy** | Sessions: yes (ephemeral DTLS). Chat history: no — epoch keys retained so new members can read history. Intentional product decision. | Frequent `/rekey` narrows the window. Double Ratchet for 1:1 chats. |
 | **Offline delivery** | None — P2P means no mailbox. | Opt-in sealed-sender store-and-forward relay. |
 | **Connector metadata** | Sees connection graph (like a torrent tracker). | Self-host + Tor/VPN + Cebulion mesh. |
+| **Rendezvous dependency** | With no reachable connector you cannot open a new link or rebuild a dropped one — mDNS is off and there is no direct-IP dial. Established links and local writes are unaffected. | A Cebulion mesh with more than one node; LAN discovery would drop the dependency for peers on the same network. |
 | **Webhook token** | Plaintext in `config.json` (`0600`). Any local process that reads it can send as you. | OS keyring, or a per-caller token with a scope. |
 | **Connector lists** | Fetching one reveals your IP to its host, and its entries land in your switch list. | Pin the connectors you trust and skip lists entirely. |
 | **Profile card** | Status, description and banner are visible to everyone sharing any chat with you. | Per-chat visibility, if it ever proves worth the complexity. |
