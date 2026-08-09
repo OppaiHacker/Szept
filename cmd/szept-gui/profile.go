@@ -36,28 +36,29 @@ func (u *ui) rebuildMe() {
 	if u.meBox == nil {
 		return
 	}
-	name := canvas.NewText(u.c.ID.Name, cFg)
-	name.TextSize = fs(20)
-	name.TextStyle = fyne.TextStyle{Bold: true}
-	fp := mutedText(identity.Fingerprint(u.c.ID.Pub), 11)
+	name := newClipText(u.c.ID.Name, fs(20), cFgStrong).bold()
+	fp := monoText(identity.Fingerprint(u.c.ID.Pub), 11, cFg2)
 	state, tone := "łączenie z connectorem…", cOrange
 	if u.c.ConnUp() {
 		state, tone = "połączony", cGreen
 	} else if e := u.c.ConnErr(); e != "" {
 		state, tone = "błąd połączenia", cRed
 	}
-	dot := canvas.NewText("●", tone)
-	dot.TextSize = fs(11)
 	status, bio := u.c.StatusOf(u.c.ID.Pub)
 
-	col := container.NewVBox(name, fp,
-		container.NewHBox(container.NewCenter(dot), hspace(4),
-			container.NewCenter(mutedText(state, 11))))
+	// code and connection as chips: two facts of different kinds, one about you
+	// and one about the network, that used to run together as three grey lines
+	col := container.NewVBox(name,
+		container.NewHBox(pill(cSurface2, 999, pad(3, 9, fp))),
+		container.NewHBox(dotChip(state, tone)))
 	if status != "" {
 		col.Add(mutedText(status, 12))
 	}
-	head := fyne.CanvasObject(container.NewHBox(
-		container.NewCenter(u.avatarView(u.c.ID.Pub, u.c.ID.Name, avatarHuge)), hspace(12), col))
+	head := fyne.CanvasObject(container.NewBorder(nil, nil,
+		tightHBox(0, container.NewCenter(
+			presence(u.avatarView(u.c.ID.Pub, u.c.ID.Name, avatarHuge), avatarHuge,
+				u.c.ConnUp(), cSurface)), hspace(6)),
+		nil, vcenter(col)))
 	if b := u.bannerView(u.c.ID.Pub, u.bannerW()); b != nil {
 		head = container.NewVBox(b, head)
 	}

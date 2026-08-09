@@ -6,6 +6,27 @@ import { Call, Events } from "/wails/runtime.js";
 
 const api = (method, ...args) => Call.ByName("main.App." + method, ...args);
 
+/* ============================ theme ============================ */
+
+// The desktop decides unless the user pins a theme. Resolving "auto" here and
+// stamping the answer on <html> keeps the stylesheet down to one palette per
+// theme — no media query duplicated for every token.
+const LIGHT_Q = matchMedia("(prefers-color-scheme: light)");
+let themePref = "auto";
+try { themePref = localStorage.getItem("theme") || "auto"; } catch { /* opaque origin */ }
+
+function applyTheme() {
+  document.documentElement.dataset.theme =
+    themePref === "auto" ? (LIGHT_Q.matches ? "light" : "dark") : themePref;
+}
+function setTheme(pref) {
+  themePref = pref;
+  try { localStorage.setItem("theme", pref); } catch { /* not persisted, still applied */ }
+  applyTheme();
+}
+LIGHT_Q.addEventListener("change", applyTheme);
+applyTheme();
+
 /* ============================ tiny helpers ============================ */
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -151,9 +172,7 @@ function toast(text, kind = "") {
   el.textContent = text;
   $("#toasts").append(el);
   setTimeout(() => {
-    el.style.transition = "opacity .25s, translate .25s";
-    el.style.opacity = "0";
-    el.style.translate = "0 8px";
+    el.classList.add("out");
     setTimeout(() => el.remove(), 260);
   }, kind === "err" ? 4200 : 2400);
 }
@@ -166,6 +185,20 @@ window.addEventListener("unhandledrejection", (e) => fail(e.reason));
 window.addEventListener("error", (e) => fail(e.message));
 
 let modalClose = null;
+
+// Where the last press landed. A sheet that grows out of the control you
+// pressed keeps the spatial relationship between trigger and content obvious;
+// one that always blooms from the middle of the screen throws it away.
+let lastPress = null;
+document.addEventListener("pointerdown", (e) => { lastPress = [e.clientX, e.clientY]; }, true);
+
+function anchor(box) {
+  if (!lastPress) return;
+  const r = box.getBoundingClientRect();
+  const pct = (v, size) => Math.max(-15, Math.min(115, (v / size) * 100)).toFixed(1) + "%";
+  box.style.setProperty("--ox", pct(lastPress[0] - r.left, r.width));
+  box.style.setProperty("--oy", pct(lastPress[1] - r.top, r.height));
+}
 
 // modal({title, body, actions, wide, onMount}) -> Promise resolved with the
 // value passed to the action that closed it (null when dismissed).
@@ -185,6 +218,7 @@ function modal({ title, body: bodyHTML, actions = [], wide = false, onMount }) {
         </div>
       </div>`;
     const box = $(".modal", root);
+    anchor(box);
     modalClose = (result) => { root.innerHTML = ""; modalClose = null; resolve(result); };
     root._actions = actions;
     onMount?.(box);
@@ -520,12 +554,13 @@ function reactionsHTML(m, mePub) {
   return `<div class="reactions">${chips}</div>`;
 }
 
-function msgHTML(m, prev, mePub) {
+function msgHTML(m, prev, mePub, fresh) {
   if (m.kind === "info") {
     return `<div class="sys">${body(m.text)}</div>`;
   }
   const grouped = prev && prev.kind !== "info" && prev.author === m.author && m.ts - prev.ts < 300;
-  const cls = ["msg", m.mine ? "mine" : "", grouped ? "grouped" : "", m.deleted ? "deleted" : ""].join(" ");
+  const cls = ["msg", m.mine ? "mine" : "", grouped ? "grouped" : "",
+    m.deleted ? "deleted" : "", fresh ? "fresh" : ""].join(" ");
   // the clock already lives in the bubble's meta line — the header only names
   // who is speaking, and only for the first message of a block
   const head = grouped || m.mine ? "" : `<div class="msg-who">
@@ -625,19 +660,31 @@ function updateHead(c) {
     <button class="icon-btn" data-act="chat-menu" title="Więcej">${icon("gear")}</button>`;
 }
 
+// Which messages have already been on screen. The list is rebuilt wholesale on
+// every change, so without this every repaint would replay the entrance
+// animation for the entire history.
+let seenChat = null, seenIds = new Set();
+
 function updateMsgs(c) {
   const list = $("#msgs");
   const keepBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 60 || !list.scrollHeight;
   const prevTop = list.scrollTop, prevHeight = list.scrollHeight;
 
+  const opened = seenChat !== S.chat;
+  if (opened) { seenChat = S.chat; seenIds = new Set(); }
+  // Anything past the newest message we already know about is genuinely new.
+  // Older pages pulled in by scrolling up land *before* it and stay still.
+  const lastKnown = c.msgs.findLastIndex((m) => seenIds.has(m.id));
+
   const mePub = S.snap.me.pub;
   let out = "", lastDay = "", prev = null;
-  for (const m of c.msgs) {
+  c.msgs.forEach((m, i) => {
     const d = dayLabel(m.ts);
     if (d !== lastDay) { out += `<div class="day">${esc(d)}</div>`; lastDay = d; prev = null; }
-    out += msgHTML(m, prev, mePub);
+    out += msgHTML(m, prev, mePub, !opened && i > lastKnown && !seenIds.has(m.id));
     prev = m;
-  }
+  });
+  seenIds = new Set(c.msgs.map((m) => m.id));
   list.innerHTML = out || `<div class="empty" style="margin:auto"><strong>Cisza</strong>Napisz pierwszą wiadomość.</div>`;
 
   // Growing the list from the top (older page) must not move what you read.
@@ -873,12 +920,21 @@ function paintHints() {
 
 let typingTimer = null;
 
+// field-sizing:content is not in the WebKitGTK several distros ship, and a
+// composer that refuses to grow past one line is worse than a few lines of JS.
+function autoGrow(input) {
+  if (!input) return;
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 168) + "px";
+}
+
 function wireComposer() {
   const input = $("#input");
   const send = $(".composer .send");
   if (!input) return;
 
   const sync = () => {
+    autoGrow(input);
     send.disabled = input.value.trim() === "";
     S.hints = matchCommands(input.value.trim());
     S.hintIdx = Math.min(S.hintIdx, Math.max(0, S.hints.length - 1));
@@ -950,6 +1006,7 @@ async function submit() {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
+  autoGrow(input);
   $(".composer .send").disabled = true;
   S.hints = []; paintHints();
 
@@ -1189,7 +1246,7 @@ const cropState = { rect: () => ({ X: 0, Y: 0, W: 0, H: 0 }) };
 
 function setupCrop(box, ratio) {
   const stage = $("#cs", box), img = $("#ci", box), mask = $("#cm", box), zoom = $("#cz", box);
-  let fw = 0, fh = 0, base = 1, scale = 1, tx = 0, ty = 0;
+  let fw = 0, fh = 0, base = 1, scale = 1, tx = 0, ty = 0, dragging = false;
 
   const layout = () => {
     const sw = stage.clientWidth, sh = stage.clientHeight;
@@ -1203,16 +1260,26 @@ function setupCrop(box, ratio) {
     apply();
   };
 
-  const apply = () => {
+  // Dragged past the edge the picture keeps following the pointer, just less
+  // and less: a hard stop reads as "frozen", progressive resistance reads as
+  // "still responding, there is simply nothing more here".
+  const rubber = (over, dim) => (over * dim * 0.55) / (dim + 0.55 * Math.abs(over));
+  const give = (v, max, dim) =>
+    (Math.abs(v) <= max ? v : Math.sign(v) * (max + rubber(Math.abs(v) - max, dim)));
+
+  const apply = (settle = false) => {
     scale = base * parseFloat(zoom.value);
     const dw = img.naturalWidth * scale, dh = img.naturalHeight * scale;
     const mx = Math.max(0, (dw - fw) / 2), my = Math.max(0, (dh - fh) / 2);
-    tx = Math.min(mx, Math.max(-mx, tx));
-    ty = Math.min(my, Math.max(-my, ty));
+    if (!dragging) { // release and zoom both pull the frame back inside the picture
+      tx = Math.min(mx, Math.max(-mx, tx));
+      ty = Math.min(my, Math.max(-my, ty));
+    }
+    img.style.transition = settle ? "left .32s var(--ease), top .32s var(--ease)" : "none";
     Object.assign(img.style, {
       width: `${dw}px`, height: `${dh}px`,
-      left: `${(stage.clientWidth - dw) / 2 + tx}px`,
-      top: `${(stage.clientHeight - dh) / 2 + ty}px`,
+      left: `${(stage.clientWidth - dw) / 2 + (dragging ? give(tx, mx, fw) : tx)}px`,
+      top: `${(stage.clientHeight - dh) / 2 + (dragging ? give(ty, my, fh) : ty)}px`,
     });
   };
 
@@ -1226,7 +1293,7 @@ function setupCrop(box, ratio) {
   if (img.complete && img.naturalWidth) layout(); else img.onload = layout;
   zoom.addEventListener("input", apply);
 
-  let dragging = false, px = 0, py = 0;
+  let px = 0, py = 0;
   stage.addEventListener("pointerdown", (e) => {
     dragging = true; px = e.clientX; py = e.clientY; stage.setPointerCapture(e.pointerId);
   });
@@ -1235,7 +1302,9 @@ function setupCrop(box, ratio) {
     tx += e.clientX - px; ty += e.clientY - py; px = e.clientX; py = e.clientY;
     apply();
   });
-  stage.addEventListener("pointerup", () => { dragging = false; });
+  const release = () => { if (!dragging) return; dragging = false; apply(true); };
+  stage.addEventListener("pointerup", release);
+  stage.addEventListener("pointercancel", release);
   stage.addEventListener("wheel", (e) => {
     e.preventDefault();
     zoom.value = Math.max(1, Math.min(4, parseFloat(zoom.value) - e.deltaY / 600));
@@ -1356,6 +1425,14 @@ function settingsBody() {
     case "look": return `
       <h2>Wygląd</h2><p class="lead">Jeden kolor akcentu przechodzi przez cały interfejs: przyciski, dymki, wskaźniki.</p>
       <div class="block">
+        <h4>Motyw</h4>
+        <p class="hint-text">Automatyczny idzie za ustawieniem pulpitu — jasny wieczorem sam zgaśnie.</p>
+        <div class="segmented">
+          ${[["auto", "Automatyczny"], ["light", "Jasny"], ["dark", "Ciemny"]].map(([v, t]) =>
+            `<button class="${themePref === v ? "sel" : ""}" data-act="theme" data-v="${v}">${t}</button>`).join("")}
+        </div>
+      </div>
+      <div class="block">
         <h4>Kolor akcentu</h4>
         <div class="swatches">${ACCENTS.map((c) =>
           `<button class="swatch ${(s.accent || "8b7cf6").toLowerCase() === c ? "sel" : ""}" style="background:#${c}" data-act="accent" data-v="${c}"></button>`).join("")}</div>
@@ -1442,8 +1519,7 @@ function renderSettings() {
           <button class="icon-btn" data-act="close-settings" title="Wróć">${icon("x")}</button>
           <h2>Ustawienia</h2>
         </div>
-        ${SECTIONS.map((x) => `<button class="nav-row ${x.id === S.section ? "active" : ""}" data-act="section" data-id="${x.id}"
-            style="${x.id === S.section ? "background:var(--surface)" : ""}">
+        ${SECTIONS.map((x) => `<button class="nav-row ${x.id === S.section ? "active" : ""}" data-act="section" data-id="${x.id}">
             <span class="ico">${icon(x.i)}</span>
             <span class="tx"><b>${esc(x.t)}</b><span>${esc(x.d)}</span></span>
             <span class="chev">${icon("chev")}</span>
@@ -1475,9 +1551,20 @@ async function saveSettings(patch = {}) {
   if (S.screen === "settings") renderSettings();
 }
 
+// The accent is the user's to pick, so readability on top of it has to be
+// derived, not assumed: white on amber is unreadable, black on indigo is worse.
+// Ink follows the accent's luminance, and when the ink is white the filled
+// surfaces are deepened until the label actually carries.
 function applyAccent(hex) {
   const clean = /^[0-9a-fA-F]{6}$/.test(hex || "") ? hex : "8b7cf6";
-  document.documentElement.style.setProperty("--accent", "#" + clean);
+  const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const [r, g, b] = [0, 2, 4].map((i) => lin(parseInt(clean.slice(i, i + 2), 16) / 255));
+  const pale = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.32;
+
+  const css = document.documentElement.style;
+  css.setProperty("--accent", "#" + clean);
+  css.setProperty("--on-accent", pale ? "#101319" : "#fff");
+  css.setProperty("--accent-fill", pale ? "#" + clean : `color-mix(in oklab, #${clean} 82%, #000)`);
 }
 
 /* ============================ actions ============================ */
@@ -1603,7 +1690,9 @@ const HANDLERS = {
     const f = S.snap.friends.find((x) => x.pub === el.dataset.pub);
     try { openChat(f?.chat || await api("CreateDirect", el.dataset.pub)); } catch (e) { fail(e); }
   },
-  jump: () => { const m = $("#msgs"); m.scrollTop = m.scrollHeight; },
+  // Only this jump glides — the automatic scroll after a new message must stay
+  // instant, or the list would still be travelling when the next one lands.
+  jump: () => $("#msgs").scrollTo({ top: $("#msgs").scrollHeight, behavior: "smooth" }),
 
   /* modals — the backdrop only dismisses when the click misses the dialog */
   "modal-dismiss": (el, e) => {
@@ -1618,6 +1707,7 @@ const HANDLERS = {
     const c = S.hints[+el.dataset.i];
     const input = $("#input");
     input.value = c.n + (c.a ? " " : "");
+    autoGrow(input);
     S.hints = []; paintHints(); input.focus();
   },
 
@@ -1732,6 +1822,7 @@ const HANDLERS = {
     lang: $("#s-lang")?.value ?? S.settings.lang,
   }),
   "toggle-notify": () => saveSettings({ noNotify: !S.settings.noNotify }),
+  theme: (el) => { setTheme(el.dataset.v); renderSettings(); },
   accent: (el) => { applyAccent(el.dataset.v); saveSettings({ accent: el.dataset.v }); },
   "save-accent": () => {
     const v = $("#s-accent").value.replace("#", "").trim();
@@ -1806,14 +1897,14 @@ function spatialDialog() {
     wide: true,
     body: `<p>Przeciągnij osobę: bliżej środka = głośniej, w bok = w lewy lub prawy głośnik.</p>
       <div id="room" style="position:relative;height:280px;margin:0 16px 12px;border-radius:var(--r-m);
-        background:radial-gradient(60% 80% at 50% 100%, color-mix(in srgb,var(--accent) 16%,transparent), var(--surface-2));
-        border:1px solid var(--line)"></div>`,
+        background:radial-gradient(62% 80% at 50% 100%, color-mix(in srgb,var(--accent) 18%,transparent), var(--sunk));
+        box-shadow:inset 0 0 0 1px var(--line)"></div>`,
     actions: [{ label: "Gotowe", kind: "ghost", value: null }],
     onMount: (box) => {
       const room = $("#room", box);
       peers.forEach((m, i) => {
         const t = document.createElement("button");
-        t.style.cssText = "position:absolute;translate:-50% -50%;transition:none";
+        t.style.cssText = "position:absolute;translate:-50% -50%;transition:none;cursor:grab;touch-action:none";
         t.innerHTML = avatar(m.avatar, m.name, m.pub, "s");
         const px = (i + 1) / (peers.length + 1), py = 0.5;
         place(px, py);
@@ -1828,7 +1919,10 @@ function spatialDialog() {
           api("SetVoice", m.pub, gain, pan).catch(() => {});
         }
         let dragging = false;
-        t.addEventListener("pointerdown", (e) => { dragging = true; t.setPointerCapture(e.pointerId); });
+        t.addEventListener("pointerdown", (e) => {
+          dragging = true; t.setPointerCapture(e.pointerId);
+          t.style.zIndex = "2"; t.style.cursor = "grabbing";
+        });
         t.addEventListener("pointermove", (e) => {
           if (!dragging) return;
           const r = room.getBoundingClientRect();
@@ -1837,7 +1931,9 @@ function spatialDialog() {
             Math.max(0.08, Math.min(0.92, (e.clientY - r.top) / r.height)),
           );
         });
-        t.addEventListener("pointerup", () => { dragging = false; });
+        t.addEventListener("pointerup", () => {
+          dragging = false; t.style.zIndex = ""; t.style.cursor = "grab";
+        });
       });
     },
   });

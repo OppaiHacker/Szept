@@ -172,6 +172,13 @@ func (t *clipText) bold() *clipText {
 	return t
 }
 
+// mono: for friend codes and fingerprints — machine text people compare
+// character by character, which a proportional face makes needlessly hard.
+func (t *clipText) mono() *clipText {
+	t.txt.TextStyle = fyne.TextStyle{Monospace: true}
+	return t
+}
+
 func (t *clipText) setColor(c color.Color) {
 	if t.txt.Color == c {
 		return

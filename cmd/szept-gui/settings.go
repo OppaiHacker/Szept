@@ -565,9 +565,10 @@ func hexColor(s string) (color.NRGBA, bool) {
 // jak w oryginalnej parze kolorów.
 func setAccent(col color.NRGBA) {
 	cAccent = col
+	cAccentSoft = color.NRGBA{R: col.R, G: col.G, B: col.B, A: 0x2e}
 	cBubbleMe = color.NRGBA{
-		R: uint8(int(col.R) * 72 / 100), G: uint8(int(col.G) * 72 / 100),
-		B: uint8(int(col.B) * 72 / 100), A: 0xff}
+		R: uint8(int(col.R) * 78 / 100), G: uint8(int(col.G) * 78 / 100),
+		B: uint8(int(col.B) * 78 / 100), A: 0xff}
 }
 
 // applyAccent: zmiana na żywo + wymuszenie przerysowania motywu.

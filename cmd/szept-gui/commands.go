@@ -392,24 +392,30 @@ func (u *ui) sysEmbed(i int, s sysMsg) fyne.CanvasObject {
 	return embedCard(s.tone, content, container.NewVBox(drop, layout.NewSpacer()))
 }
 
-// infoEmbed: membership and key rekey events — single line in embed
+// infoEmbed: membership and rekey events as a centred chip, the same shape as
+// the day separator.
+//
+// These used to be full-width cards with a coloured strip, which on a phone
+// turned "ala added bob" into a block as loud as a message — and a chat opens
+// on exactly those events, so the first screen of every new conversation was a
+// wall of them. The kind is now a coloured dot; the text carries the rest.
 func infoEmbed(m core.Msg) fyne.CanvasObject {
-	tone, icon := cMuted, theme.InfoIcon()
+	tone := cMuted
 	switch m.Info {
 	case event.KindCreate:
-		tone, icon = cAccent, theme.NewPrimaryThemedResource(theme.HomeIcon())
+		tone = cAccent
 	case event.KindAdd:
-		tone, icon = cGreen, theme.NewSuccessThemedResource(theme.ContentAddIcon())
+		tone = cGreen
 	case event.KindRemove:
-		tone, icon = cRed, theme.NewErrorThemedResource(theme.CancelIcon())
+		tone = cRed
 	case event.KindRekey:
-		tone, icon = cOrange, theme.NewWarningThemedResource(theme.ViewRefreshIcon())
+		tone = cOrange
 	}
-	txt := canvas.NewText(m.Text, cFg)
-	txt.TextSize = fs(12)
-	return embedCard(tone, container.NewHBox(
-		widget.NewIcon(icon), hspace(2), container.NewCenter(txt), layout.NewSpacer(),
-		container.NewCenter(mutedText(m.TS.Format("15:04"), 10))), nil)
+	dot := container.NewCenter(container.NewGridWrap(fyne.NewSize(6, 6), canvas.NewCircle(tone)))
+	txt := canvas.NewText(m.Text+" · "+m.TS.Format("15:04"), cMuted)
+	txt.TextSize = fs(11)
+	return pad(3, 0, container.NewCenter(
+		pill(cSurface, 999, pad(4, 11, tightHBox(6, dot, container.NewCenter(txt))))))
 }
 
 // ---- message entry with autocomplete ----
@@ -472,9 +478,10 @@ func (u *ui) buildComposer() fyne.CanvasObject {
 	add := widget.NewButtonWithIcon("", theme.ContentAddIcon(), u.attachPage)
 	add.Importance = widget.LowImportance
 	row := container.NewBorder(nil, nil, add, send, e)
-	// input sits on its own darker bar —
-	// previously hung directly on chat background and blended with last bubble
-	return container.NewStack(canvas.NewRectangle(cSurface), container.NewPadded(row))
+	// the composer is chrome, so it takes the darkest surface — the field then
+	// sits a step ABOVE its bar instead of melting into it, and the accented
+	// send button is the brightest thing on the screen's bottom edge
+	return container.NewStack(canvas.NewRectangle(cDeep), pad(7, 8, row))
 }
 
 func (u *ui) submit(s string) {
@@ -539,8 +546,9 @@ func (u *ui) updateHints() {
 	if u.hintSel >= n {
 		u.hintSel = 0
 	}
-	u.hintBox.RemoveAll()
-	u.hintBox.Add(mutedText("KOMENDY", 10))
+	// the list is a card floating above the composer: built into a child box, so
+	// the plate is not wiped by the RemoveAll on the next keystroke
+	list := tightVBox(3, mutedText("KOMENDY", 10))
 	for i := 0; i < n; i++ {
 		i, c := i, u.hints[i]
 		row := widget.NewButton(strings.TrimSpace(c.name+" "+c.args)+"  —  "+c.desc,
@@ -550,11 +558,13 @@ func (u *ui) updateHints() {
 		if i == u.hintSel {
 			row.Importance = widget.HighImportance
 		}
-		u.hintBox.Add(row)
+		list.Add(row)
 	}
 	if len(u.hints) > n {
-		u.hintBox.Add(mutedText("…i jeszcze kilka — dopisz literę", 10))
+		list.Add(mutedText("…i jeszcze kilka — dopisz literę", 10))
 	}
+	u.hintBox.RemoveAll()
+	u.hintBox.Add(pad(0, 8, pill(cSurface, 16, pad(9, 10, list))))
 	u.hintBox.Show()
 	u.hintBox.Refresh()
 }

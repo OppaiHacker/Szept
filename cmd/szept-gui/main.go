@@ -42,23 +42,31 @@ const msec = time.Millisecond
 
 // ---- palette ----
 
-// Dark palette of neutral grays, accent stays szept purple.
-// Three background levels matter here: app bars and navigation are
-// DARKER than content — giving a layered feel without shadows, which fyne
-// doesn't draw around containers anyway.
+// One palette with the wails client (cmd/szept-wails/frontend/app.css), so the
+// phone and the desktop are visibly the same app. Surfaces get DARKER towards
+// the edges of the screen (app bar, bottom navigation, composer) and lighter
+// towards the content — that is the entire depth model, because fyne draws no
+// shadow around a container and a phone has no window frame to lean on.
 var (
-	cDeep     = color.NRGBA{0x1e, 0x1f, 0x22, 0xff} // top bar, bottom nav
-	cBg       = color.NRGBA{0x31, 0x33, 0x38, 0xff} // content background
-	cSurface  = color.NRGBA{0x2b, 0x2d, 0x31, 0xff} // cards, input bar
-	cSurface2 = color.NRGBA{0x38, 0x3a, 0x40, 0xff} // buttons, inputs, peer bubbles
-	cBubbleMe = color.NRGBA{0x5b, 0x4f, 0xd6, 0xff} // own bubbles
+	cDeep     = color.NRGBA{0x0b, 0x0c, 0x11, 0xff} // app bar, bottom nav, composer
+	cBg       = color.NRGBA{0x10, 0x13, 0x19, 0xff} // content background
+	cSurface  = color.NRGBA{0x16, 0x1a, 0x22, 0xff} // cards
+	cSurface2 = color.NRGBA{0x1e, 0x23, 0x2d, 0xff} // inputs, buttons, peer bubbles
+	cSurface3 = color.NRGBA{0x29, 0x30, 0x3c, 0xff} // chips, quiet badges
+	cBubbleMe = color.NRGBA{0x6c, 0x60, 0xbf, 0xff} // own bubbles (setAccent recomputes)
 	cAccent   = color.NRGBA{0x8b, 0x7c, 0xf6, 0xff} // szept purple accent
-	cFg       = color.NRGBA{0xdb, 0xde, 0xe1, 0xff}
-	cMuted    = color.NRGBA{0x94, 0x9b, 0xa4, 0xff}
-	cSep      = color.NRGBA{0x3f, 0x41, 0x47, 0xff}
-	cGreen    = color.NRGBA{0x23, 0xa5, 0x5a, 0xff}
-	cOrange   = color.NRGBA{0xf0, 0xb2, 0x32, 0xff}
-	cRed      = color.NRGBA{0xed, 0x42, 0x45, 0xff}
+	// accent wash behind the active tab and other "this is live" surfaces;
+	// alpha rather than a mixed constant, so it follows a custom accent too
+	cAccentSoft = color.NRGBA{0x8b, 0x7c, 0xf6, 0x2e}
+	cFgStrong   = color.NRGBA{0xf5, 0xf7, 0xfc, 0xff} // names, titles, unread rows
+	cFg         = color.NRGBA{0xe4, 0xe8, 0xf1, 0xff}
+	cFg2        = color.NRGBA{0xb4, 0xbc, 0xcc, 0xff} // previews of unread chats
+	cMuted      = color.NRGBA{0x83, 0x8d, 0x9f, 0xff}
+	cFaint      = color.NRGBA{0x6b, 0x74, 0x84, 0xff} // timestamps, placeholders
+	cSep        = color.NRGBA{0xff, 0xff, 0xff, 0x14}
+	cGreen      = color.NRGBA{0x3f, 0xbf, 0x7f, 0xff}
+	cOrange     = color.NRGBA{0xee, 0xb1, 0x34, 0xff}
+	cRed        = color.NRGBA{0xee, 0x4d, 0x55, 0xff}
 )
 
 // author colors in groups (deterministic by pubkey)
@@ -97,22 +105,24 @@ func (t szTheme) Color(n fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 		return cFg
 	case theme.ColorNamePrimary, theme.ColorNameFocus, theme.ColorNameHyperlink:
 		return cAccent
-	case theme.ColorNameButton:
+	// buttons and inputs share a tone: both are "things you can act on" resting
+	// one step above whatever surface they sit on
+	case theme.ColorNameButton, theme.ColorNameInputBackground:
 		return cSurface2
-	case theme.ColorNameInputBackground:
-		return cSurface
 	case theme.ColorNameInputBorder, theme.ColorNameSeparator:
 		return cSep
 	case theme.ColorNameMenuBackground, theme.ColorNameOverlayBackground, theme.ColorNameHeaderBackground:
 		return cSurface
-	case theme.ColorNamePlaceHolder, theme.ColorNameDisabled:
+	case theme.ColorNamePlaceHolder:
+		return cFaint
+	case theme.ColorNameDisabled:
 		return cMuted
 	case theme.ColorNameHover:
 		return color.NRGBA{0xff, 0xff, 0xff, 0x0c}
 	case theme.ColorNamePressed:
-		return color.NRGBA{0x00, 0x00, 0x00, 0x30}
+		return color.NRGBA{0xff, 0xff, 0xff, 0x14}
 	case theme.ColorNameSelection:
-		return color.NRGBA{0x8b, 0x7c, 0xf6, 0x50}
+		return color.NRGBA{cAccent.R, cAccent.G, cAccent.B, 0x50}
 	case theme.ColorNameSuccess:
 		return cGreen
 	case theme.ColorNameWarning:
@@ -121,12 +131,14 @@ func (t szTheme) Color(n fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 		return cRed
 	case theme.ColorNameScrollBar:
 		return color.NRGBA{0xff, 0xff, 0xff, 0x28}
-	// container.Scroll draws gradient shadow on every edge with hidden content
-	// (internal/widget/scroller.go) — in chat it looked like a dirty smudge
-	// above text field and below title bar. Shadow cannot be disabled
-	// other than by color, and bars provide layering via their background anyway.
+	// One colour drives two things: the scrim behind a dialog and the gradient
+	// container.Scroll paints on every edge with hidden content behind it
+	// (internal/widget/scroller.go). Transparent used to be the only way to keep
+	// that gradient from smearing over the old light-grey content background;
+	// against these near-black surfaces a black scrim disappears into the
+	// layering, and a dialog finally has something to float above.
 	case theme.ColorNameShadow:
-		return color.Transparent
+		return color.NRGBA{0x00, 0x00, 0x00, 0x99}
 	case theme.ColorNameForegroundOnPrimary:
 		return color.NRGBA{0xff, 0xff, 0xff, 0xff}
 	}
@@ -164,9 +176,11 @@ func (t szTheme) Size(n fyne.ThemeSizeName) float32 {
 	case theme.SizeNameInputRadius, theme.SizeNameButtonRadius:
 		return m(10, 20)
 	case theme.SizeNameSelectionRadius:
-		return 8
+		return 10
+	// a phone card fills the width, so it needs a rounder corner than a small
+	// desktop panel to read as one object instead of a cropped rectangle
 	case theme.SizeNameCardRadius, theme.SizeNameDialogRadius:
-		return 14
+		return m(14, 18)
 	case theme.SizeNameScrollBarSmall:
 		return m(3, 3)
 	}
@@ -392,6 +406,15 @@ func mutedText(s string, size float32) *canvas.Text {
 	return t
 }
 
+// monoText: fixed-width caption for codes and fingerprints. Not clipText —
+// a code is only useful whole, so it must set the width of what holds it.
+func monoText(s string, size float32, col color.Color) *canvas.Text {
+	t := canvas.NewText(s, col)
+	t.TextSize = fs(size)
+	t.TextStyle = fyne.TextStyle{Monospace: true}
+	return t
+}
+
 // mutedWrap: gray caption wrapping on narrow screen (canvas.Text cannot)
 func mutedWrap(s string) *widget.RichText {
 	t := widget.NewRichText(&widget.TextSegment{
@@ -402,6 +425,14 @@ func mutedWrap(s string) *widget.RichText {
 		},
 	})
 	t.Wrapping = fyne.TextWrapWord
+	return t
+}
+
+// centerWrap: the same caption, centred — for empty states, where a left-hung
+// paragraph under a centred icon looks like a layout accident.
+func centerWrap(s string) *widget.RichText {
+	t := mutedWrap(s)
+	t.Segments[0].(*widget.TextSegment).Style.Alignment = fyne.TextAlignCenter
 	return t
 }
 
@@ -433,8 +464,50 @@ func vspace(h float32) fyne.CanvasObject {
 // card: rounded panel on darker background
 func card(content fyne.CanvasObject) fyne.CanvasObject {
 	bg := canvas.NewRectangle(cSurface)
-	bg.CornerRadius = 14
+	bg.CornerRadius = theme.Size(theme.SizeNameCardRadius)
 	return container.NewStack(bg, container.NewPadded(container.NewPadded(content)))
+}
+
+// pad: content with exact margins. container.NewPadded gives one theme padding
+// on all four sides, and nearly every piece of phone chrome wants a different
+// number vertically than horizontally.
+func pad(v, h float32, content fyne.CanvasObject) *fyne.Container {
+	return container.New(layout.NewCustomPaddedLayout(v, v, h, h), content)
+}
+
+// tightVBox / tightHBox: boxes with an exact gap instead of the theme padding.
+// A bar is a row plus the hairline under it, and the default 6 px between them
+// is a hole in the bar rather than a design.
+func tightVBox(gap float32, objs ...fyne.CanvasObject) *fyne.Container {
+	return container.New(layout.NewCustomPaddedVBoxLayout(gap), objs...)
+}
+
+func tightHBox(gap float32, objs ...fyne.CanvasObject) *fyne.Container {
+	return container.New(layout.NewCustomPaddedHBoxLayout(gap), objs...)
+}
+
+// pill: rounded plate under content — chips, badges, the composer field.
+func pill(fill color.Color, radius float32, content fyne.CanvasObject) *fyne.Container {
+	bg := canvas.NewRectangle(fill)
+	bg.CornerRadius = radius
+	return container.NewStack(bg, content)
+}
+
+// dotChip: state as a chip — coloured dot plus a word on a quiet plate. Same
+// shape as the header's connection chip, so "a dot in a pill" means the same
+// thing everywhere in the app.
+func dotChip(text string, tone color.Color) fyne.CanvasObject {
+	dot := container.NewCenter(container.NewGridWrap(fyne.NewSize(7, 7), canvas.NewCircle(tone)))
+	t := canvas.NewText(text, cFg2)
+	t.TextSize = fs(11)
+	return pill(cSurface2, 999, pad(4, 10, tightHBox(6, dot, container.NewCenter(t))))
+}
+
+// hairline: the 1 px rule that closes a bar off from the content beneath it.
+func hairline() fyne.CanvasObject {
+	r := canvas.NewRectangle(cSep)
+	r.SetMinSize(fyne.NewSize(1, 1))
+	return r
 }
 
 // ---- startup screens ----
@@ -484,8 +557,9 @@ func (u *ui) setupScreen() {
 		widget.NewFormItem("Connector", conn),
 		widget.NewFormItem("Hasło klucza", pass),
 	)
-	form.SubmitText = "Zaczynamy"
-	form.OnSubmit = func() {
+	// the form's own submit is a small button pinned to the right edge — on a
+	// phone the first action of the whole app deserves the full width
+	start := func() {
 		if name.Text == "" || conn.Text == "" {
 			u.info("szept", "Podaj nazwę i adres connectora.")
 			return
@@ -510,6 +584,7 @@ func (u *ui) setupScreen() {
 		card(container.NewVBox(
 			widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			form,
+			bigButton("Zaczynamy", theme.ConfirmIcon(), start),
 			mutedWrap("Connector to lekki serwer spotkań — np. ws://twoj-vps:7777"),
 		)),
 		u.profileBar(),
@@ -577,7 +652,7 @@ func (u *ui) buildMain() {
 	// Friends tab
 	u.friendBox = container.NewVBox()
 	addFriend := bigButton("Dodaj znajomego", theme.ContentAddIcon(), u.codePage)
-	friendsTab := container.NewBorder(nil, container.NewPadded(addFriend), nil, nil,
+	friendsTab := container.NewBorder(nil, pad(9, 12, addFriend), nil, nil,
 		vscroll(u.friendBox))
 
 	if u.mobile {
@@ -595,7 +670,7 @@ func (u *ui) buildMain() {
 func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 	u.chatBox = container.NewVBox()
 	chatsTab := container.NewBorder(
-		container.NewPadded(container.NewGridWithColumns(2,
+		pad(8, 10, container.NewGridWithColumns(2,
 			widget.NewButtonWithIcon("Nowa grupa", theme.ContentAddIcon(), u.newGroupPage),
 			widget.NewButtonWithIcon("Mam kod", theme.LoginIcon(), u.codePage))),
 		nil, nil, nil, vscroll(u.chatBox))
@@ -608,11 +683,10 @@ func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 		[]string{"Czaty", "Znajomi", "Ustawienia"},
 		[]fyne.Resource{theme.MailComposeIcon(), theme.AccountIcon(), theme.SettingsIcon()})
 
-	head := container.NewHBox(hspace(4), brand(22), layout.NewSpacer(),
-		container.NewCenter(container.NewGridWrap(fyne.NewSize(9, 9), u.statusDot)),
-		hspace(4), container.NewCenter(u.statusLbl), hspace(6))
+	head := container.NewBorder(nil, nil, vcenter(brand(21)), vcenter(u.statusChip()))
 	top := container.NewVBox(
-		container.NewStack(canvas.NewRectangle(cDeep), container.NewPadded(head)),
+		container.NewStack(canvas.NewRectangle(cDeep),
+			tightVBox(0, pad(11, 14, head), hairline())),
 		u.clipBar)
 
 	home := container.NewBorder(top, nav, nil, nil,
@@ -666,6 +740,7 @@ func (u *ui) buildStatus() {
 	u.statusDot = canvas.NewCircle(cOrange)
 	u.statusLbl = mutedText("łączenie…", 12)
 	if u.mobile {
+		u.statusLbl.Color = cFg2 // inside a chip, muted gray reads as disabled
 		return
 	}
 	me := mutedText(u.c.ID.Name+" · "+identity.Fingerprint(u.c.ID.Pub), 11)
@@ -673,6 +748,15 @@ func (u *ui) buildStatus() {
 		container.NewCenter(container.NewGridWrap(fyne.NewSize(9, 9), u.statusDot)),
 		hspace(4), container.NewCenter(u.statusLbl), layout.NewSpacer(),
 		container.NewCenter(me), hspace(4))
+}
+
+// statusChip: connection state as one chip in the header instead of a loose dot
+// with text beside it. Bounded by its own plate it reads as a control, and the
+// header keeps a shape when the label swaps between "łączenie…" and an error.
+func (u *ui) statusChip() fyne.CanvasObject {
+	dot := container.NewCenter(container.NewGridWrap(fyne.NewSize(7, 7), u.statusDot))
+	row := tightHBox(6, dot, container.NewCenter(u.statusLbl))
+	return pill(cSurface2, 999, pad(5, 10, row))
 }
 
 // mobileBack: Back button pops pages one by one, then returns to Chats tab.
@@ -1030,8 +1114,12 @@ func (u *ui) showFrame(chat, from []byte, kind string, img image.Image) {
 // ---- clipboard: replacing in-app QR scanner ----
 
 func (u *ui) buildClipBar() {
-	bg := canvas.NewRectangle(color.NRGBA{0x2c, 0x26, 0x4a, 0xff})
-	bg.CornerRadius = 10
+	// tinted plate rather than a fixed purple: the wash is the accent with an
+	// alpha, so a custom accent takes this bar with it
+	plate := canvas.NewRectangle(cSurface2)
+	plate.CornerRadius = 14
+	tint := canvas.NewRectangle(cAccentSoft)
+	tint.CornerRadius = 14
 	u.clipLbl = canvas.NewText("", cFg)
 	u.clipLbl.TextSize = fs(12)
 	use := bigButton("Użyj", theme.ConfirmIcon(), func() {
@@ -1044,8 +1132,8 @@ func (u *ui) buildClipBar() {
 		u.clipSeen = u.clipCode
 		u.clipBar.Hide()
 	})
-	u.clipBar = container.NewStack(bg, container.NewPadded(container.NewBorder(nil, nil, nil,
-		container.NewHBox(use, no), container.NewCenter(u.clipLbl))))
+	row := container.NewBorder(nil, nil, nil, tightHBox(4, use, no), vcenter(u.clipLbl))
+	u.clipBar = pad(6, 8, container.NewStack(plate, tint, pad(6, 10, row)))
 	u.clipBar.Hide()
 }
 
