@@ -2,12 +2,19 @@
 <!-- Własny manifest (fyne używa go zamiast szablonu): domyślny nie ma RECORD_AUDIO.
      debuggable=false: z debuggable każdy z dostępem do adb wyciąga `run-as`
      prywatny katalog aplikacji (identity.key + baza) bez roota.
-     allowBackup=false: klucz tożsamości nie ma jeździć w kopiach zapasowych. -->
+     allowBackup=false: klucz tożsamości nie ma jeździć w kopiach zapasowych.
+
+     Ten plik NIE trafia do APK w postaci skompilowanej przez fyne — Makefile
+     podmienia manifest i tabelę zasobów na zbudowane przez aapt2. Kompilator
+     manifestu fyne (binres) sortuje atrybuty alfabetycznie po nazwie, a Android
+     czyta je binary searchem po resource ID; każdy atrybut przed "label"
+     w alfabecie (allowBackup) rozwalał porządek i system gubił label oraz icon —
+     aplikacja pokazywała się w launcherze jako "chat.szept" bez ikony. -->
 <manifest
 	xmlns:android="http://schemas.android.com/apk/res/android"
 	package="chat.szept"
-	android:versionCode="18"
-	android:versionName="1.0.0.18">
+	android:versionCode="26"
+	android:versionName="1.0.0.26">
 
 	<uses-permission android:name="android.permission.INTERNET" />
 	<uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -16,23 +23,28 @@
 	     jak poprosić o te uprawnienia w czasie działania (brak dostępu do JNI
 	     bez forka fyne), więc użytkownik włącza je z ustawień systemu:
 	     Aplikacje → szept → Uprawnienia → Pliki i multimedia. Bez nich zostaje
-	     systemowy wybór plików, który uprawnień nie wymaga. -->
+	     systemowy wybór plików, który uprawnień nie wymaga.
+	     READ_EXTERNAL_STORAGE od API 33 jest ignorowane — maxSdkVersion, żeby nie
+	     wisiało na liście uprawnień nowych systemów bez żadnego efektu. -->
 	<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 	<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-	<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+	<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+		android:maxSdkVersion="32" />
 
 	<!-- ws:// (cleartext) idzie przez gniazda Go — polityka cleartext Androida
-	     dotyczy tylko javowego stosu; atrybutu usesCleartextTraffic nie zna
-	     kompilator manifestu fyne, więc go tu nie ma -->
+	     dotyczy tylko javowego stosu, więc usesCleartextTraffic nic tu nie zmienia -->
+	<!-- android:icon nie może tu stać: `fyne package` odrzuca manifest, w którym
+	     ikona jest zadeklarowana ręcznie ("manual declaration of android:icon in
+	     AndroidManifest.xml not supported"). Makefile dopisuje ją sedem do kopii,
+	     którą karmi aapt2. -->
 	<application android:label="szept"
 		android:debuggable="false"
-		android:allowBackup="false"
-		android:fullBackupContent="false">
+		android:allowBackup="false">
 	<activity android:name="org.golang.app.GoNativeActivity"
 		android:label="szept"
 		android:configChanges="orientation|keyboardHidden|uiMode"
 		android:exported="true"
-		android:theme="@android:style/Theme">
+		android:theme="@android:style/Theme.NoTitleBar">
 		<meta-data android:name="android.app.lib_name" android:value="szept" />
 		<intent-filter>
 			<action android:name="android.intent.action.MAIN" />

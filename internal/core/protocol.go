@@ -718,9 +718,14 @@ func makePin() string {
 }
 
 // NormalizeWS: users paste bare host:port — prepend ws:// for them.
+//
+// Anything that already carries a scheme is left alone, including a typo like
+// "wws://host". Prepending blindly turned that into "ws://wws://host" — an
+// address the user could no longer recognise as their own mistake, and one they
+// then had to fix on a phone keyboard inside a mangled string.
 func NormalizeWS(s string) string {
 	s = strings.TrimSpace(s)
-	if s == "" || strings.HasPrefix(s, "ws://") || strings.HasPrefix(s, "wss://") {
+	if s == "" || strings.Contains(s, "://") {
 		return s
 	}
 	return "ws://" + s
