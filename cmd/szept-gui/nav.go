@@ -23,21 +23,19 @@ import (
 // Title clips to remaining space between arrow and actions;
 // previously long titles pushed action buttons off screen.
 func (u *ui) appBar(title string, back func(), actions ...fyne.CanvasObject) fyne.CanvasObject {
-	t := newClipText(title, fs(17), cFg).bold()
-	var left fyne.CanvasObject
+	t := newClipText(title, fs(17), cFgStrong).bold()
+	var left fyne.CanvasObject = hspace(theme.Padding())
 	if back != nil {
 		b := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), back)
 		b.Importance = widget.LowImportance
 		left = b
-	} else {
-		left = hspace(theme.Padding())
 	}
 	right := container.NewHBox(actions...)
-	bg := canvas.NewRectangle(cDeep)
 	row := container.NewBorder(nil, nil, left, right, vcenter(t))
-	line := canvas.NewRectangle(cSep)
-	line.SetMinSize(fyne.NewSize(1, 1))
-	return container.NewStack(bg, container.NewVBox(row, line))
+	// tightVBox: a VBox would leave the theme gap between the bar and its own
+	// hairline — a stripe of content showing through the middle of the chrome
+	return container.NewStack(canvas.NewRectangle(cDeep),
+		tightVBox(0, pad(5, 6, row), hairline()))
 }
 
 // backdrop: opaque page background that CONSUMES touch events. Plain
@@ -144,21 +142,40 @@ func (u *ui) confirm(text string, yes func()) {
 
 // ---- page building blocks ----
 
-// navRow: settings list row — icon, title, description, chevron.
+// navRow: settings list row — icon tile, title, description, chevron.
+// The tile is what makes a long settings list scannable on a phone: a bare
+// glyph on the background disappears into the text next to it.
 func navRow(icon fyne.Resource, title, desc string, tap func()) fyne.CanvasObject {
+	tile := pill(cSurface2, 11, pad(7, 7, widget.NewIcon(icon)))
+	chevron := widget.NewIcon(theme.NewColoredResource(theme.NavigateNextIcon(),
+		theme.ColorNamePlaceHolder))
 	row := container.NewBorder(nil, nil,
-		container.NewHBox(hspace(4), container.NewCenter(widget.NewIcon(icon)), hspace(10)),
-		container.NewCenter(widget.NewIcon(theme.NavigateNextIcon())),
+		tightHBox(0, container.NewCenter(tile), hspace(5)),
+		container.NewCenter(chevron),
 		vcenter(twoLine(title, desc, 14, 11)))
-	return tappable(container.NewPadded(row), tap, nil)
+	return tappable(pad(7, 12, row), tap, nil)
 }
 
-// section: group header on settings pages.
+// section: group header on settings pages — faint, so the rows under it stay
+// the loudest thing in the list.
 func section(title string) fyne.CanvasObject {
-	t := canvas.NewText(title, cMuted)
+	t := canvas.NewText(title, cFaint)
 	t.TextSize = fs(11)
 	t.TextStyle = fyne.TextStyle{Bold: true}
-	return container.NewPadded(t)
+	return pad(9, 16, t)
+}
+
+// emptyState: icon in an accent halo, a line of what is missing, and a line of
+// what to do about it. A list with nothing in it is a screen too, and on a
+// phone it is most of the first run.
+func emptyState(icon fyne.Resource, title, desc string) fyne.CanvasObject {
+	glyph := widget.NewIcon(theme.NewColoredResource(icon, theme.ColorNamePrimary))
+	halo := pill(cAccentSoft, 999, pad(13, 13, glyph))
+	t := canvas.NewText(title, cFgStrong)
+	t.TextSize = fs(15)
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	t.Alignment = fyne.TextAlignCenter
+	return tightVBox(9, container.NewCenter(halo), t, centerWrap(desc))
 }
 
 // bigButton: primary page action button.
@@ -248,9 +265,15 @@ type navTab struct {
 	badge int
 	img   *canvas.Image
 	txt   *canvas.Text
+	pill  *canvas.Rectangle // accent wash behind the icon of the active tab
 	dot   *fyne.Container
 	dotN  *canvas.Text
 }
+
+// navPillSize: the plate behind the active tab's icon. Colour alone marked the
+// active tab before, which on a phone means guessing which of three grey
+// glyphs is a shade brighter — a filled shape is read at arm's length.
+var navPillSize = fyne.NewSize(58, 30)
 
 func (u *ui) buildBottomNav(labels []string, icons []fyne.Resource) fyne.CanvasObject {
 	bg := canvas.NewRectangle(cDeep)
@@ -261,28 +284,32 @@ func (u *ui) buildBottomNav(labels []string, icons []fyne.Resource) fyne.CanvasO
 		t := &navTab{icon: icons[i], label: labels[i]}
 		t.img = canvas.NewImageFromResource(theme.NewThemedResource(icons[i]))
 		t.img.FillMode = canvas.ImageFillContain
-		t.img.SetMinSize(fyne.NewSize(22, 22))
+		t.img.SetMinSize(fyne.NewSize(21, 21))
 		t.txt = canvas.NewText(labels[i], cMuted)
 		t.txt.TextSize = fs(10)
 		t.txt.Alignment = fyne.TextAlignCenter
+		t.pill = canvas.NewRectangle(color.Transparent)
+		t.pill.CornerRadius = navPillSize.Height / 2
 		t.dotN = canvas.NewText("", color.NRGBA{0xff, 0xff, 0xff, 0xff})
 		t.dotN.TextSize = fs(10)
 		t.dotN.TextStyle = fyne.TextStyle{Bold: true}
 		badgeBg := canvas.NewRectangle(cRed)
-		badgeBg.CornerRadius = 8
+		badgeBg.CornerRadius = 9
 		t.dot = container.NewGridWrap(fyne.NewSize(18, 16),
 			container.NewStack(badgeBg, container.NewCenter(t.dotN)))
 		t.dot.Hide()
-		icon := container.NewStack(container.NewCenter(container.NewGridWrap(
-			fyne.NewSize(22, 22), t.img)),
+
+		icon := container.NewGridWrap(navPillSize, container.NewStack(t.pill,
+			container.NewCenter(container.NewGridWrap(fyne.NewSize(21, 21), t.img))))
+		// badge rides the top-right corner of the pill, not of the whole cell —
+		// in a grid column it would otherwise float far from the icon
+		badged := container.NewStack(icon,
 			container.NewHBox(layout.NewSpacer(), container.NewVBox(t.dot, layout.NewSpacer())))
-		cell := container.NewPadded(container.NewVBox(icon, t.txt))
+		cell := pad(6, 0, tightVBox(3, container.NewCenter(badged), t.txt))
 		row.Add(tappable(cell, func() { u.selectTab(i) }, nil))
 		u.tabs = append(u.tabs, t)
 	}
-	line := canvas.NewRectangle(cSep)
-	line.SetMinSize(fyne.NewSize(1, 1))
-	return container.NewStack(bg, container.NewVBox(line, row))
+	return container.NewStack(bg, tightVBox(0, hairline(), row))
 }
 
 // selectTab switches main tab (bottom bar) and pops stacked pages.
@@ -307,13 +334,18 @@ func (u *ui) selectTab(i int) {
 	for j, t := range u.tabs {
 		if j == i {
 			t.txt.Color = cAccent
+			t.txt.TextStyle = fyne.TextStyle{Bold: true}
 			t.img.Resource = theme.NewPrimaryThemedResource(t.icon)
+			t.pill.FillColor = cAccentSoft
 		} else {
 			t.txt.Color = cMuted
+			t.txt.TextStyle = fyne.TextStyle{}
 			t.img.Resource = theme.NewThemedResource(t.icon)
+			t.pill.FillColor = color.Transparent
 		}
 		t.txt.Refresh()
 		t.img.Refresh()
+		t.pill.Refresh()
 	}
 	u.checkClipboard()
 	u.refresh()

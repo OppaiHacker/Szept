@@ -11,6 +11,8 @@
 # Pułapki, na które ten skrypt uważa:
 #   * GDK_BACKEND=x11 + brak WAYLAND_DISPLAY — inaczej GTK woli sesję Waylanda
 #     użytkownika i okno otwiera się na jego prawdziwym ekranie;
+#   * GTK_THEME=Adwaita:dark — interfejs idzie za motywem pulpitu, a na gołym
+#     Xvfb nie ma żadnego, więc bez tego zrzuty wychodzą jasne;
 #   * brak menedżera okien = brak fokusu, więc przed pisaniem trzeba jawnie
 #     zrobić `xdotool windowfocus` (kliknięcia idą pod kursor i działają zawsze);
 #   * HOME/XDG_* wskazują na katalog roboczy, żeby konfiguracja i profile
@@ -45,7 +47,7 @@ app() { # app <katalog-danych|-> [dodatkowe flagi…]
 	local data=$1; shift
 	local args=(-connector "$CONN")
 	[ "$data" != "-" ] && args+=(-data "$data")
-	env -u WAYLAND_DISPLAY GDK_BACKEND=x11 DISPLAY=$DISP \
+	env -u WAYLAND_DISPLAY GDK_BACKEND=x11 DISPLAY=$DISP GTK_THEME=Adwaita:dark \
 		HOME="$HOMEDIR" XDG_CONFIG_HOME="$HOMEDIR/.config" XDG_DATA_HOME="$HOMEDIR/.local/share" \
 		WEBKIT_DISABLE_COMPOSITING_MODE=1 LIBGL_ALWAYS_SOFTWARE=1 \
 		./bin/szept-wails "${args[@]}" "$@" >"$WORK/app.log" 2>&1 &
@@ -124,7 +126,7 @@ click 130 245 2; shot settings-voice
 click 130 488 2; shot settings-pass
 
 click 130 549 2             # Boty
-click 918 189               # włącz webhook
+click 918 204               # włącz webhook
 click 366 392 2             # nowy token
 shot settings-bots
 

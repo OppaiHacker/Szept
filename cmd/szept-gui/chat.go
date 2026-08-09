@@ -52,48 +52,90 @@ func (u *ui) rebuildChats() {
 		}))
 	}
 	if len(u.rows) == 0 {
-		u.chatBox.Add(container.NewPadded(card(container.NewVBox(
-			widget.NewLabelWithStyle("Pusto tutaj", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			mutedWrap("Dodaj znajomego jego kodem albo załóż grupę — przyciski są nad listą."),
-		))))
+		u.chatBox.Add(pad(16, 12, card(emptyState(theme.MailComposeIcon(), "Pusto tutaj",
+			"Dodaj znajomego jego kodem albo załóż grupę — przyciski są nad listą."))))
 	}
 	u.chatBox.Refresh()
 }
 
-// chatRow: avatar, name, preview, on the right timestamp and badge.
+// chatRow: avatar with a presence dot, name, preview, and on the right the time
+// with a badge under it.
+//
+// Unread rows lift their own text a step (white name, brighter preview) rather
+// than painting the whole row — the badge already says "new", the row only has
+// to be findable while scrolling past it. Presence moved onto the avatar: the
+// old "● 2" in the corner competed with the badge for the same spot and lost.
 func (u *ui) chatRow(r chatRow, sel bool, tap func()) fyne.CanvasObject {
 	prev := u.chatPreview(r.info)
-	body := twoLine(r.info.Name, prev.text, 15, 12)
-	when := mutedText("", 10)
+	unread := r.unread > 0
+
+	name := newClipText(r.info.Name, fs(15), cFg).bold()
+	sub := newClipText(prev.text, fs(12), cMuted)
+	if unread {
+		name.setColor(cFgStrong)
+		sub.setColor(cFg2)
+	}
+
+	when := canvas.NewText("", cFaint)
+	when.TextSize = fs(10)
 	if !prev.ts.IsZero() {
 		when.Text = shortTime(prev.ts)
 	}
-	right := container.NewVBox(container.NewCenter(when))
+	// time on the name's line, badge on the preview's — a tail column centred
+	// against two lines of text lines up with neither of them
+	var tail fyne.CanvasObject
 	switch {
-	case r.unread > 0:
-		right.Add(container.NewCenter(badge(r.unread)))
+	case unread:
+		when.Color = cAccent
+		tail = badge(r.unread)
 	case len(r.info.InCall) > 0:
-		call := canvas.NewText("📞", cGreen)
-		call.TextSize = fs(12)
-		right.Add(container.NewCenter(call))
-	case r.info.Online > 0:
-		on := canvas.NewText(fmt.Sprintf("● %d", r.info.Online), cGreen)
-		on.TextSize = fs(10)
-		right.Add(container.NewCenter(on))
+		tail = livePill("rozmowa")
 	}
+	head := container.NewBorder(nil, nil, nil,
+		tightHBox(0, hspace(8), container.NewCenter(when)), vcenter(name))
+	body := tightVBox(3, head, container.NewBorder(nil, nil, nil, tail, vcenter(sub)))
 
 	// group avatar: for two members, partner's face; in group, initial of group name
-	av := u.chatAvatar(r.info, avatarBig)
+	av := presence(u.chatAvatar(r.info, avatarBig), avatarBig, r.info.Online > 0, cBg)
 	row := container.NewBorder(nil, nil,
-		container.NewHBox(container.NewCenter(av), hspace(6)),
-		right, vcenter(body))
-	inner := fyne.CanvasObject(container.NewPadded(row))
+		tightHBox(0, container.NewCenter(av), hspace(6)), nil, vcenter(body))
+	inner := fyne.CanvasObject(pad(8, 12, row))
 	if sel {
 		bg := canvas.NewRectangle(cSurface2)
-		bg.CornerRadius = 10
-		inner = container.NewPadded(container.NewStack(bg, container.NewPadded(row)))
+		bg.CornerRadius = 12
+		// accent edge on the selected row — the same marker the wails client
+		// uses, and the only one that survives a busy avatar next to it
+		edge := canvas.NewRectangle(cAccent)
+		edge.CornerRadius = 2
+		edge.SetMinSize(fyne.NewSize(3, 22))
+		mark := container.NewVBox(layout.NewSpacer(), edge, layout.NewSpacer())
+		inner = pad(2, 8, container.NewStack(bg,
+			container.NewBorder(nil, nil, mark, nil, pad(8, 8, row))))
 	}
 	return tappable(inner, tap, nil)
+}
+
+// presence: green dot cut into the bottom-right corner of an avatar. Its ring
+// is painted in the colour of whatever the avatar sits on, so the dot reads as
+// a hole punched in the picture rather than a sticker dropped on top.
+func presence(av fyne.CanvasObject, size float32, online bool, ring color.Color) fyne.CanvasObject {
+	if !online {
+		return av
+	}
+	d := fyne.Max(11, size*0.28)
+	dot := container.NewGridWrap(fyne.NewSize(d, d), container.NewStack(
+		canvas.NewCircle(ring), pad(2.5, 2.5, canvas.NewCircle(cGreen))))
+	return container.NewGridWrap(fyne.NewSize(size, size), container.NewStack(av,
+		container.NewVBox(layout.NewSpacer(),
+			container.NewHBox(layout.NewSpacer(), dot))))
+}
+
+// livePill: green chip for "something is happening in this chat right now".
+func livePill(text string) fyne.CanvasObject {
+	t := canvas.NewText(text, cGreen)
+	t.TextSize = fs(10)
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	return pill(color.NRGBA{cGreen.R, cGreen.G, cGreen.B, 0x2b}, 999, pad(2, 8, t))
 }
 
 func (u *ui) chatAvatar(ci core.ChatInfo, size float32) fyne.CanvasObject {
@@ -111,7 +153,7 @@ func (u *ui) chatAvatar(ci core.ChatInfo, size float32) fyne.CanvasObject {
 // on bottom navigation, so it means the same thing in both places.
 func badge(n int) fyne.CanvasObject {
 	bg := canvas.NewRectangle(cRed)
-	bg.CornerRadius = 9
+	bg.CornerRadius = 999
 	txt := canvas.NewText(fmt.Sprint(n), theme.Color(theme.ColorNameForegroundOnPrimary))
 	if n > 99 {
 		txt.Text = "99+"
@@ -219,13 +261,11 @@ func (u *ui) buildConv() {
 	// updateConvHeader — avatar would render over title and subtitle later.
 	headAv := container.NewGridWrap(fyne.NewSize(avatarRow, avatarRow), u.headAvatar)
 	head := container.NewBorder(nil, nil,
-		container.NewHBox(back, container.NewCenter(headAv), hspace(6)),
+		tightHBox(0, back, container.NewCenter(headAv), hspace(8)),
 		actions,
-		container.NewVBox(layout.NewSpacer(), u.title, u.subtitle, layout.NewSpacer()))
-	line := canvas.NewRectangle(cSep)
-	line.SetMinSize(fyne.NewSize(1, 1))
+		vcenter(tightVBox(1, u.title, u.subtitle)))
 	bar := container.NewStack(canvas.NewRectangle(cDeep),
-		container.NewVBox(container.NewPadded(head), line))
+		tightVBox(0, pad(6, 6, head), hairline()))
 
 	var members fyne.CanvasObject
 	if !u.mobile {
@@ -403,12 +443,14 @@ func (u *ui) buildCallControls() {
 	u.bannerLbl = newClipText("", fs(13), cGreen).bold()
 	u.bannerSub = newClipText("", fs(11), cMuted)
 
-	bg := canvas.NewRectangle(cDeep)
-	bg.CornerRadius = 12
+	// the panel is a card floating over the thread, so it gets its own surface
+	// one step above the composer under it, not the chrome colour
+	bg := canvas.NewRectangle(cSurface)
+	bg.CornerRadius = 16
 	dot := container.NewCenter(container.NewGridWrap(fyne.NewSize(10, 10), u.bannerDot))
 	head := container.NewBorder(nil, nil,
-		container.NewHBox(dot, hspace(6)), hang,
-		container.NewVBox(u.bannerLbl, u.bannerSub))
+		tightHBox(0, dot, hspace(8)), hang,
+		vcenter(tightVBox(1, u.bannerLbl, u.bannerSub)))
 
 	if u.mobile {
 		// camera and screen have no source on Android (lacking V4L2/X11) — don't offer them
@@ -420,21 +462,27 @@ func (u *ui) buildCallControls() {
 			container.NewGridWithColumns(6, u.camBtn, u.scrBtn, u.spatialBtn, u.micBtn, u.deafBtn, gear),
 			container.NewBorder(nil, nil, widget.NewIcon(theme.VolumeUpIcon()), nil, vol))
 	}
-	u.banner = container.NewStack(bg, container.NewPadded(container.NewVBox(head, u.callBar)))
+	// inset from the screen edges: a rounded card whose corners touch the frame
+	// looks like a failed full-width bar
+	u.banner = pad(0, 8, container.NewStack(bg, pad(10, 12, container.NewVBox(head, u.callBar))))
 	u.banner.Hide()
 }
 
 func (u *ui) updateConvHeader(ch *core.ChatInfo) {
 	u.title.setText(ch.Name)
-	sub := fmt.Sprintf("%d członków", len(ch.Members))
+	sub, tone := fmt.Sprintf("%d członków", len(ch.Members)), cMuted
 	if ch.Online > 0 {
 		sub = fmt.Sprintf("%d z %d online", ch.Online+1, len(ch.Members))
 	}
+	// typing is the one subtitle that changes on its own — accent tells the eye
+	// it is live and not just another count that happens to have moved
 	if typing := u.c.TypingPeers(ch.ID); len(typing) > 0 {
-		sub = strings.Join(typing, ", ") + " pisze..."
+		sub, tone = strings.Join(typing, ", ")+" pisze…", cAccent
 	}
 	u.subtitle.setText(sub)
-	u.headAvatar.Objects = []fyne.CanvasObject{u.chatAvatar(*ch, avatarRow)}
+	u.subtitle.setColor(tone)
+	u.headAvatar.Objects = []fyne.CanvasObject{
+		presence(u.chatAvatar(*ch, avatarRow), avatarRow, ch.Online > 0, cDeep)}
 	u.headAvatar.Refresh()
 }
 
@@ -514,7 +562,9 @@ func (u *ui) renderMessages(ch *core.ChatInfo) {
 		}
 	}
 	if older > 0 {
-		u.msgBox.Add(container.NewPadded(widget.NewButton(
+		// centred pill, not a full-width bar: it is a way back into history, not
+		// a message, and at full width it reads as the first thing in the thread
+		u.msgBox.Add(pad(6, 0, container.NewCenter(widget.NewButton(
 			fmt.Sprintf("Pokaż wcześniejsze (%d)", older), func() {
 				cur := u.cur() // chat list could have been reshuffled during this time
 				if cur == nil {
@@ -524,7 +574,7 @@ func (u *ui) renderMessages(ch *core.ChatInfo) {
 				u.msgSig = ""
 				u.grew = true
 				u.renderMessages(cur)
-			})))
+			}))))
 	}
 	var lastBubble *canvas.Rectangle
 	var lastOwn bool
@@ -623,18 +673,15 @@ func (u *ui) nearBottom() bool {
 	return u.msgScr.Offset.Y >= max-60
 }
 
-// daySeparator: full-width horizontal rule with date in the center.
-// The rule was created and never added to view — leaving a floating label.
-// Label covers rule with background because fyne cannot break line in center.
+// daySeparator: date as a floating chip in the middle of the thread.
+// It used to be a rule with the date covering its middle, which needed the
+// label's background to match the thread's exactly — one palette change and a
+// grey box appeared around every date. A chip owns its background instead.
 func daySeparator(t time.Time) fyne.CanvasObject {
-	line := canvas.NewRectangle(cSep)
-	line.SetMinSize(fyne.NewSize(1, 1))
-	lbl := mutedText(strings.ToUpper(dayLabel(t)), 10)
-	cover := canvas.NewRectangle(cBg)
-	cover.CornerRadius = 8
-	return container.NewPadded(container.NewStack(
-		container.NewVBox(layout.NewSpacer(), line, layout.NewSpacer()),
-		container.NewCenter(container.NewStack(cover, container.NewPadded(lbl)))))
+	lbl := canvas.NewText(strings.ToUpper(dayLabel(t)), cMuted)
+	lbl.TextSize = fs(10)
+	lbl.TextStyle = fyne.TextStyle{Bold: true}
+	return pad(8, 0, container.NewCenter(pill(cSurface2, 999, pad(4, 11, lbl))))
 }
 
 // bubbleMax: remaining pixels for text inside bubble.
@@ -692,7 +739,7 @@ func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 	if own {
 		bg.FillColor = cBubbleMe
 	}
-	bg.CornerRadius = 16
+	bg.CornerRadius = 18
 
 	var content fyne.CanvasObject
 	hug := false // content-width bubble instead of full row width
@@ -719,9 +766,13 @@ func (u *ui) bubbleRow(m core.Msg, animate, grouped bool,
 		content = txt
 	}
 
+	// reactions as their own chip under the text: loose emoji inside the bubble
+	// read as part of the message, which is exactly what a reaction is not
 	if len(m.Reactions) > 0 {
-		rTxt := mutedText(formatReactionsGUI(m.Reactions), 10)
-		content = container.NewVBox(content, rTxt)
+		rTxt := canvas.NewText(formatReactionsGUI(m.Reactions), cFg)
+		rTxt.TextSize = fs(11)
+		content = container.NewVBox(content,
+			container.NewHBox(pill(cSurface3, 999, pad(2, 8, rTxt))))
 	}
 
 	bubble := tappable(container.NewStack(bg, content), nil, func() { u.msgActions(m) })
@@ -1000,23 +1051,34 @@ func (u *ui) membersPage() {
 	u.page("Członkowie — "+ch.Name, box)
 }
 
-// personRow: shared person row (members, friends).
+// personRow: shared person row (members, friends). Presence lives on the avatar
+// here too — the grey bullet that used to lead the row was a third column of
+// meaning before the eye had even reached the name.
 func (u *ui) personRow(pub []byte, name, tag string, online bool, tap func()) fyne.CanvasObject {
-	dot := canvas.NewText("●", cMuted)
-	dot.TextSize = fs(11)
-	if online {
-		dot.Color = cGreen
-	}
-	sub := identity.Fingerprint(pub)
+	title := newClipText(name, fs(14), cFg).bold()
+	code := newClipText(identity.Fingerprint(pub), fs(10), cFaint).mono()
+	body := fyne.CanvasObject(tightVBox(3, title, code))
 	if tag != "" {
-		sub = tag + " · " + sub
+		// Border, not HBox: clipText keeps a tiny MinSize on purpose so rows can
+		// squeeze, and in a box layout that is all the width it would ever get
+		body = tightVBox(3, title, container.NewBorder(nil, nil,
+			tightHBox(0, tagChip(tag), hspace(2)), nil, vcenter(code)))
 	}
+	av := presence(u.avatarView(pub, name, avatarRow), avatarRow, online, cBg)
+	chevron := widget.NewIcon(theme.NewColoredResource(theme.NavigateNextIcon(),
+		theme.ColorNamePlaceHolder))
 	row := container.NewBorder(nil, nil,
-		container.NewHBox(hspace(2), container.NewCenter(dot), hspace(4),
-			container.NewCenter(u.avatarView(pub, name, avatarRow)), hspace(8)),
-		container.NewCenter(widget.NewIcon(theme.NavigateNextIcon())),
-		vcenter(twoLine(name, sub, 14, 10)))
-	return tappable(container.NewPadded(row), tap, nil)
+		tightHBox(0, container.NewCenter(av), hspace(6)),
+		container.NewCenter(chevron), vcenter(body))
+	return tappable(pad(7, 12, row), tap, nil)
+}
+
+// tagChip: quiet label for a role ("założyciel") next to a name.
+func tagChip(text string) fyne.CanvasObject {
+	t := canvas.NewText(text, cFg2)
+	t.TextSize = fs(9)
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	return container.NewCenter(pill(cSurface3, 999, pad(2, 7, t)))
 }
 
 // ---- call state ----

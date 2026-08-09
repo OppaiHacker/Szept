@@ -6,6 +6,13 @@ package main
 // for free.
 //
 //	SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots go test ./cmd/szept-gui -run TestShots -v
+//
+// Pictures in README/SECURITY come from here (the wails ones from
+// tools/shots-wails.sh), copied under their English names:
+//
+//	01-czaty  -> mobile-chats        06-panel-rozmowy -> mobile-call
+//	02-rozmowa -> mobile-conversation 07-scena-3d     -> spatial-scene
+//	04-znajomi -> mobile-friends      08-…-wybrana-osoba -> spatial-selected
 
 import (
 	"errors"
@@ -32,6 +39,14 @@ func TestShots(t *testing.T) {
 	defer done()
 
 	shot("01-czaty")
+	// pusta lista: pierwszy ekran świeżej instalacji, a przez to jedyny, którego
+	// nikt nie ogląda przy zwykłym rozwoju
+	full := u.rows
+	u.rows = nil
+	u.rebuildChats()
+	shot("01b-czaty-puste")
+	u.rows = full
+	u.rebuildChats()
 	if len(u.rows) > 0 {
 		u.sel = 0
 		u.openConv()
@@ -40,6 +55,15 @@ func TestShots(t *testing.T) {
 		// i.e., exact moment when container.Scroll rendered its shadows
 		u.msgScr.ScrollToOffset(fyne.NewPos(0, 120))
 		shot("02b-rozmowa-przewinieta")
+		// menu czatu i lista członków: nawigacyjne wiersze z kafelkiem ikony i
+		// wiersze osób z awatarem to dwa najczęściej powielane układy na
+		// telefonie — jeden zrzut pilnuje obu
+		u.chatMenu(nil) // kotwica jest tylko dla menu na pulpicie
+		shot("02c-menu-czatu")
+		u.popPage()
+		u.membersPage()
+		shot("02d-czlonkowie")
+		u.popPage()
 		u.popPage()
 	}
 	if len(u.rows) > 1 {
@@ -50,6 +74,9 @@ func TestShots(t *testing.T) {
 	}
 	u.selectTab(1)
 	shot("04-znajomi")
+	u.codePage()
+	shot("04b-kod")
+	u.popPage()
 	u.selectTab(2)
 	shot("05-ty")
 
@@ -97,6 +124,11 @@ func TestShots(t *testing.T) {
 			u.c.LeaveCall(ch.ID)
 		}
 	}
+
+	// ekran startowy stoi poza powłoką aplikacji (własne SetContent), więc jego
+	// układ psuje się niezauważony — na końcu, bo zabiera okno reszcie zrzutów
+	u.setupScreen()
+	shot("09-pierwsze-uruchomienie")
 }
 
 // Desktop shares all building blocks with mobile, so a layout tweak on mobile
