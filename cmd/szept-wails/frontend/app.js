@@ -1152,12 +1152,15 @@ async function profileDialog(pub) {
     const p = await api("ProfileOf", pub);
     const canKick = S.conv && !S.conv.direct && S.conv.isOwner && !p.isMe;
     const hist = p.history.length > 1
-      ? `<div class="sec-label">Historia nazw</div>${p.history.map((h) =>
+      ? `<div class="sec-label">Historia nazw</div>${p.history.map((h, i) =>
           `<div class="list-line"><span class="mono">${esc(h.name)}</span>
-             <span style="color:var(--faint);margin-left:auto">${new Date(h.ts * 1000).toLocaleDateString("pl-PL")}</span></div>`).join("")}`
+             ${i === p.history.length - 1 ? `<span class="tag">TERAZ</span>` : ""}
+             <span class="when">${new Date(h.ts * 1000).toLocaleDateString("pl-PL")}</span></div>`).join("")}`
       : "";
     modal({
-      title: p.name || "Profil",
+      // the name is spelled out in the card 60px below — repeating it in the
+      // header just makes the sheet look like it stutters
+      title: "Profil",
       body: `
         <div class="card-banner" ${p.banner ? `style="background-image:url('${esc(p.banner)}')"` : ""}></div>
         <div class="card-id">

@@ -368,7 +368,7 @@ func main() {
 	u.enter = func(id *identity.Identity) {
 		c, err := core.Open(*cfg, id)
 		if err != nil {
-			u.fail(err)
+			u.openFailScreen(id, err)
 			return
 		}
 		u.c = c
@@ -615,6 +615,40 @@ func (u *ui) passScreen(dataDir string) {
 			pass, unlock, msg,
 		)),
 		u.profileBar(),
+	)))
+}
+
+// openFailScreen: core.Open padło — najczęściej baza została w starszym formacie
+// po aktualizacji aplikacji. Wcześniej leciał sam dialog z błędem i po „OK"
+// zostawał pusty ekran bez żadnego wyjścia, a na telefonie pliku bazy nie da się
+// skasować ręcznie. Klucz tożsamości zostaje nietknięty, więc po skasowaniu bazy
+// wchodzi się na to samo konto — tracone są czaty, wiadomości i znajomi.
+func (u *ui) openFailScreen(id *identity.Identity, err error) {
+	dbPath := filepath.Join(u.cfg.DataDir, "szept.db")
+	reset := bigButton("Zacznij od nowa", theme.MediaReplayIcon(), func() {
+		u.confirm("Czaty, wiadomości i lista znajomych znikną z aplikacji. Klucz "+
+			"tożsamości zostaje — wejdziesz na to samo konto, tylko z pustą "+
+			"historią. Stary plik nie jest kasowany, ląduje obok jako szept.db.stara.", func() {
+			// przeniesienie zamiast os.Remove: baza jest nieczytelna dla tej wersji,
+			// ale nadal zaszyfrowana danymi użytkownika — kasowanie jej za niego
+			// jednym tapnięciem to nie nasza decyzja
+			if e := os.Rename(dbPath, dbPath+".stara"); e != nil && !os.IsNotExist(e) {
+				u.fail(e)
+				return
+			}
+			u.enter(id)
+		})
+	})
+	u.w.SetContent(u.startScaffold(container.NewVBox(
+		container.NewCenter(brand(34)),
+		vspace(14),
+		card(container.NewVBox(
+			widget.NewLabelWithStyle("Nie udało się otworzyć bazy", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			mutedWrap(err.Error()),
+			vspace(6),
+			reset,
+			mutedWrap("Plik: "+dbPath),
+		)),
 	)))
 }
 

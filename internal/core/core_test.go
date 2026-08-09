@@ -583,3 +583,19 @@ func TestBlobPartFromNonMember(t *testing.T) {
 		t.Fatal("sprzeczny Total skasował trwające pobieranie")
 	}
 }
+
+func TestNormalizeWS(t *testing.T) {
+	for in, want := range map[string]string{
+		"vps:7777":         "ws://vps:7777",
+		"  vps:7777  ":     "ws://vps:7777",
+		"ws://vps:7777":    "ws://vps:7777",
+		"wss://szept.dev":  "wss://szept.dev",
+		"wws://szept.dev":  "wws://szept.dev", // literówka zostaje literówką
+		"http://szept.dev": "http://szept.dev",
+		"":                 "",
+	} {
+		if got := NormalizeWS(in); got != want {
+			t.Errorf("NormalizeWS(%q) = %q, chciałem %q", in, got, want)
+		}
+	}
+}
