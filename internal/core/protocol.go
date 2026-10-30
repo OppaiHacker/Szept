@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -77,6 +78,12 @@ func (c *Core) known(pub []byte) bool {
 }
 
 func (c *Core) onCtrl(p *p2p.Peer, data []byte) {
+	if m, ok := parseBlobFrame(data); ok {
+		if c.known(p.Pub) {
+			c.handleBlobPart(p, m)
+		}
+		return
+	}
 	var m Ctrl
 	if err := json.Unmarshal(data, &m); err != nil {
 		return
@@ -301,21 +308,29 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 		}
 		return false
 	}
-	// validate the DAG with this event included
-	evs, err := c.St.Events(chat)
+	// validate the DAG with this event included; signature of e was checked
+	// above, the rest is already in the database
+	keys, mkeys, _ := c.chatKeys(chat)
+	f, gen := c.checkout(chat)
+	f, err := c.foldWith(chat, f, gen, e, keys, mkeys)
 	if err != nil {
-		return false
-	}
-	keys, _ := c.St.ChatKeys(chat)
-	// FoldTrusted: signature of e was checked above, rest is already in database
-	folded, err := event.FoldTrusted(append(evs, e), chat, keys)
-	if err != nil {
+		if bytes.Equal(e.ID(), chat) {
+			// genesis we cannot decrypt: our epoch-1 key is missing or bad. Keep
+			// it as the judge for offered keys (see keyVerdict) and ask again.
+			c.mu.Lock()
+			c.genesis[string(chat)] = e
+			c.mu.Unlock()
+			if from != nil {
+				from.SendCtrl(Ctrl{T: "keyreq", Chat: chat})
+			}
+		}
 		return false
 	}
 	// A membership event we cannot decrypt would be applied blind, so park it and
 	// ask for the epoch key instead. Content events are stored either way — they
 	// simply stay unreadable until the key shows up.
-	if folded.MissingKey[e.Epoch] && event.MembershipKind(e.Kind) {
+	if f.St.MissingKey[e.Epoch] && event.MembershipKind(e.Kind) {
+		c.invalidate(chat)
 		c.park(chat, e)
 		if from != nil {
 			from.SendCtrl(Ctrl{T: "keyreq", Chat: chat})
@@ -323,9 +338,18 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 		return false
 	}
 	if fresh, err := c.St.AddEvent(chat, e); err != nil || !fresh {
+		c.invalidate(chat)
 		return false
 	}
-	c.invalidate(chat)
+	c.publish(chat, gen, f, nil)
+	if e.Kind == event.KindAdd {
+		go c.autoRekey(chat)
+	}
+	if bytes.Equal(e.ID(), chat) {
+		c.mu.Lock()
+		delete(c.genesis, string(chat))
+		c.mu.Unlock()
+	}
 	// keep chat name cache fresh for the UI list
 	if e.Kind == event.KindCreate || e.Kind == event.KindRename {
 		if st, err := c.ChatState(chat); err == nil {
@@ -461,29 +485,68 @@ func (c *Core) drainOrphans(chat []byte, from *p2p.Peer) {
 	}
 }
 
-// keyMatchesDAG decides whether an offered epoch key may be stored.
+// keyVerdict judges an epoch key against signed history. known=false means
+// nothing signed vouches either way.
 //
-// An epoch key is not signed and cannot be replaced once written, so a member
-// used to be able to pre-fill epochs that did not exist yet; the real key was
-// then refused forever ("never overwrite known keys") and the chat died the
-// moment a membership event landed in the poisoned epoch.
-//
-// Chats created after this change publish sha256 of every epoch key inside the
-// signed KindCreate / KindRekey event — then the answer is exact. Older chats
-// have no such hash, so the best available rule applies: an epoch the signed
-// history has not announced yet is refused.
-func (c *Core) keyMatchesDAG(st *event.State, ep uint32, k []byte) bool {
-	if want, ok := st.KeyHash[ep]; ok {
-		sum := sha256.Sum256(k)
-		return bytes.Equal(sum[:], want)
+// Epoch keys are not signed, so a member (or, while joining, any friend) can
+// offer a fake one. Chats publish sha256 of every epoch key inside the signed
+// KindCreate / KindRekey event; that settles it once state folds. While
+// joining there is no state yet, but the genesis is authenticated by its ID
+// (= chat ID), so the epoch-1 key is right exactly when it decrypts it.
+func keyVerdict(st *event.State, gen *event.Event, ep uint32, k []byte) (known, ok bool) {
+	if st != nil {
+		if want, has := st.KeyHash[ep]; has {
+			sum := sha256.Sum256(k)
+			return true, bytes.Equal(sum[:], want)
+		}
 	}
-	return ep <= st.Epoch
+	if gen != nil && gen.Epoch == ep {
+		_, err := gen.Decrypt(k)
+		return true, err == nil
+	}
+	return false, false
+}
+
+// mkeyVerdict: keyVerdict for a member key held without its content key.
+func mkeyVerdict(st *event.State, gen *event.Event, ep uint32, k []byte) (known, ok bool) {
+	if st != nil {
+		if want, has := st.MKeyHash[ep]; has {
+			sum := sha256.Sum256(k)
+			return true, bytes.Equal(sum[:], want)
+		}
+	}
+	if gen != nil && gen.Epoch == ep {
+		_, err := gen.DecryptMeta(k)
+		return true, err == nil
+	}
+	return false, false
+}
+
+// acceptKey: whether to store offered key k for epoch ep, given what signed
+// history says about it and about the key already held (old, if any).
+func acceptKey(verdict func(*event.State, *event.Event, uint32, []byte) (bool, bool),
+	st *event.State, gen *event.Event, ep uint32, k, old []byte) bool {
+	if len(k) != 32 {
+		return false
+	}
+	known, ok := verdict(st, gen, ep, k)
+	if known && !ok {
+		return false
+	}
+	if old != nil {
+		// a stored key is replaced only when signed history proves it wrong
+		// and k right; otherwise one fake key would break its epoch forever
+		oldKnown, oldOK := verdict(st, gen, ep, old)
+		return known && oldKnown && !oldOK
+	}
+	// old chat without KeyHash: refuse epochs not announced yet
+	return known || st == nil || ep <= st.Epoch
 }
 
 // handleKeys accepts epoch keys. Only from a chat member (or during joining,
-// when state does not exist yet — then only from the inviter), and only when the
-// signed DAG vouches for the key: a stored key can never be replaced, so a wrong
-// one breaks its epoch forever.
+// when state does not exist yet — then only from the inviter or a friend), and
+// only when signed history does not refute the key (keyVerdict). A stored key
+// is replaced only when signed history proves it wrong and the new one right.
 func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 	if !c.knownChat(m.Chat) {
 		return
@@ -508,16 +571,30 @@ func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 	if err != nil {
 		return
 	}
+	if stErr != nil {
+		st = nil
+	}
+	c.mu.Lock()
+	gen := c.genesis[string(m.Chat)]
+	c.mu.Unlock()
 	added := false
 	for ep, k := range m.Epochs {
-		if _, have := existing[ep]; have || len(k) != 32 {
-			continue // never overwrite known keys
+		if acceptKey(keyVerdict, st, gen, ep, k, existing[ep]) {
+			if err := c.St.PutChatKey(m.Chat, ep, k); err == nil {
+				added = true
+			}
 		}
-		if stErr == nil && !c.keyMatchesDAG(st, ep, k) {
+	}
+	// member keys only for epochs we hold no content key for
+	mexisting, _ := c.St.MemberKeys(m.Chat)
+	for ep, k := range m.MEpochs {
+		if _, have := existing[ep]; have {
 			continue
 		}
-		if err := c.St.PutChatKey(m.Chat, ep, k); err == nil {
-			added = true
+		if acceptKey(mkeyVerdict, st, gen, ep, k, mexisting[ep]) {
+			if err := c.St.PutMemberKey(m.Chat, ep, k); err == nil {
+				added = true
+			}
 		}
 	}
 	if added {
@@ -550,6 +627,7 @@ func (c *Core) handleRedeem(p *p2p.Peer, m Ctrl) {
 			return
 		}
 	}
+	c.autoRekey(m.Chat)
 	c.pushKeys(m.Chat, p.Pub)
 	p.SendCtrl(Ctrl{T: "sync", Chat: m.Chat, Heads: c.St.Heads(m.Chat)})
 	c.Notify()
@@ -628,7 +706,7 @@ func ParseInvite(code string) (*ParsedInvite, error) {
 	if len(v.C) != 32 || len(v.I) != ed25519.PublicKeySize || len(v.S) == 0 {
 		return nil, errors.New("uszkodzony kod")
 	}
-	return &ParsedInvite{Chat: v.C, Inviter: v.I, Secret: v.S, Connector: v.U, Exp: v.E}, nil
+	return &ParsedInvite{Chat: v.C, Inviter: v.I, Secret: v.S, Connector: wsOrEmpty(v.U), Exp: v.E}, nil
 }
 
 // Redeem joins a chat from an invite code + PIN. The inviter must be online.
@@ -639,9 +717,6 @@ func (c *Core) Redeem(code, pin string) error {
 	}
 	if inv.Exp > 0 && time.Now().Unix() > inv.Exp {
 		return errors.New("zaproszenie wygasło (ważne 10 minut) — poproś o nowe")
-	}
-	if inv.Connector != "" && inv.Connector != c.connURL() {
-		return fmt.Errorf("zaproszenie wskazuje inny connector (%s) — zmień go w ustawieniach", inv.Connector)
 	}
 	pin = strings.TrimSpace(pin)
 	c.mu.Lock()
@@ -697,7 +772,7 @@ func (c *Core) AddFriend(code string) (store.Friend, error) {
 	if name == "" {
 		name = identity.Fingerprint(v.P)[:9]
 	}
-	f = store.Friend{Pub: v.P, PeerName: name, Connector: v.U}
+	f = store.Friend{Pub: v.P, PeerName: name, Connector: wsOrEmpty(v.U)}
 	if err := c.St.PutFriend(f); err != nil {
 		return f, err
 	}
@@ -723,6 +798,16 @@ func makePin() string {
 // "wws://host". Prepending blindly turned that into "ws://wws://host" — an
 // address the user could no longer recognise as their own mistake, and one they
 // then had to fix on a phone keyboard inside a mangled string.
+// wsOrEmpty keeps a connector address from a code only if it is ws:// or
+// wss:// with a host; anything else in a code is dropped, not stored.
+func wsOrEmpty(s string) string {
+	u, err := url.Parse(NormalizeWS(s))
+	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" {
+		return ""
+	}
+	return u.String()
+}
+
 func NormalizeWS(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.Contains(s, "://") {

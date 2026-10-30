@@ -22,7 +22,7 @@ func freePort(t *testing.T) int {
 
 func TestWebhookAuth(t *testing.T) {
 	c := newCore(t, "ala", "ws://127.0.0.1:9/")
-	chat, err := c.CreateChat("ekipa")
+	chat, err := c.CreateChat("ekipa", false)
 	if err != nil {
 		t.Fatal(err)
 	}

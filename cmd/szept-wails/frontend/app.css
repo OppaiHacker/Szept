@@ -1040,6 +1040,8 @@ textarea.input { resize: vertical; min-height: 74px; line-height: 1.5; }
 .hint-text { font-size: var(--t-s); color: var(--muted); margin-top: 6px; line-height: 1.55; text-wrap: pretty; }
 .hint-text.err { color: var(--red); }
 .hint-text.ok { color: var(--green); }
+.check-line { display: flex; gap: 8px; align-items: center; margin-top: 12px; color: var(--fg); }
+.check-line input { accent-color: var(--accent); width: 16px; height: 16px; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -1342,6 +1344,7 @@ textarea.input { resize: vertical; min-height: 74px; line-height: 1.5; }
   transition: opacity var(--med), translate var(--med), scale var(--med);
 }
 .toast.err { background: color-mix(in srgb, var(--red) 26%, var(--mat-strong)); box-shadow: var(--sh-2), 0 0 0 1px color-mix(in srgb, var(--red) 45%, transparent); }
+.toast.warn { background: color-mix(in srgb, var(--amber) 24%, var(--mat-strong)); box-shadow: var(--sh-2), 0 0 0 1px color-mix(in srgb, var(--amber) 45%, transparent); }
 .toast.ok { background: color-mix(in srgb, var(--green) 22%, var(--mat-strong)); box-shadow: var(--sh-2), 0 0 0 1px color-mix(in srgb, var(--green) 40%, transparent); }
 .toast.out { opacity: 0; translate: 0 8px; scale: .96; }
 @keyframes toast-in { from { opacity: 0; translate: 0 14px; scale: .94; } }
@@ -1417,3 +1420,9 @@ textarea.input { resize: vertical; min-height: 74px; line-height: 1.5; }
   }
   .bubble, .btn, .input, .search { box-shadow: 0 0 0 1px var(--line-2); }
 }
+
+/* relayed link: a quiet but tappable marker in the chat header */
+.relay-tag { all: unset; cursor: pointer; color: var(--amber); font-weight: 600; text-decoration: underline dotted; text-underline-offset: 2px; }
+.relay-tag:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 3px; }
+.relay-facts { margin: 0 16px 12px; padding-left: 18px; color: var(--fg-2); font-size: var(--t-sm); line-height: 1.6; }
+.relay-facts li + li { margin-top: 6px; }

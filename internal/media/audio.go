@@ -43,12 +43,15 @@ func StartVoice(cb func(pcm []byte)) (stop func(), err error) {
 	dev, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{
 		Data: func(_, in []byte, _ uint32) {
 			buf = append(buf, in...)
-			for len(buf) >= FrameSamps*2 {
+			off := 0
+			for len(buf)-off >= FrameSamps*2 {
 				frame := make([]byte, FrameSamps*2)
-				copy(frame, buf[:FrameSamps*2])
-				buf = buf[FrameSamps*2:]
+				copy(frame, buf[off:off+FrameSamps*2])
+				off += FrameSamps * 2
 				cb(frame)
 			}
+			// move the rest to the front so the array never creeps forward
+			buf = buf[:copy(buf, buf[off:])]
 		},
 	})
 	if err != nil {
@@ -121,11 +124,11 @@ func (p *Player) mix(out []byte, n int) {
 	for i := 0; i < n; i++ {
 		var sumL, sumR float32
 		for _, s := range p.srcs {
-			if len(s.buf) == 0 {
+			// each source gives one sample per output frame: sample i
+			if i >= len(s.buf) {
 				continue
 			}
-			v := float32(s.buf[0])
-			s.buf = s.buf[1:]
+			v := float32(s.buf[i])
 			if s.mute {
 				continue
 			}
@@ -145,6 +148,11 @@ func (p *Player) mix(out []byte, n int) {
 		out[4*i+1] = byte(uint16(l) >> 8)
 		out[4*i+2] = byte(uint16(r))
 		out[4*i+3] = byte(uint16(r) >> 8)
+	}
+	// drop what was played in one copy instead of reslicing per sample, so
+	// the buffer keeps one backing array instead of creeping through new ones
+	for _, s := range p.srcs {
+		s.buf = s.buf[:copy(s.buf, s.buf[min(n, len(s.buf)):])]
 	}
 }
 
@@ -177,7 +185,7 @@ func (p *Player) Push(src string, pcm []byte) {
 	s := p.src(src)
 	s.buf = append(s.buf, samps...)
 	if max := SampleRate * 2 / 5; len(s.buf) > max { // 400 ms
-		s.buf = s.buf[len(s.buf)-max:]
+		s.buf = s.buf[:copy(s.buf, s.buf[len(s.buf)-max:])]
 	}
 	p.mu.Unlock()
 }

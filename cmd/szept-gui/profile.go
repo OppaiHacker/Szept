@@ -400,7 +400,7 @@ func (u *ui) codePage() {
 	u.page("Kody znajomych", container.NewVBox(
 		widget.NewLabelWithStyle("Twój kod", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		mutedWrap("Bezterminowy. Druga osoba może zeskanować QR aparatem telefonu, "+
-			"skopiować kod i wrócić do szeptu — powitamy ją paskiem „wykryto kod”. "+
+			"skopiować kod i wkleić go tutaj przyciskiem „Wklej ze schowka”. "+
 			"W kodzie nie ma twojej nazwy — ta dojdzie dopiero po połączeniu."),
 		u.codeBox(u.c.FriendCode()),
 		vspace(10),

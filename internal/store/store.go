@@ -1,5 +1,5 @@
 // Package store: bbolt persistence. Every value is encrypted with the
-// storage key (HKDF from identity seed) and bound to its location in the database
+// storage key (random, kept in the identity file) and bound to its location in the database
 // (bucket + key) via associated data — events too, as their envelope
 // (author, kind, epoch, relations) is chat metadata. Only record
 // keys remain plaintext: event IDs, blob hashes, public keys.
@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -26,6 +27,7 @@ var (
 	bEvents  = []byte("events")  // nested: chatID -> (eventID -> wire)
 	bHeads   = []byte("heads")   // nested: chatID -> (eventID -> nil)
 	bKeys    = []byte("keys")    // nested: chatID -> (epoch -> enc(key))
+	bMKeys   = []byte("mkeys")   // nested: chatID -> (epoch -> enc(member key)), epochs without a content key
 	bChats   = []byte("chats")   // chatID -> enc(json ChatMeta)
 	bFriends = []byte("friends") // pub -> enc(json Friend)
 	bInvites = []byte("invites") // sha256(secret) -> enc(json Invite)
@@ -92,6 +94,16 @@ func (i Invite) Expired(now int64) bool { return i.Exp > 0 && now > i.Exp }
 type Store struct {
 	db  *bolt.DB
 	key []byte // storage key for at-rest value encryption
+	// kmu: every transaction holds it shared, Rekey holds it alone while it
+	// re-encrypts everything and swaps key, so no transaction mixes keys.
+	kmu sync.RWMutex
+
+	// cmu guards counts and rev. counts caches EventCount (first call scans
+	// and decrypts the chat once, AddEvent keeps it current); rev bumps on
+	// every change to what a chat shows, so callers can cache derived views.
+	cmu    sync.Mutex
+	counts map[string]int
+	rev    map[string]uint64
 }
 
 // dbVersion: format version on disk. Key lives in plaintext (it's not secret) and serves
@@ -99,7 +111,13 @@ type Store struct {
 // failing during decryption.
 const dbVersion = "2"
 
-var kVersion = []byte("dbver")
+var (
+	kVersion = []byte("dbver")
+	kCheck   = []byte("keycheck") // sealed known value: tells which key the DB uses
+)
+
+// ErrWrongKey: the database is encrypted with a different key.
+var ErrWrongKey = errors.New("store: database uses a different key")
 
 func Open(path string, storageKey []byte) (*Store, error) {
 	// Timeout: without it a second instance hangs indefinitely on flock
@@ -107,8 +125,9 @@ func Open(path string, storageKey []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	s := &Store{db: db, key: storageKey}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bEvents, bHeads, bKeys, bChats, bFriends, bInvites, bBlobs, bAvatars, bHidden, bMeta, bBlobChat} {
+		for _, b := range [][]byte{bEvents, bHeads, bKeys, bMKeys, bChats, bFriends, bInvites, bBlobs, bAvatars, bHidden, bMeta, bBlobChat} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -116,18 +135,117 @@ func Open(path string, storageKey []byte) (*Store, error) {
 		meta := tx.Bucket(bMeta)
 		switch v := meta.Get(kVersion); {
 		case v == nil && tx.Bucket(bChats).Stats().KeyN == 0 && tx.Bucket(bEvents).Stats().BucketN <= 1:
-			return meta.Put(kVersion, []byte(dbVersion)) // fresh DB
+			if err := meta.Put(kVersion, []byte(dbVersion)); err != nil { // fresh DB
+				return err
+			}
 		case v == nil || string(v) != dbVersion:
 			return fmt.Errorf("baza %s jest w starszym formacie (%q, teraz %q) — skasuj plik i zaloguj się ponownie",
 				path, v, dbVersion)
 		}
-		return nil
+		ck := ad(bMeta, kCheck)
+		if box := meta.Get(kCheck); box != nil {
+			if _, err := s.open(ck, box); err != nil {
+				return ErrWrongKey
+			}
+			return nil
+		}
+		return meta.Put(kCheck, s.seal(ck, kCheck))
 	})
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db, key: storageKey}, nil
+	return s, nil
+}
+
+// UsesKey reports whether the database at path is encrypted with key. A
+// missing file or one without a key check counts as yes. Used to finish or
+// roll back a password change that a crash interrupted.
+func UsesKey(path string, key []byte) bool {
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 3 * time.Second, ReadOnly: true})
+	if err != nil {
+		return true
+	}
+	defer db.Close()
+	ok := true
+	db.View(func(tx *bolt.Tx) error {
+		if m := tx.Bucket(bMeta); m != nil {
+			if box := m.Get(kCheck); box != nil {
+				_, err := crypt.Open(key, box, ad(bMeta, kCheck))
+				ok = err == nil
+			}
+		}
+		return nil
+	})
+	return ok
+}
+
+// Rekey re-encrypts every value with key in one transaction and switches to
+// it. Either all of the database moves to the new key or none of it does.
+func (s *Store) Rekey(key []byte) error {
+	s.kmu.Lock()
+	defer s.kmu.Unlock()
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			return rekeyBucket(b, [][]byte{name}, s.key, key)
+		})
+	})
+	if err == nil {
+		s.key = key
+	}
+	return err
+}
+
+func rekeyBucket(b *bolt.Bucket, path [][]byte, old, key []byte) error {
+	type kv struct{ k, v []byte }
+	var out []kv
+	var subs [][]byte
+	err := b.ForEach(func(k, v []byte) error {
+		switch {
+		case v == nil:
+			subs = append(subs, bytes.Clone(k))
+		case len(v) == 0 || (bytes.Equal(path[0], bMeta) && bytes.Equal(k, kVersion)):
+			// index entries and the plaintext format version
+		default:
+			a := ad(append(path, k)...)
+			pt, err := crypt.Open(old, v, a)
+			if err != nil {
+				return fmt.Errorf("rekey %q: %w", path[0], err)
+			}
+			box, err := crypt.Seal(key, pt, a)
+			if err != nil {
+				return err
+			}
+			out = append(out, kv{bytes.Clone(k), box})
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, x := range out {
+		if err := b.Put(x.k, x.v); err != nil {
+			return err
+		}
+	}
+	for _, k := range subs {
+		if err := rekeyBucket(b.Bucket(k), append(path[:len(path):len(path)], k), old, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) view(fn func(*bolt.Tx) error) error {
+	s.kmu.RLock()
+	defer s.kmu.RUnlock()
+	return s.db.View(fn)
+}
+
+func (s *Store) update(fn func(*bolt.Tx) error) error {
+	s.kmu.RLock()
+	defer s.kmu.RUnlock()
+	return s.db.Update(fn)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -135,7 +253,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // Snapshot writes a consistent copy of the open database (a bbolt read
 // transaction) — the basis of a working backup without closing the app.
 func (s *Store) Snapshot(w io.Writer) error {
-	return s.db.View(func(tx *bolt.Tx) error {
+	return s.view(func(tx *bolt.Tx) error {
 		_, err := tx.WriteTo(w)
 		return err
 	})
@@ -181,8 +299,11 @@ func sub(tx *bolt.Tx, root, name []byte, create bool) (*bolt.Bucket, error) {
 // Returns false if the event was already known.
 func (s *Store) AddEvent(chat []byte, e *event.Event) (bool, error) {
 	id := e.ID()
+	wire := event.Marshal(e)
 	fresh := false
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	s.cmu.Lock() // held across the write so a concurrent first count cannot miss or double it
+	defer s.cmu.Unlock()
+	err := s.update(func(tx *bolt.Tx) error {
 		evs, err := sub(tx, bEvents, chat, true)
 		if err != nil {
 			return err
@@ -194,7 +315,7 @@ func (s *Store) AddEvent(chat []byte, e *event.Event) (bool, error) {
 		// events are encrypted too: body was encrypted always, but
 		// envelope (author, kind, epoch, relations) was plaintext, revealing
 		// "who with whom and how much" graph without any key
-		if err := evs.Put(id, s.seal(ad(bEvents, chat, id), event.Marshal(e))); err != nil {
+		if err := evs.Put(id, s.seal(ad(bEvents, chat, id), wire)); err != nil {
 			return err
 		}
 		heads, err := sub(tx, bHeads, chat, true)
@@ -208,12 +329,41 @@ func (s *Store) AddEvent(chat []byte, e *event.Event) (bool, error) {
 		}
 		return heads.Put(id, nil)
 	})
+	if fresh && err == nil {
+		s.bump(chat)
+		if n, ok := s.counts[string(chat)]; ok && !quietWire(wire) {
+			s.counts[string(chat)] = n + 1
+		}
+	}
 	return fresh, err
+}
+
+// bump: caller holds cmu.
+func (s *Store) bump(chat []byte) {
+	if s.rev == nil {
+		s.rev = map[string]uint64{}
+	}
+	s.rev[string(chat)]++
+}
+
+// Rev changes whenever a chat's events or hidden set change.
+func (s *Store) Rev(chat []byte) uint64 {
+	s.cmu.Lock()
+	defer s.cmu.Unlock()
+	return s.rev[string(chat)]
+}
+
+func (s *Store) touch(chat []byte, err error) error {
+	s.cmu.Lock()
+	s.bump(chat)
+	delete(s.counts, string(chat))
+	s.cmu.Unlock()
+	return err
 }
 
 func (s *Store) HasEvent(chat, id []byte) bool {
 	ok := false
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		if b, _ := sub(tx, bEvents, chat, false); b != nil {
 			ok = b.Get(id) != nil
 		}
@@ -223,19 +373,16 @@ func (s *Store) HasEvent(chat, id []byte) bool {
 }
 
 func (s *Store) GetEvent(chat, id []byte) (*event.Event, error) {
-	var raw []byte
-	s.db.View(func(tx *bolt.Tx) error {
-		if b, _ := sub(tx, bEvents, chat, false); b != nil {
-			if v := b.Get(id); v != nil {
-				raw = bytes.Clone(v)
-			}
+	var pt []byte
+	err := s.view(func(tx *bolt.Tx) error {
+		b, _ := sub(tx, bEvents, chat, false)
+		if b == nil || b.Get(id) == nil {
+			return fmt.Errorf("event %x not found", id[:6])
 		}
-		return nil
+		var err error
+		pt, err = s.open(ad(bEvents, chat, id), b.Get(id))
+		return err
 	})
-	if raw == nil {
-		return nil, fmt.Errorf("event %x not found", id[:6])
-	}
-	pt, err := s.open(ad(bEvents, chat, id), raw)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +391,7 @@ func (s *Store) GetEvent(chat, id []byte) (*event.Event, error) {
 
 func (s *Store) Events(chat []byte) ([]*event.Event, error) {
 	var out []*event.Event
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b, _ := sub(tx, bEvents, chat, false)
 		if b == nil {
 			return nil
@@ -267,7 +414,7 @@ func (s *Store) Events(chat []byte) ([]*event.Event, error) {
 
 func (s *Store) Heads(chat []byte) [][]byte {
 	var out [][]byte
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		b, _ := sub(tx, bHeads, chat, false)
 		if b == nil {
 			return nil
@@ -299,14 +446,14 @@ func (s *Store) LamportAfter(chat []byte, parents [][]byte) uint64 {
 
 func (s *Store) PutChat(chat []byte, m ChatMeta) error {
 	j, _ := json.Marshal(m)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bChats).Put(chat, s.seal(ad(bChats, chat), j))
 	})
 }
 
 func (s *Store) Chats() (map[string]ChatMeta, error) {
 	out := map[string]ChatMeta{}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(bChats).ForEach(func(k, v []byte) error {
 			pt, err := s.open(ad(bChats, k), v)
 			if err != nil {
@@ -324,11 +471,16 @@ func (s *Store) Chats() (map[string]ChatMeta, error) {
 }
 
 func (s *Store) DeleteChat(chat []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.touch(chat, s.deleteChat(chat))
+}
+
+func (s *Store) deleteChat(chat []byte) error {
+	return s.update(func(tx *bolt.Tx) error {
 		tx.Bucket(bChats).Delete(chat)
 		tx.Bucket(bEvents).DeleteBucket(chat)
 		tx.Bucket(bHeads).DeleteBucket(chat)
 		tx.Bucket(bKeys).DeleteBucket(chat)
+		tx.Bucket(bMKeys).DeleteBucket(chat)
 		tx.Bucket(bHidden).DeleteBucket(chat)
 		// blobs of this chat go too, unless another chat still announces them
 		// (content addressing means one file can be shared by several chats)
@@ -376,7 +528,7 @@ func (s *Store) NoteBlobChat(chat, hash []byte) error {
 	if len(hash) == 0 || len(chat) == 0 {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b, err := sub(tx, bBlobChat, chat, true)
 		if err != nil {
 			return err
@@ -390,7 +542,7 @@ func (s *Store) NoteBlobChat(chat, hash []byte) error {
 // files from every other chat.
 func (s *Store) BlobInChat(chat, hash []byte) bool {
 	ok := false
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		if b, _ := sub(tx, bBlobChat, chat, false); b != nil {
 			ok = b.Get(hash) != nil
 		}
@@ -406,29 +558,29 @@ func (s *Store) BlobInChat(chat, hash []byte) bool {
 // that the UI doesn't render. Bytes stay, but on this device only.
 
 func (s *Store) HideEvent(chat, id []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.touch(chat, s.update(func(tx *bolt.Tx) error {
 		b, err := sub(tx, bHidden, chat, true)
 		if err != nil {
 			return err
 		}
 		return b.Put(id, nil)
-	})
+	}))
 }
 
 // ShowAllHidden unhides everything in given chat ("restore" button).
 func (s *Store) ShowAllHidden(chat []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.touch(chat, s.update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bHidden).Bucket(chat) == nil {
 			return nil
 		}
 		return tx.Bucket(bHidden).DeleteBucket(chat)
-	})
+	}))
 }
 
 // Hidden returns set of hidden IDs (key = string(eventID)).
 func (s *Store) Hidden(chat []byte) map[string]bool {
 	out := map[string]bool{}
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		b, _ := sub(tx, bHidden, chat, false)
 		if b == nil {
 			return nil
@@ -444,14 +596,14 @@ func (s *Store) Hidden(chat []byte) map[string]bool {
 // ---- meta: minor settings of own profile ----
 
 func (s *Store) PutMeta(key string, val []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bMeta).Put([]byte(key), s.seal(ad(bMeta, []byte(key)), val))
 	})
 }
 
 func (s *Store) Meta(key string) []byte {
 	var out []byte
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		if v := tx.Bucket(bMeta).Get([]byte(key)); v != nil {
 			if pt, err := s.open(ad(bMeta, []byte(key)), v); err == nil {
 				out = pt
@@ -471,24 +623,38 @@ func epochKey(ep uint32) []byte {
 }
 
 func (s *Store) PutChatKey(chat []byte, epoch uint32, key []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		b, err := sub(tx, bKeys, chat, true)
+	return s.putKey(bKeys, chat, epoch, key)
+}
+
+func (s *Store) ChatKeys(chat []byte) (map[uint32][]byte, error) { return s.keys(bKeys, chat) }
+
+// PutMemberKey / MemberKeys: member keys (event.MemberKey) held without the
+// content key of their epoch — history from before joining a chat without it.
+func (s *Store) PutMemberKey(chat []byte, epoch uint32, key []byte) error {
+	return s.putKey(bMKeys, chat, epoch, key)
+}
+
+func (s *Store) MemberKeys(chat []byte) (map[uint32][]byte, error) { return s.keys(bMKeys, chat) }
+
+func (s *Store) putKey(bucket, chat []byte, epoch uint32, key []byte) error {
+	return s.update(func(tx *bolt.Tx) error {
+		b, err := sub(tx, bucket, chat, true)
 		if err != nil {
 			return err
 		}
-		return b.Put(epochKey(epoch), s.seal(ad(bKeys, chat, epochKey(epoch)), key))
+		return b.Put(epochKey(epoch), s.seal(ad(bucket, chat, epochKey(epoch)), key))
 	})
 }
 
-func (s *Store) ChatKeys(chat []byte) (map[uint32][]byte, error) {
+func (s *Store) keys(bucket, chat []byte) (map[uint32][]byte, error) {
 	out := map[uint32][]byte{}
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b, _ := sub(tx, bKeys, chat, false)
+	err := s.view(func(tx *bolt.Tx) error {
+		b, _ := sub(tx, bucket, chat, false)
 		if b == nil {
 			return nil
 		}
 		return b.ForEach(func(k, v []byte) error {
-			pt, err := s.open(ad(bKeys, chat, k), v)
+			pt, err := s.open(ad(bucket, chat, k), v)
 			if err != nil {
 				return err
 			}
@@ -503,20 +669,20 @@ func (s *Store) ChatKeys(chat []byte) (map[uint32][]byte, error) {
 
 func (s *Store) PutFriend(f Friend) error {
 	j, _ := json.Marshal(f)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bFriends).Put(f.Pub, s.seal(ad(bFriends, f.Pub), j))
 	})
 }
 
 func (s *Store) DelFriend(pub []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bFriends).Delete(pub)
 	})
 }
 
 func (s *Store) Friends() ([]Friend, error) {
 	var out []Friend
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(bFriends).ForEach(func(k, v []byte) error {
 			pt, err := s.open(ad(bFriends, k), v)
 			if err != nil {
@@ -535,7 +701,7 @@ func (s *Store) Friends() ([]Friend, error) {
 
 func (s *Store) IsFriend(pub []byte) bool {
 	ok := false
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		ok = tx.Bucket(bFriends).Get(pub) != nil
 		return nil
 	})
@@ -546,27 +712,27 @@ func (s *Store) IsFriend(pub []byte) bool {
 
 func (s *Store) PutInvite(secretHash []byte, inv Invite) error {
 	j, _ := json.Marshal(inv)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bInvites).Put(secretHash, s.seal(ad(bInvites, secretHash), j))
 	})
 }
 
-// OpenInviteCount: number of unused, unexpired invites (drives the accept-gate).
-func (s *Store) OpenInviteCount() int {
-	n := 0
-	now := time.Now().Unix()
-	s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(bInvites).ForEach(func(k, v []byte) error {
-			if pt, err := s.open(ad(bInvites, k), v); err == nil {
-				var inv Invite
-				if json.Unmarshal(pt, &inv) == nil && !inv.Used && !inv.Expired(now) {
-					n++
-				}
-			}
+// InviteOpen: the invite with this secret hash exists, is unused and unexpired
+// (drives the accept-gate for strangers).
+func (s *Store) InviteOpen(secretHash []byte) bool {
+	ok := false
+	s.view(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bInvites).Get(secretHash)
+		if v == nil {
 			return nil
-		})
+		}
+		if pt, err := s.open(ad(bInvites, secretHash), v); err == nil {
+			var inv Invite
+			ok = json.Unmarshal(pt, &inv) == nil && !inv.Used && !inv.Expired(time.Now().Unix())
+		}
+		return nil
 	})
-	return n
+	return ok
 }
 
 // TakeInvite atomically consumes an unused invite. Errors if unknown, used,
@@ -575,7 +741,7 @@ func (s *Store) OpenInviteCount() int {
 func (s *Store) TakeInvite(secretHash, pin []byte) (Invite, error) {
 	var inv Invite
 	var reject error // error returned AFTER commit: return from Update rolls back write
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bInvites)
 		v := b.Get(secretHash)
 		if v == nil {
@@ -628,7 +794,7 @@ func (s *Store) TakeInvite(secretHash, pin []byte) (Invite, error) {
 // PutBlob saves content under its hash and returns the hash.
 func (s *Store) PutBlob(data []byte) ([]byte, error) {
 	h := sha256.Sum256(data)
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bBlobs)
 		if b.Get(h[:]) != nil {
 			return nil // same content = same key, nothing to overwrite
@@ -640,7 +806,7 @@ func (s *Store) PutBlob(data []byte) ([]byte, error) {
 
 func (s *Store) GetBlob(hash []byte) ([]byte, bool) {
 	var out []byte
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		if v := tx.Bucket(bBlobs).Get(hash); v != nil {
 			pt, err := s.open(ad(bBlobs, hash), v)
 			if err == nil {
@@ -654,7 +820,7 @@ func (s *Store) GetBlob(hash []byte) ([]byte, bool) {
 
 func (s *Store) HasBlob(hash []byte) bool {
 	ok := false
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		ok = tx.Bucket(bBlobs).Get(hash) != nil
 		return nil
 	})
@@ -682,7 +848,7 @@ func (p ProfileMeta) empty() bool {
 // of truth is signed events in chats — this is an index so friend list
 // doesn't have to traverse entire DAG. An empty card deletes the entry.
 func (s *Store) PutProfile(pub []byte, a ProfileMeta) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bAvatars)
 		if a.empty() {
 			return b.Delete(pub)
@@ -695,7 +861,7 @@ func (s *Store) PutProfile(pub []byte, a ProfileMeta) error {
 func (s *Store) Profile(pub []byte) (ProfileMeta, bool) {
 	var a ProfileMeta
 	ok := false
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bAvatars).Get(pub)
 		if v == nil {
 			return nil
@@ -728,13 +894,16 @@ func quietWire(v []byte) bool {
 	return false
 }
 
-// EventCount: cheap event tally for unread badges (no decrypt).
-// Value iteration instead of Stats().KeyN — bytes live in mmap,
-// so this is a memory scan, not disk I/O. If history grows to hundreds of
-// thousands of events, keep counter separately instead of recomputing each time.
+// EventCount: conversation events in a chat, for unread badges. The first
+// call decrypts the chat once; after that AddEvent keeps the tally.
 func (s *Store) EventCount(chat []byte) int {
+	s.cmu.Lock()
+	defer s.cmu.Unlock()
+	if n, ok := s.counts[string(chat)]; ok {
+		return n
+	}
 	n := 0
-	s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b, _ := sub(tx, bEvents, chat, false)
 		if b == nil {
 			return nil
@@ -750,5 +919,11 @@ func (s *Store) EventCount(chat []byte) int {
 			return nil
 		})
 	})
+	if err == nil {
+		if s.counts == nil {
+			s.counts = map[string]int{}
+		}
+		s.counts[string(chat)] = n
+	}
 	return n
 }

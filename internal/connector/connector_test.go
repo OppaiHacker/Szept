@@ -2,9 +2,10 @@ package connector
 
 import (
 	"crypto/ed25519"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,13 +36,13 @@ func TestPerIPLimit(t *testing.T) {
 	// otherwise a connector behind a reverse proxy has no per-IP limit at all
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "127.0.0.1:5555"
-	r.Header.Set("X-Forwarded-For", "198.51.100.9, 10.0.0.1")
+	r.Header.Set("X-Forwarded-For", "10.0.0.1, 198.51.100.9") // first = client-forged
 	if ip := s.clientIP(r); ip != "127.0.0.1" {
 		t.Fatalf("bez --trust-proxy liczy się loopback, dostałem %q", ip)
 	}
 	s.SetTrustProxy(true)
 	if ip := s.clientIP(r); ip != "198.51.100.9" {
-		t.Fatalf("z --trust-proxy ma być pierwszy wpis XFF, dostałem %q", ip)
+		t.Fatalf("z --trust-proxy ma być ostatni wpis XFF (dopisany przez proxy), dostałem %q", ip)
 	}
 	s.SetTrustProxy(false)
 	r.RemoteAddr = "203.0.113.7:5555"
@@ -230,15 +231,15 @@ func allowLoopbackMesh(t *testing.T) {
 
 const testMeshSecret = "wspolny-sekret-testowy"
 
-// meshNode spins up a connector that is part of an authenticated test mesh.
+// meshNode spins up a connector of an open test mesh, on a secret path.
 func meshNode(t *testing.T) (*Server, string) {
 	t.Helper()
 	s := NewServer()
+	s.SetPath("/tajne")
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
-	u := "ws" + strings.TrimPrefix(srv.URL, "http")
+	u := "ws" + strings.TrimPrefix(srv.URL, "http") + "/tajne"
 	s.SetPublicURL(u)
-	s.SetMeshSecret(testMeshSecret)
 	return s, u
 }
 
@@ -248,8 +249,8 @@ func TestMeshRelay(t *testing.T) {
 	s2, url2 := meshNode(t)
 
 	// SNDP network connection with latency weights
-	s1.mesh.addNeighbor(url2, 0, 10)
-	s2.mesh.addNeighbor(url1, 0, 10)
+	s1.mesh.addNeighbor(url2)
+	s2.mesh.addNeighbor(url1)
 
 	_, aPriv, _ := ed25519.GenerateKey(nil)
 	_, bPriv, _ := ed25519.GenerateKey(nil)
@@ -326,12 +327,12 @@ func TestNeighborURLRejectsPrivate(t *testing.T) {
 	}
 }
 
-// Mesh operations belong to an authenticated plane. An ordinary
-// client socket — registered or not — must not reach them.
-func TestMeshRequiresAuth(t *testing.T) {
+// Mesh operations belong to the mesh plane: an ordinary client socket must not
+// reach them, and a private mesh (--mesh-secret) admits only nodes with the MAC.
+func TestPrivateMeshRequiresAuth(t *testing.T) {
 	allowLoopbackMesh(t)
-	s, _ := meshNode(t)
-	srvURL := "ws://" + s.PublicURL[len("ws://"):]
+	s, srvURL := meshNode(t)
+	s.SetMeshSecret(testMeshSecret)
 
 	victimPub, victimPriv, _ := ed25519.GenerateKey(nil)
 	victim := NewClient(srvURL, victimPriv)
@@ -348,90 +349,147 @@ func TestMeshRequiresAuth(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// unregistered attacker: no key, no registration, just a socket
 	ws, _, err := websocket.DefaultDialer.Dial(srvURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ws.Close()
-
-	if err := ws.WriteJSON(Msg{
+	forged := Msg{
 		Op:      "mesh_signal",
 		From:    []byte("TOTALLY-NOT-A-REAL-PUBKEY-------"),
 		To:      victimPub,
 		TraceID: "atak-1",
+		TTL:     3,
 		Payload: []byte(`{"attacker":"controlled"}`),
-	}); err != nil {
-		t.Fatal(err)
 	}
-	if err := ws.WriteJSON(Msg{Op: "ndp_gossip", From: []byte("ws://zly-serwer.example:7777")}); err != nil {
+	if err := ws.WriteJSON(forged); err != nil {
 		t.Fatal(err)
 	}
 	// a wrong MAC must not open the plane either
-	if err := ws.WriteJSON(Msg{Op: "mesh_hello", TS: time.Now().Unix(), Sig: make([]byte, 32)}); err != nil {
+	bad := Msg{Op: "mesh_hello", TS: time.Now().Unix(), Sig: make([]byte, 32), From: []byte("ws://zly-serwer.example:7777")}
+	if err := ws.WriteJSON(bad); err != nil {
 		t.Fatal(err)
 	}
-	if err := ws.WriteJSON(Msg{Op: "ndp_gossip", From: []byte("ws://zly-serwer2.example:7777")}); err != nil {
+	forged.TraceID = "atak-2"
+	if err := ws.WriteJSON(forged); err != nil {
 		t.Fatal(err)
 	}
-
 	select {
 	case p := <-got:
 		t.Fatalf("nieuwierzytelniony klient przekazał ramkę do ofiary: %s", p)
 	case <-time.After(500 * time.Millisecond):
 	}
-	for _, u := range s.mesh.activeNeighborURLs() {
-		if strings.Contains(u, "zly-serwer") {
-			t.Fatalf("nieuwierzytelniony klient wstrzyknął sąsiada: %s", u)
-		}
+	if s.mesh.neighbors["ws://zly-serwer.example:7777"] != nil {
+		t.Fatal("zły MAC wstrzyknął sąsiada")
 	}
 
 	// with the right secret the same socket does become a mesh peer
 	ts := time.Now().Unix()
-	if err := ws.WriteJSON(Msg{Op: "mesh_hello", TS: ts, Sig: meshMAC([]byte(testMeshSecret), ts)}); err != nil {
+	if err := ws.WriteJSON(Msg{Op: "mesh_hello", TS: ts, Sig: meshMAC([]byte(testMeshSecret), ts), From: []byte("ws://sasiad.example:7777")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ws.WriteJSON(Msg{Op: "ndp_gossip", From: []byte("ws://sasiad.example:7777")}); err != nil {
+	forged.TraceID = "atak-3"
+	if err := ws.WriteJSON(forged); err != nil {
 		t.Fatal(err)
 	}
-	deadline = time.Now().Add(2 * time.Second)
-	for {
-		if slices.Contains(s.mesh.activeNeighborURLs(), "ws://sasiad.example:7777") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("uwierzytelniony sąsiad nie został dodany")
-		}
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("uwierzytelniony węzeł nie przekazał sygnału")
+	}
+	s.mesh.mu.Lock()
+	n := s.mesh.neighbors["ws://sasiad.example:7777"]
+	s.mesh.mu.Unlock()
+	if n == nil {
+		t.Fatal("uwierzytelniony sąsiad nie został dodany")
 	}
 }
 
-// markTraceSeen is fed attacker-controlled ids, so it must refuse to grow.
+// The trace ring is fed attacker-controlled ids: it must stay bounded and a
+// flood must evict old ids, never stop accepting new ones (that froze the mesh).
 func TestSeenTracesBounded(t *testing.T) {
 	m := newMeshManager(nil, "ws://me", nil)
-	if !m.markTraceSeen("") {
+	if !m.markTraceSeen("", nil) {
 		t.Fatal("pusty TraceID ma być odrzucony")
 	}
-	if !m.markTraceSeen(strings.Repeat("x", maxTraceIDLen+1)) {
+	if !m.markTraceSeen(strings.Repeat("x", maxTraceIDLen+1), nil) {
 		t.Fatal("przerośnięty TraceID ma być odrzucony")
 	}
-	if m.markTraceSeen("abc") || !m.markTraceSeen("abc") {
+	if m.markTraceSeen("abc", nil) || !m.markTraceSeen("abc", nil) {
 		t.Fatal("pierwszy raz nowy, drugi raz widziany")
 	}
-	m.mu.Lock()
-	clear(m.seenTraces)
 	for i := 0; i < maxSeenTraces; i++ {
-		m.seenTraces[strconv.Itoa(i)] = time.Now()
+		m.markTraceSeen(strconv.Itoa(i), nil)
 	}
-	m.mu.Unlock()
-	if !m.markTraceSeen("po-przepelnieniu") {
-		t.Fatal("po przepełnieniu mapa ma upuszczać, nie rosnąć")
+	if m.markTraceSeen("po-przepelnieniu", nil) {
+		t.Fatal("po zalewie nowy ślad ma przejść")
 	}
-	m.mu.Lock()
-	n := len(m.seenTraces)
-	m.mu.Unlock()
-	if n > maxSeenTraces {
-		t.Fatalf("seenTraces urosło ponad limit: %d", n)
+	if len(m.traces) > maxSeenTraces || len(m.traceLog) > maxSeenTraces {
+		t.Fatalf("ślady urosły ponad limit: %d", len(m.traces))
+	}
+	if m.markTraceSeen("abc", nil) {
+		t.Fatal("najstarszy ślad miał wypaść")
+	}
+}
+
+// A probe that does not know the path sees a plain 404, never the connector.
+func TestConnectorHidesFromProbes(t *testing.T) {
+	_, u := meshNode(t)
+	base := "http" + strings.TrimPrefix(strings.TrimSuffix(u, "/tajne"), "ws")
+	for _, p := range []string{"/", "/ndp/neighbors", "/tajne"} {
+		resp, err := http.Get(base + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound || strings.Contains(strings.ToLower(string(body)), "szept") {
+			t.Fatalf("GET %s: %d %q", p, resp.StatusCode, body)
+		}
+	}
+	if _, _, err := websocket.DefaultDialer.Dial(strings.TrimSuffix(u, "/tajne")+"/", nil); err == nil {
+		t.Fatal("upgrade poza ścieżką przeszedł")
+	}
+	ws, _, err := websocket.DefaultDialer.Dial(u, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.Close()
+}
+
+// Clients on different connectors find each other: lookup asks the mesh.
+func TestMeshLookup(t *testing.T) {
+	allowLoopbackMesh(t)
+	s1, url1 := meshNode(t)
+	_, url2 := meshNode(t)
+	s1.mesh.addNeighbor(url2)
+
+	_, aPriv, _ := ed25519.GenerateKey(nil)
+	_, bPriv, _ := ed25519.GenerateKey(nil)
+	_, cPriv, _ := ed25519.GenerateKey(nil)
+	a, b := NewClient(url1, aPriv), NewClient(url2, bPriv)
+	go a.Run()
+	go b.Run()
+	defer a.Close()
+	defer b.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for !(a.Up() && b.Up()) {
+		if time.Now().After(deadline) {
+			t.Fatal("klienci nie wstali")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if on, err := a.Lookup(b.Pub, 3*time.Second); err != nil || !on {
+		t.Fatalf("b na innym connectorze: online=%v err=%v", on, err)
+	}
+	if on, _ := a.Lookup(cPriv.Public().(ed25519.PublicKey), 3*time.Second); on {
+		t.Fatal("nieistniejący klucz online")
+	}
+	s1.mesh.mu.Lock()
+	_, routed := s1.mesh.routes[string(b.Pub)]
+	s1.mesh.mu.Unlock()
+	if !routed {
+		t.Fatal("brak trasy po mesh_found")
 	}
 }
 
@@ -442,10 +500,10 @@ func TestCebulionMultiHopRelay(t *testing.T) {
 	s3, url3 := meshNode(t)
 
 	// Connect into Cebulion Network mesh: s1 <-> s2 <-> s3
-	s1.mesh.addNeighbor(url2, 0, 10)
-	s2.mesh.addNeighbor(url1, 0, 10)
-	s2.mesh.addNeighbor(url3, 0, 10)
-	s3.mesh.addNeighbor(url2, 0, 10)
+	s1.mesh.addNeighbor(url2)
+	s2.mesh.addNeighbor(url1)
+	s2.mesh.addNeighbor(url3)
+	s3.mesh.addNeighbor(url2)
 
 	_, aPriv, _ := ed25519.GenerateKey(nil)
 	_, bPriv, _ := ed25519.GenerateKey(nil)
@@ -485,5 +543,107 @@ func TestCebulionMultiHopRelay(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("mesh signal was not relayed across 3 hops (s1 -> s2 -> s3) in Sieć Cebulionowa")
+	}
+}
+
+// A hostname is fine for the mesh now; one that resolves to a private address
+// is still refused after DNS, not by string matching.
+func TestSafeDialResolvesHostnames(t *testing.T) {
+	_, err := safeDial(t.Context(), "tcp", "localhost:1")
+	if err == nil || !strings.Contains(err.Error(), "nie-publiczny") {
+		t.Fatalf("localhost przepuszczony: %v", err)
+	}
+}
+
+// The hosting connector confirms a relayed signal; a signal nobody
+// takes comes back to the sender as "undelivered" instead of vanishing.
+func TestMeshSignalReceipt(t *testing.T) {
+	allowLoopbackMesh(t)
+	s1, url1 := meshNode(t)
+	_, url2 := meshNode(t)
+	s1.mesh.addNeighbor(url2)
+
+	_, aPriv, _ := ed25519.GenerateKey(nil)
+	_, bPriv, _ := ed25519.GenerateKey(nil)
+	ghost, _, _ := ed25519.GenerateKey(nil)
+	a, b := NewClient(url1, aPriv), NewClient(url2, bPriv)
+	lost := make(chan []byte, 4)
+	a.OnUndelivered = func(pub []byte) { lost <- pub }
+	go a.Run()
+	go b.Run()
+	defer a.Close()
+	defer b.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for !(a.Up() && b.Up()) {
+		if time.Now().After(deadline) {
+			t.Fatal("clients did not come online")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	a.Signal(b.Pub, []byte("hi"))
+	a.Signal(ghost, []byte("hi"))
+	select {
+	case pub := <-lost:
+		if string(pub) != string(ghost) {
+			t.Fatal("delivered signal reported as undelivered")
+		}
+	case <-time.After(3 * lookupWait):
+		t.Fatal("no undelivered notice for an unknown key")
+	}
+	select {
+	case <-lost:
+		t.Fatal("second undelivered notice")
+	case <-time.After(lookupWait):
+	}
+	s1.mesh.mu.Lock()
+	_, routed := s1.mesh.routes[string(b.Pub)]
+	s1.mesh.mu.Unlock()
+	if !routed {
+		t.Fatal("receipt did not teach the route")
+	}
+}
+
+// One node answers gossip for a bounded number of network blocks, so
+// walking the mesh from many address ranges stops paying off.
+func TestGossipBlockCap(t *testing.T) {
+	m := newMeshManager(NewServer(), "ws://198.51.100.1:7777", nil)
+	m.addNeighbor("ws://203.0.113.9:7777").lastSeen = time.Now()
+	for i := range maxGossipBlocks {
+		if len(m.gossipFor(fmt.Sprintf("10.%d.0.1", i))) == 0 {
+			t.Fatalf("block %d refused under the cap", i)
+		}
+	}
+	if len(m.gossipFor("11.0.0.1")) != 0 {
+		t.Fatal("block past the cap got gossip")
+	}
+	if len(m.gossipFor("10.0.9.9")) == 0 {
+		t.Fatal("known block lost its slot")
+	}
+}
+
+// --private-gossip: The node shares no neighbours outside a
+// secret mesh, and a neighbour that asked to stay hidden is never passed on.
+func TestPrivateGossip(t *testing.T) {
+	s := NewServer()
+	m := s.mesh
+	m.addNeighbor("ws://203.0.113.9:7777").lastSeen = time.Now()
+	hid := m.addNeighbor("ws://203.0.113.10:7777")
+	hid.lastSeen, hid.hidden = time.Now(), true
+	if got := m.gossipFor("10.0.0.1"); len(got) != 1 || got[0] != "ws://203.0.113.9:7777" {
+		t.Fatalf("hidden neighbour leaked or visible one missing: %v", got)
+	}
+	s.SetPrivateGossip()
+	if !m.helloMsg().Hidden {
+		t.Fatal("hello does not ask to stay hidden")
+	}
+	if len(m.gossipFor("10.0.0.1")) != 0 || len(m.shareable("10.0.0.1", redirectShare, false)) != 0 {
+		t.Fatal("private node shared its neighbours")
+	}
+	m.secret = []byte("s")
+	if len(m.gossipFor("10.0.0.1")) == 0 {
+		t.Fatal("secret mesh peer got nothing")
+	}
+	if len(m.shareable("10.0.0.1", redirectShare, false)) != 0 {
+		t.Fatal("client redirect from a private node")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -287,5 +288,96 @@ func TestReactAndDeleteEvents(t *testing.T) {
 	}
 	if !st.Deleted[string(msgID)] {
 		t.Fatalf("missing deletion flag in state: %v", st.Deleted)
+	}
+}
+
+// A member deletes only their own events, renames nothing, and a reaction
+// cannot smuggle terminal escapes or a novel into the UI.
+func TestMemberPowersAreLimited(t *testing.T) {
+	_, owner, _ := ed25519.GenerateKey(nil)
+	alicePub, alice, _ := ed25519.GenerateKey(nil)
+	bobPub, bob, _ := ed25519.GenerateKey(nil)
+	key := crypt.NewKey()
+	keys := map[uint32][]byte{1: key}
+
+	gen := mustNew(t, owner, make([]byte, 32), KindCreate, Body{Name: "grupa", Text: "szef"}, 1, nil, key)
+	chatID := gen.ID()
+	addA := mustNew(t, owner, chatID, KindAdd, Body{Pub: alicePub, Name: "alice"}, 2, [][]byte{chatID}, key)
+	addB := mustNew(t, owner, chatID, KindAdd, Body{Pub: bobPub, Name: "bob"}, 3, [][]byte{addA.ID()}, key)
+	msgA := mustNew(t, alice, chatID, KindMsg, Body{Text: "a"}, 4, [][]byte{addB.ID()}, key)
+	msgO := mustNew(t, owner, chatID, KindMsg, Body{Text: "o"}, 5, [][]byte{msgA.ID()}, key)
+	bobDel := mustNew(t, bob, chatID, KindDelete, Body{Target: msgA.ID()}, 6, [][]byte{msgO.ID()}, key)
+	bobRename := mustNew(t, bob, chatID, KindRename, Body{Name: "przejęte"}, 7, [][]byte{bobDel.ID()}, key)
+	evil := "\x1b]52;c;ZXZpbA==\x07" + strings.Repeat("x", 500)
+	bobReact := mustNew(t, bob, chatID, KindReact, Body{Target: msgO.ID(), Text: evil}, 8, [][]byte{bobRename.ID()}, key)
+	ownerDel := mustNew(t, owner, chatID, KindDelete, Body{Target: msgA.ID()}, 9, [][]byte{bobReact.ID()}, key)
+
+	evs := []*Event{gen, addA, addB, msgA, msgO, bobDel, bobRename, bobReact}
+	st, err := Fold(evs, chatID, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Deleted[string(msgA.ID())] {
+		t.Fatal("bob usunął wiadomość alice")
+	}
+	if st.Name != "grupa" {
+		t.Fatalf("członek zmienił nazwę: %q", st.Name)
+	}
+	r := st.Reactions[string(msgO.ID())][string(bobPub)]
+	if strings.ContainsAny(r, "\x1b\x07") || len(r) > MaxReact {
+		t.Fatalf("reakcja nie wyczyszczona: %q", r)
+	}
+	st, err = Fold(append(evs, ownerDel), chatID, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Deleted[string(msgA.ID())] {
+		t.Fatal("właściciel nie może usunąć wiadomości")
+	}
+}
+
+// A Folder extended one event at a time must match a full fold, and an event
+// it rejects must leave it exactly as it was.
+func TestFolderIncremental(t *testing.T) {
+	_, owner, _ := ed25519.GenerateKey(nil)
+	alicePub, alice, _ := ed25519.GenerateKey(nil)
+	_, mallory, _ := ed25519.GenerateKey(nil)
+	key := crypt.NewKey()
+	keys := map[uint32][]byte{1: key}
+	gen, _ := New(owner, make([]byte, 32), KindCreate, Body{Name: "grupa", Text: "szef"}, 1, nil, 1, key)
+	chatID := gen.ID()
+	add, _ := New(owner, chatID, KindAdd, Body{Pub: alicePub, Name: "alice"}, 2, [][]byte{chatID}, 1, key)
+	msg, _ := New(alice, chatID, KindMsg, Body{Text: "hej"}, 3, [][]byte{add.ID()}, 1, key)
+	react, _ := New(alice, chatID, KindReact, Body{Target: msg.ID(), Text: "+1"}, 4, [][]byte{msg.ID()}, 1, key)
+	evil, _ := New(mallory, chatID, KindMsg, Body{Text: "spam"}, 5, [][]byte{react.ID()}, 1, key)
+	del, _ := New(alice, chatID, KindDelete, Body{Target: msg.ID()}, 5, [][]byte{react.ID()}, 1, key)
+
+	f := NewFolder(chatID, keys, nil, true)
+	for _, e := range []*Event{gen, add, msg, react} {
+		if !f.After(e) {
+			t.Fatal("canonical successor reported as out of order")
+		}
+		if err := f.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.After(add) {
+		t.Fatal("older event reported as a successor")
+	}
+	if err := f.Apply(evil); err == nil {
+		t.Fatal("non-member message accepted")
+	}
+	if err := f.Apply(del); err != nil {
+		t.Fatalf("valid event after a rejected one: %v", err)
+	}
+	full, err := Fold([]*Event{gen, add, msg, react, del}, chatID, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(full, f.St) {
+		t.Fatalf("incremental %+v != full %+v", f.St, full)
+	}
+	if c := f.St.Clone(); !reflect.DeepEqual(c, f.St) {
+		t.Fatal("Clone differs")
 	}
 }

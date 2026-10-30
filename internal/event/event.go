@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -44,6 +45,22 @@ const (
 func MembershipKind(kind string) bool {
 	return kind == KindCreate || kind == KindAdd || kind == KindRemove || kind == KindRekey
 }
+
+// MetaKind: events sealed with the epoch's member key (MemberKey) instead of
+// the content key: who is in the chat and what they call themselves. A member
+// who joined a chat without history gets member keys for every epoch, so they
+// can fold membership from genesis, and content keys only from their join on.
+func MetaKind(kind string) bool {
+	switch kind {
+	case KindCreate, KindAdd, KindRemove, KindRekey, KindRename, KindNick, KindAvatar, KindProfile:
+		return true
+	}
+	return false
+}
+
+// MemberKey derives the member key from an epoch's content key. One-way: the
+// member key does not reveal the content key.
+func MemberKey(contentKey []byte) []byte { return crypt.Derive(contentKey, "szept-member-v1") }
 
 // QuietKinds: profile and modifying events. Not separate conversation items —
 // we don't render them as separate lines and they don't increment unread badges.
@@ -84,6 +101,13 @@ type Body struct {
 	// at sender and travel only when recipient taps "download".
 	Prev     []byte `json:"prev,omitempty"`
 	PrevMime string `json:"pmime,omitempty"`
+
+	// KindCreate / KindRekey: sha256 of the next epoch's member key (Blob holds
+	// the content key's), so a member key alone can be checked too.
+	MHash []byte `json:"mhash,omitempty"`
+	// NoHist (KindCreate): members added later get no content keys from
+	// before they joined.
+	NoHist bool `json:"nohist,omitempty"`
 }
 
 // signable: deterministic length-prefixed concat of all fields except Sig.
@@ -127,6 +151,9 @@ func New(priv ed25519.PrivateKey, chat []byte, kind string, body Body, lamport u
 		Author:  priv.Public().(ed25519.PublicKey),
 		Lamport: lamport, Parents: parents, Epoch: epoch,
 	}
+	if MetaKind(kind) {
+		key = MemberKey(key)
+	}
 	// AD binds context minus Box itself.
 	e.Box, err = crypt.Seal(key, bj, e.adBytes())
 	if err != nil {
@@ -152,7 +179,24 @@ func (e *Event) VerifySig() bool {
 	return ed25519.Verify(ed25519.PublicKey(e.Author), e.signable(), e.Sig)
 }
 
+// Decrypt opens the body with the epoch's content key (the member key is
+// derived from it for MetaKind events).
 func (e *Event) Decrypt(key []byte) (Body, error) {
+	if MetaKind(e.Kind) {
+		key = MemberKey(key)
+	}
+	return e.open(key)
+}
+
+// DecryptMeta opens a MetaKind event with the epoch's member key alone.
+func (e *Event) DecryptMeta(mkey []byte) (Body, error) {
+	if !MetaKind(e.Kind) {
+		return Body{}, errors.New("event: not a member-key event")
+	}
+	return e.open(mkey)
+}
+
+func (e *Event) open(key []byte) (Body, error) {
 	var b Body
 	pt, err := crypt.Open(key, e.Box, e.adBytes())
 	if err != nil {
@@ -178,6 +222,8 @@ const (
 	MaxName = 64
 	// MaxBio: ceiling on the longer profile description.
 	MaxBio = 400
+	// MaxReact: a reaction is one emoji (ZWJ sequences run ~25 bytes).
+	MaxReact = 32
 )
 
 // SafeText cleanses incoming network text before it is rendered: control
@@ -228,6 +274,9 @@ type Member struct {
 	Bio        string // longer description shown on the profile
 	Banner     []byte // sha256 of the profile banner blob
 	BannerMime string
+	// JoinEpoch: first epoch whose content key this member gets. 1 unless the
+	// chat has NoHistory, where it is the epoch after the one they were added in.
+	JoinEpoch uint32
 }
 
 type State struct {
@@ -242,12 +291,38 @@ type State struct {
 	// announced by the signed KindCreate / KindRekey event. Lets the key handler
 	// reject a key that does not match what the DAG promised. Absent for chats
 	// created before this field existed — see handleKeys for the legacy path.
-	KeyHash map[uint32][]byte
+	KeyHash  map[uint32][]byte
+	MKeyHash map[uint32][]byte // the same for member keys
 
-	// MissingKey: epochs we hold no usable key for. Membership events in those
-	// epochs were skipped rather than aborting the fold — one bad epoch key must
-	// degrade the view of the chat, never destroy the chat.
+	// NoHistory: set at creation; members added later do not get older
+	// content keys, and the owner rotates the key after every add.
+	NoHistory bool
+
+	// MissingKey: epochs we hold no usable member key for. Membership events in
+	// those epochs were skipped rather than aborting the fold — one bad epoch
+	// key must degrade the view of the chat, never destroy the chat. A missing
+	// content key alone does not count: membership is still complete.
 	MissingKey map[uint32]bool
+}
+
+// Clone copies the maps a later Apply could change. Byte slices are never
+// mutated in place, so they are shared.
+func (s *State) Clone() *State {
+	c := *s
+	c.Members = make(map[string]*Member, len(s.Members))
+	for k, m := range s.Members {
+		mm := *m
+		c.Members[k] = &mm
+	}
+	c.Reactions = make(map[string]map[string]string, len(s.Reactions))
+	for k, r := range s.Reactions {
+		c.Reactions[k] = maps.Clone(r)
+	}
+	c.Deleted = maps.Clone(s.Deleted)
+	c.KeyHash = maps.Clone(s.KeyHash)
+	c.MKeyHash = maps.Clone(s.MKeyHash)
+	c.MissingKey = maps.Clone(s.MissingKey)
+	return &c
 }
 
 func (s *State) IsMember(pub []byte) bool {
@@ -275,184 +350,296 @@ func SortCanonical(evs []*Event) {
 // for membership only if decryptable — so Fold needs at least the epochs
 // covering membership events. Returns error on an unauthorized or bad event.
 func Fold(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
-	return fold(evs, chatID, keys, true)
+	return fold(evs, chatID, keys, nil, true)
 }
 
 // FoldTrusted skips signature verification. May only be used on
 // events already validated via ingest (i.e. stored in database) —
 // Ed25519 checks account for ~90% of fold cost and fold runs frequently.
 func FoldTrusted(evs []*Event, chatID []byte, keys map[uint32][]byte) (*State, error) {
-	return fold(evs, chatID, keys, false)
+	return fold(evs, chatID, keys, nil, false)
 }
 
-func fold(evs []*Event, chatID []byte, keys map[uint32][]byte, verify bool) (*State, error) {
+func fold(evs []*Event, chatID []byte, keys, mkeys map[uint32][]byte, verify bool) (*State, error) {
 	SortCanonical(evs)
-	st := &State{
-		Members:    map[string]*Member{},
-		Reactions:  map[string]map[string]string{},
-		Deleted:    map[string]bool{},
-		KeyHash:    map[uint32][]byte{},
-		MissingKey: map[uint32]bool{},
-	}
-	// parent Lamport: apply order derives from DAG, not internal counter
-	seen := make(map[string]uint64, len(evs))
+	f := NewFolder(chatID, keys, mkeys, verify)
 	for _, e := range evs {
-		if verify && !e.VerifySig() {
-			return nil, fmt.Errorf("event %x: bad signature", e.ID()[:6])
-		}
-		isGenesis := len(st.Owner) == 0
-		if isGenesis {
-			if e.Kind != KindCreate || !bytes.Equal(e.ID(), chatID) {
-				return nil, errors.New("first event is not the expected genesis")
-			}
-		} else if !bytes.Equal(e.Chat, chatID) {
-			return nil, errors.New("event from another chat")
-		}
-		// Lamport = max(parents)+1, strictly. Without this an author selects
-		// where in history their event lands: backdated "add"
-		// enters state prior to someone's kick, or Lamport = 2^64-1 rolls counter
-		// and blocks everyone from appending.
-		if err := checkLamport(e, seen, isGenesis); err != nil {
+		if err := f.Apply(e); err != nil {
 			return nil, err
 		}
-		seen[string(e.ID())] = e.Lamport
-		key, ok := keys[e.Epoch]
-		var body Body
-		if ok {
-			var err error
-			if body, err = e.Decrypt(key); err != nil {
-				// bad epoch key (e.g. spoofed by peer) cannot kill
-				// entire chat — treat as missing key
-				ok = false
-			}
-		}
-		if !ok {
-			// Can't decrypt. Genesis is fatal — without it there is no chat at all.
-			// Everything else is skipped and the epoch is flagged: a single bad or
-			// not-yet-delivered epoch key used to abort the whole fold, which made
-			// key poisoning a permanent chat lockout instead of a gap in the view.
-			if isGenesis {
-				return nil, fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
-			}
-			st.MissingKey[e.Epoch] = true
-			continue
-		}
-		switch e.Kind {
-		case KindCreate:
-			// genesis is strictly single: second "create" would overwrite
-			// owner, meaning any member could hijack chat
-			if !isGenesis {
-				return nil, errors.New("second genesis event")
-			}
-			// body.Name = chat name, body.Text = creator's display name
-			st.Owner = e.Author
-			st.Name = SafeName(body.Name)
-			st.Epoch = 1
-			st.Members[string(e.Author)] = &Member{Pub: e.Author, Name: SafeName(body.Text)}
-			if len(body.Blob) == sha256.Size {
-				st.KeyHash[1] = body.Blob
-			}
-		case KindAdd:
-			if !st.IsMember(e.Author) {
-				if st.Degraded() {
-					continue // membership view has holes; cannot judge the author
-				}
-				return nil, errors.New("add by non-member")
-			}
-			if len(body.Pub) != ed25519.PublicKeySize {
-				break
-			}
-			// "add" adds; it never rewrites an existing entry. Overwriting let any
-			// member resurrect someone the owner kicked, rename the owner in signed
-			// state, and — via AddedBy — make the owner's own kick cascade onto
-			// themselves, locking the chat for everyone. Re-admitting a removed
-			// member is the owner's call alone.
-			if prev, exists := st.Members[string(body.Pub)]; exists {
-				if prev.Removed && bytes.Equal(e.Author, st.Owner) {
-					prev.Removed, prev.AddedBy = false, nil
-				}
-				break
-			}
-			st.Members[string(body.Pub)] = &Member{Pub: body.Pub, Name: SafeName(body.Name), AddedBy: e.Author}
-		case KindRemove:
-			if !bytes.Equal(e.Author, st.Owner) {
-				return nil, errors.New("remove by non-owner")
-			}
-			removeTree(st, body.Pub)
-		case KindRekey:
-			if !bytes.Equal(e.Author, st.Owner) {
-				return nil, errors.New("rekey by non-owner")
-			}
-			if e.Epoch+1 > st.Epoch {
-				st.Epoch = e.Epoch + 1
-			}
-			// binds the next epoch's key to signed history (see State.KeyHash)
-			if len(body.Blob) == sha256.Size {
-				st.KeyHash[e.Epoch+1] = body.Blob
-			}
-		case KindRename:
-			if st.IsMember(e.Author) {
-				st.Name = SafeName(body.Name)
-			}
-		case KindMsg, KindFile:
-			if !st.IsMember(e.Author) {
-				if st.Degraded() {
-					continue
-				}
-				return nil, errors.New("msg by non-member")
-			}
-		case KindAvatar:
-			// only your own avatar, and only while you are a member
-			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
-				m.Avatar, m.AvatarMime = body.Blob, body.Mime
-			}
-		case KindProfile:
-			// status, description and banner — your own card, nobody else's.
-			// Text arrives from the network: cleanse and cap it here too, so the
-			// folded state is as safe to render as the profile index.
-			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
-				m.Status, m.Bio = SafeName(body.Text), SafeBio(body.Bio)
-				m.Banner, m.BannerMime = body.Blob, body.Mime
-			}
-		case KindNick:
-			// your own display name, nobody else's
-			if m, ok := st.Members[string(e.Author)]; ok && !m.Removed && body.Name != "" {
-				m.Name = SafeName(body.Name)
-			}
-		case KindReact:
-			if !st.IsMember(e.Author) {
-				if st.Degraded() {
-					continue
-				}
-				return nil, errors.New("react by non-member")
-			}
-			if len(body.Target) > 0 {
-				tID := string(body.Target)
-				if st.Reactions[tID] == nil {
-					st.Reactions[tID] = make(map[string]string)
-				}
-				if body.Text == "" {
-					delete(st.Reactions[tID], string(e.Author))
-				} else {
-					st.Reactions[tID][string(e.Author)] = body.Text
-				}
-			}
-		case KindDelete:
-			if !st.IsMember(e.Author) {
-				if st.Degraded() {
-					continue
-				}
-				return nil, errors.New("delete by non-member")
-			}
-			if len(body.Target) > 0 {
-				st.Deleted[string(body.Target)] = true
-			}
-		}
 	}
-	if len(st.Owner) == 0 {
+	if len(f.St.Owner) == 0 {
 		return nil, errors.New("no genesis event")
 	}
-	return st, nil
+	return f.St, nil
+}
+
+// Folder is a fold in progress. Apply takes events in canonical order, so a
+// caller holding a Folder can extend it with an event that sorts after the
+// last one instead of replaying the whole history. After an error the Folder
+// is unchanged, so a rejected event does not cost a full replay.
+type Folder struct {
+	St     *State
+	chatID []byte
+	keys   map[uint32][]byte // epoch -> content key
+	mkeys  map[uint32][]byte // epoch -> member key, for epochs without a content key
+	verify bool
+	// parent Lamport: apply order derives from DAG, not internal counter
+	seen    map[string]uint64
+	authors map[string][]byte // event id -> author, for KindDelete
+	last    *Event
+}
+
+func NewFolder(chatID []byte, keys, mkeys map[uint32][]byte, verify bool) *Folder {
+	return &Folder{
+		St: &State{
+			Members:    map[string]*Member{},
+			Reactions:  map[string]map[string]string{},
+			Deleted:    map[string]bool{},
+			KeyHash:    map[uint32][]byte{},
+			MKeyHash:   map[uint32][]byte{},
+			MissingKey: map[uint32]bool{},
+		},
+		chatID: chatID, keys: keys, mkeys: mkeys, verify: verify,
+		seen: map[string]uint64{}, authors: map[string][]byte{},
+	}
+}
+
+// After reports whether e sorts after every event applied so far, i.e.
+// whether Apply(e) gives the same state as a full fold with e included.
+func (f *Folder) After(e *Event) bool {
+	if f.last == nil {
+		return true
+	}
+	if e.Lamport != f.last.Lamport {
+		return e.Lamport > f.last.Lamport
+	}
+	return bytes.Compare(e.ID(), f.last.ID()) > 0
+}
+
+// SameKeys: the Folder decrypted with exactly these epoch keys.
+func (f *Folder) SameKeys(keys, mkeys map[uint32][]byte) bool {
+	return sameKeys(keys, f.keys) && sameKeys(mkeys, f.mkeys)
+}
+
+func sameKeys(a, b map[uint32][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for ep, k := range a {
+		if !bytes.Equal(k, b[ep]) {
+			return false
+		}
+	}
+	return true
+}
+
+// Open decrypts e with the content key of its epoch, or for MetaKind events
+// with a member key held on its own.
+func (e *Event) Open(keys, mkeys map[uint32][]byte) (Body, bool) {
+	if k, ok := keys[e.Epoch]; ok {
+		if b, err := e.Decrypt(k); err == nil {
+			return b, true
+		}
+	}
+	if mk, ok := mkeys[e.Epoch]; ok && MetaKind(e.Kind) {
+		if b, err := e.DecryptMeta(mk); err == nil {
+			return b, true
+		}
+	}
+	return Body{}, false
+}
+
+// Apply folds one more event into St. Every rejection happens before St is
+// touched, so undoing the bookkeeping below restores the Folder exactly.
+func (f *Folder) Apply(e *Event) error {
+	prev := f.last
+	if err := f.apply(e); err != nil {
+		f.last = prev
+		delete(f.seen, string(e.ID()))
+		delete(f.authors, string(e.ID()))
+		return err
+	}
+	return nil
+}
+
+func (f *Folder) apply(e *Event) error {
+	st, chatID, verify, seen, authors := f.St, f.chatID, f.verify, f.seen, f.authors
+	f.last = e
+	if verify && !e.VerifySig() {
+		return fmt.Errorf("event %x: bad signature", e.ID()[:6])
+	}
+	isGenesis := len(st.Owner) == 0
+	if isGenesis {
+		if e.Kind != KindCreate || !bytes.Equal(e.ID(), chatID) {
+			return errors.New("first event is not the expected genesis")
+		}
+	} else if !bytes.Equal(e.Chat, chatID) {
+		return errors.New("event from another chat")
+	}
+	// Lamport = max(parents)+1, strictly. Without this an author selects
+	// where in history their event lands: backdated "add"
+	// enters state prior to someone's kick, or Lamport = 2^64-1 rolls counter
+	// and blocks everyone from appending.
+	if err := checkLamport(e, seen, isGenesis); err != nil {
+		return err
+	}
+	seen[string(e.ID())] = e.Lamport
+	authors[string(e.ID())] = e.Author
+	// a bad epoch key (e.g. spoofed by a peer) counts as a missing one
+	body, ok := e.Open(f.keys, f.mkeys)
+	if !ok {
+		// Can't decrypt. Genesis is fatal — without it there is no chat at all.
+		// A membership or profile event is skipped and its epoch flagged: a
+		// single bad or not-yet-delivered epoch key used to abort the whole fold,
+		// which made key poisoning a permanent chat lockout instead of a gap in
+		// the view. A content event only needs its author checked, which works
+		// without the body.
+		if isGenesis {
+			return fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
+		}
+		if MetaKind(e.Kind) {
+			st.MissingKey[e.Epoch] = true
+		} else if !st.IsMember(e.Author) && !st.Degraded() {
+			return fmt.Errorf("%s by non-member", e.Kind)
+		}
+		return nil
+	}
+	switch e.Kind {
+	case KindCreate:
+		// genesis is strictly single: second "create" would overwrite
+		// owner, meaning any member could hijack chat
+		if !isGenesis {
+			return errors.New("second genesis event")
+		}
+		// body.Name = chat name, body.Text = creator's display name
+		st.Owner = e.Author
+		st.Name = SafeName(body.Name)
+		st.Epoch = 1
+		st.NoHistory = body.NoHist
+		st.Members[string(e.Author)] = &Member{Pub: e.Author, Name: SafeName(body.Text), JoinEpoch: 1}
+		if len(body.Blob) == sha256.Size {
+			st.KeyHash[1] = body.Blob
+		}
+		if len(body.MHash) == sha256.Size {
+			st.MKeyHash[1] = body.MHash
+		}
+	case KindAdd:
+		if !st.IsMember(e.Author) {
+			if st.Degraded() {
+				return nil // membership view has holes; cannot judge the author
+			}
+			return errors.New("add by non-member")
+		}
+		if len(body.Pub) != ed25519.PublicKeySize {
+			break
+		}
+		// "add" adds; it never rewrites an existing entry. Overwriting let any
+		// member resurrect someone the owner kicked, rename the owner in signed
+		// state, and — via AddedBy — make the owner's own kick cascade onto
+		// themselves, locking the chat for everyone. Re-admitting a removed
+		// member is the owner's call alone.
+		// without history a newcomer starts at the next epoch, which the owner
+		// opens right after the add (see core.autoRekey)
+		join := uint32(1)
+		if st.NoHistory {
+			join = st.Epoch + 1
+		}
+		if prev, exists := st.Members[string(body.Pub)]; exists {
+			if prev.Removed && bytes.Equal(e.Author, st.Owner) {
+				prev.Removed, prev.AddedBy = false, nil
+				prev.JoinEpoch = max(prev.JoinEpoch, join)
+			}
+			break
+		}
+		st.Members[string(body.Pub)] = &Member{Pub: body.Pub, Name: SafeName(body.Name), AddedBy: e.Author, JoinEpoch: join}
+	case KindRemove:
+		if !bytes.Equal(e.Author, st.Owner) {
+			return errors.New("remove by non-owner")
+		}
+		removeTree(st, body.Pub)
+	case KindRekey:
+		if !bytes.Equal(e.Author, st.Owner) {
+			return errors.New("rekey by non-owner")
+		}
+		if e.Epoch+1 > st.Epoch {
+			st.Epoch = e.Epoch + 1
+		}
+		// binds the next epoch's key to signed history (see State.KeyHash)
+		if len(body.Blob) == sha256.Size {
+			st.KeyHash[e.Epoch+1] = body.Blob
+		}
+		if len(body.MHash) == sha256.Size {
+			st.MKeyHash[e.Epoch+1] = body.MHash
+		}
+	case KindRename:
+		// owner only; a member's rename is ignored, not fatal — old
+		// histories may already carry one
+		if bytes.Equal(e.Author, st.Owner) {
+			st.Name = SafeName(body.Name)
+		}
+	case KindMsg, KindFile:
+		if !st.IsMember(e.Author) {
+			if st.Degraded() {
+				return nil
+			}
+			return errors.New("msg by non-member")
+		}
+	case KindAvatar:
+		// only your own avatar, and only while you are a member
+		if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
+			m.Avatar, m.AvatarMime = body.Blob, body.Mime
+		}
+	case KindProfile:
+		// status, description and banner — your own card, nobody else's.
+		// Text arrives from the network: cleanse and cap it here too, so the
+		// folded state is as safe to render as the profile index.
+		if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
+			m.Status, m.Bio = SafeName(body.Text), SafeBio(body.Bio)
+			m.Banner, m.BannerMime = body.Blob, body.Mime
+		}
+	case KindNick:
+		// your own display name, nobody else's
+		if m, ok := st.Members[string(e.Author)]; ok && !m.Removed && body.Name != "" {
+			m.Name = SafeName(body.Name)
+		}
+	case KindReact:
+		if !st.IsMember(e.Author) {
+			if st.Degraded() {
+				return nil
+			}
+			return errors.New("react by non-member")
+		}
+		if len(body.Target) > 0 {
+			tID := string(body.Target)
+			if st.Reactions[tID] == nil {
+				st.Reactions[tID] = make(map[string]string)
+			}
+			// network text straight into the UI: cleanse (ANSI/OSC 52 in the
+			// TUI) and cap — a reaction is an emoji, not a message
+			if t := SafeName(body.Text); t == "" {
+				delete(st.Reactions[tID], string(e.Author))
+			} else {
+				if len(t) > MaxReact {
+					t = strings.ToValidUTF8(t[:MaxReact], "")
+				}
+				st.Reactions[tID][string(e.Author)] = t
+			}
+		}
+	case KindDelete:
+		if !st.IsMember(e.Author) {
+			if st.Degraded() {
+				return nil
+			}
+			return errors.New("delete by non-member")
+		}
+		// your own events, or anything for the owner. Ignored otherwise, so
+		// a past delete of someone else's message reverts on the next fold.
+		if a, ok := authors[string(body.Target)]; ok && (bytes.Equal(a, e.Author) || bytes.Equal(e.Author, st.Owner)) {
+			st.Deleted[string(body.Target)] = true
+		}
+	}
+	return nil
 }
 
 // checkLamport enforces Lamport = max(parents)+1 and presence of parents before

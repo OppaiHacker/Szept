@@ -1,8 +1,8 @@
 // Package p2p: direct peer links over WebRTC data channels.
 // NAT traversal via ICE/STUN (torrent-style hole punching); signaling blobs
-// travel through the connector but are Ed25519-signed end-to-end and verified
-// against the expected peer key, so a malicious connector cannot MITM the
-// DTLS handshake. Result: every data channel is an authenticated E2E pipe.
+// travel through the connector sealed to the addressee (seal.go) and
+// Ed25519-signed end-to-end, verified against the expected peer key, so a
+// malicious connector can neither read them nor MITM the DTLS handshake. Result: every data channel is an authenticated E2E pipe.
 package p2p
 
 import (
@@ -31,6 +31,7 @@ type sigPayload struct {
 	TS     int64  `json:"ts"`
 	ConnID []byte `json:"connid"`
 	Obf    []byte `json:"obf,omitempty"` // 32B ChaCha20 key for wire obfuscation; offerer picks it
+	Inv    []byte `json:"inv,omitempty"` // sha256 of the invite secret: lets a stranger redeeming our invite in
 }
 
 type sigEnvelope struct {
@@ -41,6 +42,7 @@ type sigEnvelope struct {
 type Peer struct {
 	Pub  []byte
 	pc   *webrtc.PeerConnection
+	obf  *obfNet // nil without obfuscation
 	ctrl *webrtc.DataChannel
 
 	mu    sync.Mutex
@@ -54,6 +56,15 @@ func (p *Peer) SendCtrl(v any) error {
 	if err != nil {
 		return err
 	}
+	if p.ctrl == nil {
+		return errors.New("ctrl channel not open")
+	}
+	return p.ctrl.Send(b)
+}
+
+// SendRaw sends bytes as they are on the reliable channel. Used for binary
+// frames the receiver tells apart from JSON by their first byte.
+func (p *Peer) SendRaw(b []byte) error {
 	if p.ctrl == nil {
 		return errors.New("ctrl channel not open")
 	}
@@ -114,16 +125,38 @@ func (p *Peer) CloseMedia(prefix string) {
 
 func (p *Peer) Close() { p.pc.Close() }
 
+// Relay returns the TURN relay address the link runs through (ours or the
+// peer's), or "" for a direct link. Whoever runs that relay sees who talks to
+// whom, when and how much; the content stays DTLS-encrypted end to end.
+func (p *Peer) Relay() string {
+	sctp := p.pc.SCTP()
+	if sctp == nil {
+		return ""
+	}
+	pair, err := sctp.Transport().ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		return ""
+	}
+	if pair.Local.Typ == webrtc.ICECandidateTypeRelay {
+		return pair.Local.Address
+	}
+	if pair.Remote.Typ == webrtc.ICECandidateTypeRelay {
+		return pair.Remote.Address
+	}
+	return ""
+}
+
 type Manager struct {
-	priv      ed25519.PrivateKey
-	pub       ed25519.PublicKey
-	conn      *connector.Client
-	cfg       webrtc.Configuration
-	stunHosts map[string]bool // STUN server hostnames: their traffic bypasses obfuscation
+	priv ed25519.PrivateKey
+	pub  ed25519.PublicKey
+	conn *connector.Client
+	stun []string // configured STUN servers (nil = connector's, else DefaultSTUN)
 
 	// Accept decides whether we talk to this pubkey at all (friend, chat
-	// co-member or invite target). Trust boundary — default deny.
-	Accept     func(pub []byte) bool
+	// co-member or holder of an invite ticket). Trust boundary — default deny.
+	Accept func(pub, ticket []byte) bool
+	// Ticket returns the invite ticket to put in an offer to pub, or nil.
+	Ticket     func(pub []byte) []byte
 	OnPeerUp   func(p *Peer)
 	OnPeerDown func(pub []byte)
 	OnCtrl     func(p *Peer, data []byte)
@@ -131,9 +164,15 @@ type Manager struct {
 
 	mu      sync.Mutex
 	peers   map[string]*Peer
-	pending map[string][]byte    // pub -> connID of our outgoing offer
-	dialing map[string]*Peer     // pub -> peer awaiting answer
-	seen    map[string]time.Time // odtworzone blob-y sygnalingu — patrz fresh()
+	pending map[string][]byte // pub -> connID of our outgoing offer
+	dialing map[string]*Peer  // pub -> peer awaiting answer
+	// answering: pub -> our PeerConnection answering their latest offer. A
+	// newer offer closes the older one, so a flood costs one PC per key.
+	answering map[string]*webrtc.PeerConnection
+	seen      map[string]time.Time // replayed signaling blobs, see fresh()
+	// relayOnly: gather only TURN relay candidates, so peers never learn our
+	// IP — they see the connector's. Costs latency; no relay = no connection.
+	relayOnly bool
 }
 
 // sigTTL: same as freshness window of signed blob.
@@ -159,18 +198,20 @@ func (m *Manager) fresh(key string) bool {
 }
 
 func NewManager(priv ed25519.PrivateKey, conn *connector.Client, stun []string) *Manager {
-	if len(stun) == 0 {
-		stun = DefaultSTUN
-	}
 	m := &Manager{
-		priv: priv, pub: priv.Public().(ed25519.PublicKey), conn: conn,
-		cfg:       webrtc.Configuration{ICEServers: []webrtc.ICEServer{{URLs: stun}}},
-		stunHosts: stunHostSet(stun),
-		peers:     map[string]*Peer{}, pending: map[string][]byte{}, dialing: map[string]*Peer{},
-		seen: map[string]time.Time{},
+		priv: priv, pub: priv.Public().(ed25519.PublicKey), conn: conn, stun: stun,
+		peers: map[string]*Peer{}, pending: map[string][]byte{}, dialing: map[string]*Peer{},
+		answering: map[string]*webrtc.PeerConnection{}, seen: map[string]time.Time{},
 	}
-	conn.OnSignal = m.onSignal
+	conn.OnSignal, conn.OnUndelivered = m.onSignal, m.onUndelivered
 	return m
+}
+
+// SetRelayOnly applies to connections made from now on.
+func (m *Manager) SetRelayOnly(on bool) {
+	m.mu.Lock()
+	m.relayOnly = on
+	m.mu.Unlock()
 }
 
 // SetConn swaps the connector client (live connector change in settings).
@@ -178,7 +219,19 @@ func (m *Manager) SetConn(c *connector.Client) {
 	m.mu.Lock()
 	m.conn = c
 	m.mu.Unlock()
-	c.OnSignal = m.onSignal
+	c.OnSignal, c.OnUndelivered = m.onSignal, m.onUndelivered
+}
+
+// onUndelivered: the connector says our offer reached nobody, so drop the
+// attempt now instead of waiting 30 s for an answer; the next connect round
+// tries again.
+func (m *Manager) onUndelivered(pub []byte) {
+	m.mu.Lock()
+	peer := m.dialing[string(pub)]
+	m.mu.Unlock()
+	if peer != nil {
+		peer.pc.Close() // the state handler clears pending and dialing
+	}
 }
 
 func (m *Manager) signal(to, blob []byte) error {
@@ -204,26 +257,57 @@ func (m *Manager) Peers() []*Peer {
 	return out
 }
 
-func (m *Manager) sign(p sigPayload) []byte {
+// sign signs the payload and seals it to p.To (see seal.go).
+func (m *Manager) sign(p sigPayload) ([]byte, error) {
 	b, _ := json.Marshal(p)
 	env := sigEnvelope{Payload: b, Sig: ed25519.Sign(m.priv, b)}
-	return connector.JSON(env)
+	return sealTo(p.To, connector.JSON(env))
 }
 
-// apiFor builds a WebRTC API whose UDP transport obfuscates every peer-bound
-// datagram with the shared key. mDNS is disabled so no cleartext .local
-// multicast leaks onto the wire alongside the obfuscated flow.
-func (m *Manager) apiFor(key []byte) (*webrtc.API, error) {
+// iceConfig: the current connector's STUN+TURN when it runs one (no third
+// party learns we use Szept), plus the configured STUN list; Google's only
+// when there is nothing else. The URLs feed the obfuscation bypass.
+func (m *Manager) iceConfig() (webrtc.Configuration, []string) {
+	m.mu.Lock()
+	c, relayOnly := m.conn, m.relayOnly
+	m.mu.Unlock()
+	var cfg webrtc.Configuration
+	var urls []string
+	if r := c.ICE(); r != nil {
+		cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{URLs: r.URLs, Username: r.User, Credential: r.Pass})
+		urls = append(urls, r.URLs...)
+	}
+	stun := m.stun
+	if len(stun) == 0 && len(urls) == 0 {
+		stun = DefaultSTUN
+	}
+	if len(stun) > 0 {
+		cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{URLs: stun})
+		urls = append(urls, stun...)
+	}
+	if relayOnly {
+		cfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	return cfg, urls
+}
+
+// newPC builds a PeerConnection whose UDP transport obfuscates every
+// peer-bound datagram with the shared key. mDNS is disabled so no cleartext
+// .local multicast leaks onto the wire alongside the obfuscated flow.
+func (m *Manager) newPC(key []byte) (*webrtc.PeerConnection, *obfNet, error) {
+	cfg, urls := m.iceConfig()
 	se := webrtc.SettingEngine{}
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	var n *obfNet
 	if len(key) == crypt.KeySize {
-		n, err := newObfNet(key, m.stunHosts)
-		if err != nil {
-			return nil, err
+		var err error
+		if n, err = newObfNet(key, stunHostSet(urls)); err != nil {
+			return nil, nil, err
 		}
 		se.SetNet(n)
 	}
-	return webrtc.NewAPI(webrtc.WithSettingEngine(se)), nil
+	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(se)).NewPeerConnection(cfg)
+	return pc, n, err
 }
 
 // Connect dials a peer (idempotent: returns existing link if up).
@@ -248,19 +332,17 @@ func (m *Manager) Connect(pub []byte) error {
 	fail := func(err error) error {
 		m.mu.Lock()
 		delete(m.pending, string(pub))
+		delete(m.dialing, string(pub))
 		m.mu.Unlock()
 		return err
 	}
 
-	api, err := m.apiFor(obfKey)
-	if err != nil {
-		return fail(err)
-	}
-	pc, err := api.NewPeerConnection(m.cfg)
+	pc, onet, err := m.newPC(obfKey)
 	if err != nil {
 		return fail(err)
 	}
 	peer := m.newPeer(pub, pc)
+	peer.obf = onet
 	ctrl, err := pc.CreateDataChannel("ctrl", nil)
 	if err != nil {
 		pc.Close()
@@ -288,7 +370,19 @@ func (m *Manager) Connect(pub []byte) error {
 		Kind: "offer", SDP: pc.LocalDescription().SDP,
 		From: m.pub, To: pub, TS: time.Now().Unix(), ConnID: connID, Obf: obfKey,
 	}
-	if err := m.signal(pub, m.sign(payload)); err != nil {
+	if m.Ticket != nil {
+		payload.Inv = m.Ticket(pub)
+	}
+	// remember pc for the answer before signalling: an answer or an
+	// "undelivered" can come back before signal returns
+	m.mu.Lock()
+	m.dialing[string(pub)] = peer
+	m.mu.Unlock()
+	blob, err := m.sign(payload)
+	if err == nil {
+		err = m.signal(pub, blob)
+	}
+	if err != nil {
 		pc.Close()
 		return fail(err)
 	}
@@ -306,16 +400,16 @@ func (m *Manager) Connect(pub []byte) error {
 			pc.Close()
 		}
 	}()
-	// remember pc for the answer
-	m.mu.Lock()
-	m.dialing[string(pub)] = peer
-	m.mu.Unlock()
 	return nil
 }
 
 func (m *Manager) onSignal(from []byte, blob []byte) {
+	plain, err := openFrom(m.priv, blob)
+	if err != nil {
+		return
+	}
 	var env sigEnvelope
-	if err := json.Unmarshal(blob, &env); err != nil {
+	if err := json.Unmarshal(plain, &env); err != nil {
 		return
 	}
 	var p sigPayload
@@ -331,7 +425,7 @@ func (m *Manager) onSignal(from []byte, blob []byte) {
 	if d := time.Since(time.Unix(p.TS, 0)); d > 2*time.Minute || d < -2*time.Minute {
 		return
 	}
-	if m.Accept == nil || !m.Accept(p.From) {
+	if m.Accept == nil || !m.Accept(p.From, p.Inv) {
 		return
 	}
 	if !m.fresh(p.Kind + string(p.From) + string(p.ConnID)) {
@@ -367,15 +461,18 @@ func (m *Manager) handleOffer(p sigPayload) {
 	}
 	m.mu.Unlock()
 
-	api, err := m.apiFor(p.Obf)
+	pc, onet, err := m.newPC(p.Obf)
 	if err != nil {
 		return
 	}
-	pc, err := api.NewPeerConnection(m.cfg)
-	if err != nil {
-		return
+	m.mu.Lock()
+	if old := m.answering[key]; old != nil {
+		old.Close()
 	}
+	m.answering[key] = pc
+	m.mu.Unlock()
 	m.newPeer(p.From, pc)
+	onet.bypassRelays(p.SDP)
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: p.SDP}); err != nil {
 		pc.Close()
 		return
@@ -400,7 +497,11 @@ func (m *Manager) handleOffer(p sigPayload) {
 		Kind: "answer", SDP: pc.LocalDescription().SDP,
 		From: m.pub, To: p.From, TS: time.Now().Unix(), ConnID: p.ConnID,
 	}
-	if err := m.signal(p.From, m.sign(resp)); err != nil {
+	blob, err := m.sign(resp)
+	if err == nil {
+		err = m.signal(p.From, blob)
+	}
+	if err != nil {
 		pc.Close()
 	}
 }
@@ -414,6 +515,7 @@ func (m *Manager) handleAnswer(p sigPayload) {
 	if peer == nil || !bytes.Equal(connID, p.ConnID) {
 		return
 	}
+	peer.obf.bypassRelays(p.SDP)
 	if err := peer.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: p.SDP}); err != nil {
 		log.Printf("p2p: set answer: %v", err)
 	}
@@ -430,10 +532,15 @@ func (m *Manager) newPeer(pub []byte, pc *webrtc.PeerConnection) *Peer {
 	})
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
-		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
+		// Disconnected is transient (Wi-Fi to LTE): ICE may recover, and pion
+		// moves to Failed on its own if it does not.
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			m.mu.Lock()
 			if m.peers[string(pub)] == peer {
 				delete(m.peers, string(pub))
+			}
+			if m.answering[string(pub)] == pc {
+				delete(m.answering, string(pub))
 			}
 			delete(m.pending, string(pub))
 			delete(m.dialing, string(pub))
@@ -454,6 +561,7 @@ func (m *Manager) wireCtrl(peer *Peer, dc *webrtc.DataChannel) {
 		m.peers[string(peer.Pub)] = peer
 		delete(m.pending, string(peer.Pub))
 		delete(m.dialing, string(peer.Pub))
+		delete(m.answering, string(peer.Pub)) // live now: a later offer must not close it
 		m.mu.Unlock()
 		if m.OnPeerUp != nil {
 			m.OnPeerUp(peer)

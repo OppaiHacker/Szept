@@ -10,11 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"szept/internal/core"
+	"szept/internal/crypt"
 	"szept/internal/identity"
+	"szept/internal/store"
 )
 
 func Dirs() (cfgFile, dataDir string) {
@@ -23,6 +26,11 @@ func Dirs() (cfgFile, dataDir string) {
 	dataDir = filepath.Join(h, ".local", "share", "szept")
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		dataDir = filepath.Join(xdg, "szept")
+	} else if la := os.Getenv("LOCALAPPDATA"); runtime.GOOS == "windows" && la != "" {
+		// %LOCALAPPDATA% on Windows; installs from before keep their old dir
+		if _, err := os.Stat(dataDir); err != nil {
+			dataDir = filepath.Join(la, "szept")
+		}
 	}
 	if c == "" {
 		c = h
@@ -66,27 +74,71 @@ func CreateIdentity(dataDir, name string, pass []byte) (*identity.Identity, erro
 	return id, nil
 }
 
+// LoadIdentity otwiera tożsamość. Jeśli zmiana hasła przerwała się w połowie
+// (został plik .new), kończy ją albo cofa zależnie od tego, którym kluczem
+// jest już zaszyfrowana baza.
 func LoadIdentity(dataDir string, pass []byte) (*identity.Identity, error) {
-	return identity.Load(IdentityPath(dataDir), pass)
+	path, db := IdentityPath(dataDir), filepath.Join(dataDir, "szept.db")
+	if _, err := os.Stat(path + ".new"); err != nil {
+		return identity.Load(path, pass)
+	}
+	if id, err := identity.Load(path+".new", pass); err == nil {
+		if store.UsesKey(db, id.DBKey) {
+			return id, os.Rename(path+".new", path)
+		}
+		os.Remove(path + ".new")
+		return nil, errors.New("zmiana hasła nie została dokończona — zaloguj się starym hasłem")
+	}
+	id, err := identity.Load(path, pass)
+	if err != nil {
+		return nil, err
+	}
+	if !store.UsesKey(db, id.DBKey) {
+		return nil, errors.New("hasło zostało zmienione — zaloguj się nowym hasłem")
+	}
+	os.Remove(path + ".new")
+	return id, nil
 }
 
-// ChangePass przeszyfrowuje plik tożsamości nowym hasłem. Stare hasło jest
-// weryfikowane wprost — bez tego literówka odcinałaby konto na zawsze.
-// Klucz bazy pochodzi z seeda (nie z hasła), więc baza zostaje nietknięta.
-func ChangePass(dataDir string, oldPass, newPass []byte) error {
-	id, err := identity.Load(IdentityPath(dataDir), oldPass)
+// ChangePass szyfruje tożsamość nowym hasłem, a bazę nowym losowym kluczem
+// (rekey to Store.Rekey otwartej bazy). Stara kopia pliku tożsamości ze
+// starym hasłem nie otwiera wtedy obecnej bazy. Stare hasło jest weryfikowane
+// wprost, bo literówka odcinałaby konto. Kolejność: nowy plik obok starego,
+// rekey bazy (jedna transakcja), podmiana pliku; LoadIdentity sprząta po
+// awarii między tymi krokami.
+func ChangePass(dataDir string, oldPass, newPass []byte, rekey func([]byte) error) error {
+	path := IdentityPath(dataDir)
+	id, err := identity.Load(path, oldPass)
 	if err != nil {
 		return err
 	}
-	return id.Save(IdentityPath(dataDir), newPass)
+	nid := *id
+	nid.DBKey = crypt.NewKey()
+	if err := nid.Save(path+".new", newPass); err != nil {
+		return err
+	}
+	if err := rekey(nid.DBKey); err != nil {
+		os.Remove(path + ".new")
+		return err
+	}
+	return os.Rename(path+".new", path)
 }
 
 // ---- listy connectorów ----
 
 // FetchConnectorLists pobiera listy i zwraca znalezione adresy ws://…
+// Tylko https:// i bez przekierowań: lista po http:// mówi DPI, że ktoś
+// używa Szeptu, a przekierowanie mogłoby skierować żądanie do sieci lokalnej.
 func FetchConnectorLists(urls []string) (found []string, errs int) {
-	cl := &http.Client{Timeout: 8 * time.Second}
+	cl := &http.Client{
+		Timeout:       8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	for _, url := range urls {
+		if !strings.HasPrefix(strings.ToLower(url), "https://") {
+			errs++
+			continue
+		}
 		resp, err := cl.Get(url)
 		if err != nil {
 			errs++
@@ -94,7 +146,7 @@ func FetchConnectorLists(urls []string) (found []string, errs int) {
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
-		if err != nil {
+		if err != nil || resp.StatusCode != http.StatusOK {
 			errs++
 			continue
 		}
@@ -182,17 +234,20 @@ func Restore(zipPath, destDir string) error {
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return err
 	}
-	found := 0
+	got := map[string]bool{}
 	for _, f := range r.File {
 		if !want[f.Name] {
 			continue // obce wpisy (w tym ścieżki z ../) ignorujemy w całości
 		}
+		if got[f.Name] {
+			return errors.New("uszkodzona kopia: " + f.Name + " występuje dwa razy")
+		}
 		if err := unzipEntry(f, filepath.Join(destDir, f.Name)); err != nil {
 			return err
 		}
-		found++
+		got[f.Name] = true
 	}
-	if found != 2 {
+	if len(got) != len(want) {
 		return errors.New("to nie jest kopia szeptu (brak identity.key/szept.db)")
 	}
 	return nil

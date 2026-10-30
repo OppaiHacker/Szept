@@ -168,16 +168,16 @@ func badge(n int) fyne.CanvasObject {
 		container.NewStack(bg, container.NewCenter(txt)))
 }
 
-// chatPreview: last chat message, cached under event count —
+// chatPreview: last chat message, cached under the chat's store revision —
 // decrypting full history of every chat on every refresh would be
 // visible on mobile.
 func (u *ui) chatPreview(ci core.ChatInfo) chatPrev {
 	key := string(ci.ID)
-	n := u.c.St.EventCount(ci.ID)
-	if p, ok := u.prev[key]; ok && p.n == n {
+	rev := u.c.St.Rev(ci.ID)
+	if p, ok := u.prev[key]; ok && p.rev == rev {
 		return p
 	}
-	p := chatPrev{n: n, text: "brak wiadomości"}
+	p := chatPrev{rev: rev, text: "brak wiadomości"}
 	msgs := u.c.Messages(ci.ID)
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
@@ -476,6 +476,15 @@ func (u *ui) updateConvHeader(ch *core.ChatInfo) {
 	}
 	// typing is the one subtitle that changes on its own — accent tells the eye
 	// it is live and not just another count that happens to have moved
+	var relayed []string
+	for _, m := range ch.Members {
+		if !bytes.Equal(m.Pub, u.c.ID.Pub) && u.c.Relay(m.Pub) != "" {
+			relayed = append(relayed, m.Name)
+		}
+	}
+	if len(relayed) > 0 {
+		sub, tone = sub+" · przez przekaźnik", cOrange
+	}
 	if typing := u.c.TypingPeers(ch.ID); len(typing) > 0 {
 		sub, tone = strings.Join(typing, ", ")+" pisze…", cAccent
 	}
@@ -980,11 +989,12 @@ func (u *ui) renamePage() {
 func (u *ui) newGroupPage() {
 	name := widget.NewEntry()
 	name.PlaceHolder = "np. ekipa-z-osiedla"
+	history := widget.NewCheck("Nowi członkowie widzą wcześniejszą historię", nil)
 	create := func() {
 		if strings.TrimSpace(name.Text) == "" {
 			return
 		}
-		id, err := u.c.CreateChat(strings.TrimSpace(name.Text))
+		id, err := u.c.CreateChat(strings.TrimSpace(name.Text), !history.Checked)
 		if err != nil {
 			u.fail(err)
 			return
@@ -994,6 +1004,7 @@ func (u *ui) newGroupPage() {
 	}
 	name.OnSubmitted = func(string) { create() }
 	u.page("Nowa grupa", container.NewVBox(name,
+		history, mutedWrap("Bez tego nowa osoba widzi tylko to, co napisano po jej dołączeniu: dostaje klucze od momentu wejścia, a Ty po każdym dodaniu kogoś zmieniasz klucz automatycznie."),
 		bigButton("Utwórz", theme.ContentAddIcon(), create),
 		mutedWrap("Zostajesz założycielem: tylko ty możesz zapraszać i usuwać ludzi.")))
 }

@@ -347,7 +347,6 @@ func (u *ui) selectTab(i int) {
 		t.img.Refresh()
 		t.pill.Refresh()
 	}
-	u.checkClipboard()
 	u.refresh()
 }
 

@@ -111,6 +111,19 @@ func (c *Core) mediaTargets(chat []byte) []*p2p.Peer {
 // JoinCall enters (or starts) the chat's voice call: announces, opens the
 // speaker mixer and starts the microphone.
 func (c *Core) JoinCall(chat []byte) error {
+	// one call at a time: the voice/cam/screen pipelines are single slots, so
+	// joining B while in A left A's mic streaming to A with no way to stop it
+	c.mu.Lock()
+	var other []byte
+	for _, cl := range c.calls {
+		if cl.Joined && !bytes.Equal(cl.Chat, chat) {
+			other = cl.Chat
+		}
+	}
+	c.mu.Unlock()
+	if other != nil {
+		c.LeaveCall(other)
+	}
 	c.mu.Lock()
 	call := c.calls[string(chat)]
 	if call == nil {
@@ -138,6 +151,7 @@ func (c *Core) JoinCall(chat []byte) error {
 		c.mu.Unlock()
 	}
 	var seq uint32
+	lbl := chatLabel("v", chat) // once per call, not base64 per 20 ms frame
 	stopMic, err := media.StartVoice(func(pcm []byte) {
 		c.mu.Lock()
 		muted := !call.Mic
@@ -149,7 +163,6 @@ func (c *Core) JoinCall(chat []byte) error {
 		frame := make([]byte, 4+len(pcm))
 		binary.BigEndian.PutUint32(frame, seq)
 		copy(frame[4:], pcm)
-		lbl := chatLabel("v", chat)
 		for _, p := range c.mediaTargets(chat) {
 			p.SendMedia(lbl, frame)
 		}
@@ -408,6 +421,7 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 	c.mu.Lock()
 	call := c.calls[string(chat)]
 	inCall := call != nil && call.Joined && call.Members[string(p.Pub)]
+	out := c.voiceOut // read with the call check: one lock per audio frame
 	c.mu.Unlock()
 	if !inCall {
 		return
@@ -417,9 +431,6 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		if len(data) <= 4 {
 			return
 		}
-		c.mu.Lock()
-		out := c.voiceOut
-		c.mu.Unlock()
 		if out != nil {
 			out(string(p.Pub), data[4:])
 		}

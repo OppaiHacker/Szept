@@ -22,8 +22,8 @@ func TestP2PHandshakeAndCtrl(t *testing.T) {
 
 	ma := NewManager(aPriv, ca, nil)
 	mb := NewManager(bPriv, cb, nil)
-	ma.Accept = func(pub []byte) bool { return string(pub) == string(mb.pub) }
-	mb.Accept = func(pub []byte) bool { return string(pub) == string(ma.pub) }
+	ma.Accept = func(pub, _ []byte) bool { return string(pub) == string(mb.pub) }
+	mb.Accept = func(pub, _ []byte) bool { return string(pub) == string(ma.pub) }
 
 	got := make(chan string, 1)
 	mb.OnCtrl = func(p *Peer, data []byte) { got <- string(data) }

@@ -19,6 +19,7 @@ import (
 	"szept/internal/crypt"
 	"szept/internal/identity"
 	"szept/internal/p2p"
+	"szept/internal/store"
 )
 
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
@@ -54,7 +55,7 @@ func TestInviteSyncKick(t *testing.T) {
 	a := newCore(t, "ala", url)
 	b := newCore(t, "bartek", url)
 
-	chat, err := a.CreateChat("tajna-grupa")
+	chat, err := a.CreateChat("tajna-grupa", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,10 +373,10 @@ func TestNickHistory(t *testing.T) {
 	defer srv.Close()
 	a := newCore(t, "ala", "ws"+strings.TrimPrefix(srv.URL, "http"))
 
-	if _, err := a.CreateChat("grupa"); err != nil {
+	if _, err := a.CreateChat("grupa", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.CreateChat("druga-grupa"); err != nil {
+	if _, err := a.CreateChat("druga-grupa", false); err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range []string{"Ala K.", "Alicja"} {
@@ -441,7 +442,8 @@ func TestDirectChatViaFriendCode(t *testing.T) {
 	})
 }
 
-// An epoch key is only accepted when the signed DAG vouches for it.
+// An epoch key is only accepted when the signed DAG vouches for it,
+// and a wrong one already stored is replaced once the right one is offered.
 // Pre-filling a future epoch used to lock the real key out forever, and the
 // first membership event landing in that epoch killed the chat outright.
 func TestEpochKeyBoundToRekey(t *testing.T) {
@@ -450,7 +452,7 @@ func TestEpochKeyBoundToRekey(t *testing.T) {
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	c := newCore(t, "ala", url)
-	chat, err := c.CreateChat("grupa")
+	chat, err := c.CreateChat("grupa", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,23 +471,38 @@ func TestEpochKeyBoundToRekey(t *testing.T) {
 	if len(real2) != 32 || len(st.KeyHash[2]) == 0 {
 		t.Fatalf("rekey nie ogłosił skrótu klucza epoki 2 (klucz %d B, skrót %d B)", len(real2), len(st.KeyHash[2]))
 	}
-	if !c.keyMatchesDAG(st, 2, real2) {
-		t.Fatal("prawdziwy klucz epoki odrzucony")
+	me := &p2p.Peer{Pub: c.ID.Pub}
+	stored := func(ep uint32) []byte {
+		k, _ := c.St.ChatKeys(chat)
+		return k[ep]
 	}
-	if c.keyMatchesDAG(st, 2, crypt.NewKey()) {
-		t.Fatal("podrobiony klucz epoki przyjęty mimo niezgodnego skrótu")
+	// a fake key never replaces the right one
+	c.handleKeys(me, Ctrl{T: "keys", Chat: chat, Epochs: map[uint32][]byte{2: crypt.NewKey()}})
+	if !bytes.Equal(stored(2), real2) {
+		t.Fatal("podrobiony klucz epoki nadpisał prawdziwy")
+	}
+	// A fake key that got in anyway is repaired by the right one
+	c.St.PutChatKey(chat, 2, crypt.NewKey())
+	c.invalidate(chat)
+	c.handleKeys(me, Ctrl{T: "keys", Chat: chat, Epochs: map[uint32][]byte{2: real2}})
+	if !bytes.Equal(stored(2), real2) {
+		t.Fatal("prawdziwy klucz nie zastąpił podrobionego")
 	}
 	// an epoch nobody announced is refused outright — that is the pre-poisoning path
-	if c.keyMatchesDAG(st, 9, crypt.NewKey()) {
+	c.handleKeys(me, Ctrl{T: "keys", Chat: chat, Epochs: map[uint32][]byte{9: crypt.NewKey()}})
+	if stored(9) != nil {
 		t.Fatal("klucz dla nieogłoszonej epoki przyjęty")
 	}
-	// legacy chats have no hash: the fallback still refuses future epochs
-	st.KeyHash = nil
-	if c.keyMatchesDAG(st, st.Epoch+1, crypt.NewKey()) {
-		t.Fatal("stara ścieżka zgodności przyjęła klucz z przyszłości")
+	// joining (no state yet): the genesis, authenticated by the chat ID, judges epoch 1
+	gen, err := c.St.GetEvent(chat, chat)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !c.keyMatchesDAG(st, 1, keys[1]) {
-		t.Fatal("stara ścieżka zgodności odrzuciła klucz ogłoszonej epoki")
+	if known, ok := keyVerdict(nil, gen, 1, keys[1]); !known || !ok {
+		t.Fatal("genesis odrzucił prawdziwy klucz epoki 1")
+	}
+	if known, ok := keyVerdict(nil, gen, 1, crypt.NewKey()); !known || ok {
+		t.Fatal("genesis przyjął podrobiony klucz epoki 1")
 	}
 }
 
@@ -497,11 +514,11 @@ func TestServeBlobCrossChat(t *testing.T) {
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	c := newCore(t, "ala", url)
-	secret, err := c.CreateChat("tajny")
+	secret, err := c.CreateChat("tajny", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	shared, err := c.CreateChat("wspolny")
+	shared, err := c.CreateChat("wspolny", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +554,7 @@ func TestBlobPartFromNonMember(t *testing.T) {
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	c := newCore(t, "ala", url)
-	chat, err := c.CreateChat("grupa")
+	chat, err := c.CreateChat("grupa", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,6 +601,26 @@ func TestBlobPartFromNonMember(t *testing.T) {
 	}
 }
 
+// One sender holding a full share cannot start more buffers.
+func TestBlobSenderBudget(t *testing.T) {
+	c := newCore(t, "ala", "ws://127.0.0.1:1")
+	chat, _ := c.CreateChat("grupa", false)
+	data := testImagePNG(t)
+	hash := sha256.Sum256(data)
+	me := &p2p.Peer{Pub: c.ID.Pub}
+	c.mu.Lock()
+	c.wants[string(hash[:])] = &blobWant{chat: bytes.Clone(chat), mime: "image/png"}
+	c.incoming["stalled"] = &blobAsm{from: string(me.Pub), bytes: senderBudget, last: time.Now()}
+	c.mu.Unlock()
+	c.handleBlobPart(me, Ctrl{T: "blobpart", Chat: chat, Blob: hash[:], Idx: 0, Total: 2, Part: data[:blobChunk]})
+	c.mu.Lock()
+	got := c.incoming[string(hash[:])]
+	c.mu.Unlock()
+	if got != nil {
+		t.Fatal("nadawca przekroczył swój limit buforów")
+	}
+}
+
 func TestNormalizeWS(t *testing.T) {
 	for in, want := range map[string]string{
 		"vps:7777":         "ws://vps:7777",
@@ -597,5 +634,130 @@ func TestNormalizeWS(t *testing.T) {
 		if got := NormalizeWS(in); got != want {
 			t.Errorf("NormalizeWS(%q) = %q, chciałem %q", in, got, want)
 		}
+	}
+}
+
+// An open invite must not let arbitrary strangers connect (and learn our IP):
+// only an offer carrying the hash of that invite's secret gets through.
+func TestStrangerNeedsInviteTicket(t *testing.T) {
+	a := newCore(t, "ala", "ws://127.0.0.1:1")
+	chat, _ := a.CreateChat("g", false)
+	code, _, err := a.NewInvite(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, _ := ParseInvite(code)
+	stranger := identity.Create().Pub
+	if a.acceptPeer(stranger, nil) || a.acceptPeer(stranger, crypt.RandBytes(32)) {
+		t.Fatal("stranger accepted without the invite ticket")
+	}
+	h := sha256.Sum256(inv.Secret)
+	if !a.acceptPeer(stranger, h[:]) {
+		t.Fatal("invite holder rejected")
+	}
+}
+
+func TestBlobFrame(t *testing.T) {
+	chat, hash := bytes.Repeat([]byte{7}, 32), bytes.Repeat([]byte{9}, 32)
+	m, ok := parseBlobFrame(blobFrame(chat, hash, 3, 10, []byte("part")))
+	if !ok || !bytes.Equal(m.Chat, chat) || !bytes.Equal(m.Blob, hash) || m.Idx != 3 || m.Total != 10 || string(m.Part) != "part" {
+		t.Fatalf("round trip: %+v %v", m, ok)
+	}
+	for _, junk := range [][]byte{nil, {blobTag}, []byte(`{"t":"sync"}`), blobFrame(chat, hash, 0, 1, nil)[:40]} {
+		if _, ok := parseBlobFrame(junk); ok {
+			t.Fatalf("accepted %q", junk)
+		}
+	}
+}
+
+// With QuietLookup only members of a chat the user is in get looked
+// up, so the connector does not learn the whole contact list.
+func TestQuietLookup(t *testing.T) {
+	a := newCore(t, "ala", "ws://127.0.0.1:1")
+	b, d := identity.Create(), identity.Create()
+	a.St.PutFriend(store.Friend{Pub: b.Pub, Name: "bartek"})
+	chat, err := a.CreateDirect(store.Friend{Pub: d.Pub, Name: "dorota"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(pub []byte) bool {
+		for _, p := range a.lookupTargets() {
+			if bytes.Equal(p, pub) {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(b.Pub) || !has(d.Pub) {
+		t.Fatal("normal mode should look up everyone")
+	}
+	a.SetQuietLookup(true)
+	a.mu.Lock()
+	clear(a.active)
+	a.mu.Unlock()
+	if has(b.Pub) || has(d.Pub) {
+		t.Fatal("quiet mode looked up an idle contact")
+	}
+	a.MarkChatRead(chat)
+	if has(b.Pub) || !has(d.Pub) {
+		t.Fatal("quiet mode should look up only the open chat")
+	}
+}
+
+// In a chat without history a newcomer folds membership from
+// genesis with member keys only, never gets the content keys from before the
+// join, and the owner rotates the key so they can write.
+func TestNoHistoryForNewMembers(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	a := newCore(t, "ala", url)
+	b := newCore(t, "bartek", url)
+
+	chat, err := a.CreateChat("bez-historii", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Send(chat, "stare"); err != nil {
+		t.Fatal(err)
+	}
+	code, pin, err := a.NewInvite(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Redeem(code, pin); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "b folds the chat", 20*time.Second, func() bool {
+		st, err := b.ChatState(chat)
+		return err == nil && st.IsMember(b.ID.Pub) && st.Name == "bez-historii" && st.Epoch == 2 && !st.Degraded()
+	})
+	waitFor(t, "b can write", 10*time.Second, func() bool { return b.Send(chat, "hej") == nil })
+	if err := a.Send(chat, "nowe"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "b reads after joining", 10*time.Second, func() bool {
+		for _, m := range b.Messages(chat) {
+			if m.Text == "nowe" {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "a reads b", 10*time.Second, func() bool {
+		for _, m := range a.Messages(chat) {
+			if m.Text == "hej" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, m := range b.Messages(chat) {
+		if m.Text == "stare" {
+			t.Fatal("newcomer read history from before joining")
+		}
+	}
+	if keys, _ := b.St.ChatKeys(chat); keys[1] != nil {
+		t.Fatal("newcomer holds the epoch-1 content key")
 	}
 }

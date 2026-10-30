@@ -100,6 +100,27 @@ func (n *obfNet) ResolveUDPAddr(network, address string) (*net.UDPAddr, error) {
 	return a, err
 }
 
+// bypassRelays keeps the peer's TURN relay candidates in the clear. A relay
+// wraps what it forwards in TURN framing, so the relayed side's ICE stack
+// never sees obfuscated bytes: both ends must talk to a relay address plain.
+// Our own relay traffic already goes to the TURN server, which is bypassed.
+func (n *obfNet) bypassRelays(sdp string) {
+	if n == nil {
+		return
+	}
+	for _, line := range strings.Split(sdp, "\n") {
+		f := strings.Fields(line)
+		// a=candidate:<foundation> <component> <proto> <prio> <ip> <port> typ relay ...
+		if len(f) >= 8 && strings.HasPrefix(f[0], "a=candidate:") && f[6] == "typ" && f[7] == "relay" {
+			if ip := net.ParseIP(f[4]); ip != nil {
+				if port, err := strconv.Atoi(f[5]); err == nil {
+					n.bypass.Store(addrKey(&net.UDPAddr{IP: ip, Port: port}), struct{}{})
+				}
+			}
+		}
+	}
+}
+
 func (n *obfNet) ListenUDP(network string, laddr *net.UDPAddr) (transport.UDPConn, error) {
 	c, err := n.Net.ListenUDP(network, laddr)
 	if err != nil {
@@ -179,14 +200,15 @@ func obfSeal(key, plaintext []byte) ([]byte, error) {
 	if len(plaintext) > 0xffff {
 		return nil, errors.New("obfs: datagram too large")
 	}
-	var pb [1]byte
-	rand.Read(pb[:])
-	pad := int(pb[0]) % (obfMaxPad + 1)
+	// one read: random nonce (indistinguishable from the rest) + pad length.
+	// The padding itself can stay zero: the keystream turns it into noise.
+	var r [obfNonce + 1]byte
+	rand.Read(r[:])
+	pad := int(r[obfNonce]) % (obfMaxPad + 1)
 	out := make([]byte, obfNonce+2+len(plaintext)+pad)
-	rand.Read(out[:obfNonce]) // random nonce: indistinguishable from the rest
+	copy(out, r[:obfNonce])
 	binary.BigEndian.PutUint16(out[obfNonce:], uint16(len(plaintext)))
 	copy(out[obfNonce+2:], plaintext)
-	rand.Read(out[obfNonce+2+len(plaintext):]) // random padding
 	c, err := chacha20.NewUnauthenticatedCipher(key, out[:obfNonce])
 	if err != nil {
 		return nil, err

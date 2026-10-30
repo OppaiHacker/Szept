@@ -134,10 +134,11 @@ func Sniff(data []byte) string {
 // control characters, separators, and truncates length.
 //
 // Extension: forced by detected type for media (a "photo.png" script
-// will not be saved as .sh). For generic files, extension from name is kept —
-// otherwise PDF or ZIP could not be opened — but we filter to alphanumeric
-// characters and allow exactly one dot, so "report.pdf.exe" cannot pretend to be PDF.
-// We never execute files automatically.
+// will not be saved as .sh). For generic files, extension from name is kept
+// only when it is on docExts — otherwise PDF or ZIP could not be opened, but
+// "Open" on a .bat/.ps1/.hta/.lnk would run it (ShellExecute on Windows).
+// Anything else ends as .bin. Exactly one dot, so "report.pdf.exe" cannot
+// pretend to be PDF.
 func SafeName(name, mime string) string {
 	name = filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), `\`, "/"))
 	name = strings.Map(func(r rune) rune {
@@ -153,11 +154,9 @@ func SafeName(name, mime string) string {
 	ext := Ext(mime)
 	if i := strings.LastIndexByte(name, '.'); i > 0 {
 		if ext == "" {
-			ext = cleanExt(name[i+1:])
-			if mediaExt(ext) {
-				// content is not media (otherwise Ext would name it), so filename
-				// won't fake it — HTML won't save as .png
-				ext = ""
+			// media ext with non-media content is a fake (HTML saved as .png)
+			if e := cleanExt(name[i+1:]); docExts[e] {
+				ext = e
 			}
 		}
 		name = name[:i]
@@ -175,16 +174,13 @@ func SafeName(name, mime string) string {
 	return name + ext
 }
 
-// mediaExt: extension that our UI would treat as image or video.
-func mediaExt(ext string) bool {
-	for _, m := range []map[string]string{imageMimes, videoMimes} {
-		for _, e := range m {
-			if e == ext {
-				return true
-			}
-		}
-	}
-	return ext == ".jpeg" // single alias missing from lookup tables
+// docExts: generic extensions that open in a viewer, never in an interpreter.
+// No macro formats (.doc/.xls/.docm), no .html/.svg (script in a browser).
+var docExts = map[string]bool{
+	".pdf": true, ".txt": true, ".md": true, ".csv": true, ".json": true, ".epub": true,
+	".docx": true, ".xlsx": true, ".pptx": true, ".odt": true, ".ods": true, ".odp": true,
+	".zip": true, ".7z": true, ".gz": true, ".tar": true,
+	".mp3": true, ".ogg": true, ".opus": true, ".wav": true, ".flac": true, ".m4a": true,
 }
 
 // cleanExt: extension for generic file — alphanumeric characters only, up to 10 chars.
@@ -408,10 +404,8 @@ func checkCard(data []byte, what string) error {
 // animGIF: decodes all frames, compositing diffs (GIF stores diffs, not
 // full images), crops, scales and re-encodes. If output exceeds limit,
 // drops every second frame and retries.
-//
-// Dithering every frame to the Plan9 palette is the expensive part
-// and it runs on the calling thread — fine for a few dozen frames, move it off
-// the UI thread if long banners ever feel sluggish.
+// Dithering every frame to the Plan9 palette is the expensive part, so UIs
+// call this off their UI thread.
 func animGIF(data []byte, crop image.Rectangle, w, h, maxOut, maxFrames int) ([]byte, string, error) {
 	frames, delays, err := GifFrames(data)
 	if err != nil {

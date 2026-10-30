@@ -44,6 +44,7 @@ type App struct {
 	sel    string         // hex id of the open chat ("" = none)
 	seen   map[string]int // chat hex -> event count already shown
 	booted bool
+	prev   map[string]prevEntry // chat hex -> sidebar preview, see preview()
 
 	frames  map[string]*frame // live video tiles, see media.go
 	frameNo uint64
@@ -188,11 +189,12 @@ func (a *App) enter(id *identity.Identity) error {
 	}
 	a.mu.Lock()
 	a.c = c
+	a.prev = map[string]prevEntry{}
 	a.mu.Unlock()
 	c.OnVideoFrame = a.onFrame
 	c.Start()
-	if a.cfg.WebhookOn && a.cfg.WebhookPort > 0 && a.cfg.WebhookToken != "" {
-		_ = c.StartWebhook(a.cfg.WebhookPort, a.cfg.WebhookToken)
+	if a.cfg.WebhookOn && a.cfg.WebhookPort > 0 {
+		_ = c.StartWebhook(a.cfg.WebhookPort, c.WebhookToken())
 	}
 	go a.watch(c)
 	return nil
@@ -260,6 +262,7 @@ type Me struct {
 	Connector string `json:"connector"`
 	ConnUp    bool   `json:"connUp"`
 	ConnErr   string `json:"connErr"`
+	ConnRelay bool   `json:"connRelay"`
 	Lang      string `json:"lang"`
 	Accent    string `json:"accent"`
 }
@@ -285,6 +288,7 @@ type Friend struct {
 	// you gave them — a silent rename is exactly the socially engineered part.
 	Alias  string `json:"alias,omitempty"`
 	Online bool   `json:"online"`
+	Relay  string `json:"relay"` // TURN relay the link goes through, "" = direct
 	Avatar string `json:"avatar"`
 	Status string `json:"status"`
 	Chat   string `json:"chat"` // existing direct chat, if any
@@ -312,7 +316,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 		Status: card.Status, Bio: card.Bio,
 		Avatar: avatarURL(c, c.ID.Pub), Banner: bannerURL(c, c.ID.Pub),
 		Profile: a.cfg.Profile, Connector: c.Cfg.Connector,
-		ConnUp: c.ConnUp(), ConnErr: c.ConnErr(), Lang: c.Lang(), Accent: a.cfg.Accent,
+		ConnUp: c.ConnUp(), ConnErr: c.ConnErr(), ConnRelay: c.ConnRelay(), Lang: c.Lang(), Accent: a.cfg.Accent,
 	}, Chats: []Chat{}, Friends: []Friend{}}
 
 	direct := map[string]string{} // peer hex -> chat hex
@@ -343,7 +347,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 		} else {
 			a.seen[id] = n
 		}
-		ch.Preview, ch.PreviewTS = preview(c, ci)
+		ch.Preview, ch.PreviewTS = a.preview(c, ci)
 		s.Chats = append(s.Chats, ch)
 		s.Unread += ch.Unread
 	}
@@ -355,7 +359,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 	for _, f := range fs {
 		st, _ := c.StatusOf(f.Pub)
 		s.Friends = append(s.Friends, Friend{
-			Pub: hexs(f.Pub), Name: f.Display(), Alias: f.Alias(), Online: c.Online(f.Pub),
+			Pub: hexs(f.Pub), Name: f.Display(), Alias: f.Alias(), Online: c.Online(f.Pub), Relay: c.Relay(f.Pub),
 			Avatar: avatarURL(c, f.Pub), Status: st, Chat: direct[hexs(f.Pub)],
 		})
 	}
@@ -369,6 +373,24 @@ func (a *App) Snapshot() (Snapshot, error) {
 }
 
 func equalBytes(a, b []byte) bool { return hexs(a) == hexs(b) }
+
+type prevEntry struct {
+	rev  uint64
+	text string
+	ts   int64
+}
+
+// preview caches the sidebar line under the chat's store revision, so a
+// refresh does not decrypt every chat's whole history again. Caller holds a.mu.
+func (a *App) preview(c *core.Core, ci core.ChatInfo) (string, int64) {
+	key, rev := hexs(ci.ID), c.St.Rev(ci.ID)
+	if p, ok := a.prev[key]; ok && p.rev == rev {
+		return p.text, p.ts
+	}
+	text, ts := preview(c, ci)
+	a.prev[key] = prevEntry{rev, text, ts}
+	return text, ts
+}
 
 // preview: last real message in a chat, formatted for the sidebar.
 func preview(c *core.Core, ci core.ChatInfo) (string, int64) {
@@ -436,6 +458,7 @@ type Member struct {
 	Owner  bool   `json:"owner"`
 	Me     bool   `json:"me"`
 	InCall bool   `json:"inCall"`
+	Relay  string `json:"relay"` // TURN relay the link goes through, "" = direct
 }
 
 type CallInfo struct {
@@ -531,7 +554,7 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 			Pub: hexs(m.Pub), Name: m.Name, Avatar: avatarURL(c, m.Pub),
 			Status: status, Online: mine || c.Online(m.Pub),
 			Owner: equalBytes(m.Pub, ci.Owner), Me: mine,
-			InCall: inCall[hexs(m.Pub)],
+			InCall: inCall[hexs(m.Pub)], Relay: c.Relay(m.Pub),
 		})
 		if len(ci.Members) == 2 && !mine {
 			conv.Direct, conv.Peer, conv.Avatar = true, hexs(m.Pub), avatarURL(c, m.Pub)
@@ -651,12 +674,13 @@ func (a *App) Search(chat, query string) ([]Msg, error) {
 
 // ---- chats & members ----
 
-func (a *App) CreateGroup(name string) (string, error) {
+// CreateGroup: history=false hides earlier messages from people added later.
+func (a *App) CreateGroup(name string, history bool) (string, error) {
 	c, err := a.live()
 	if err != nil {
 		return "", err
 	}
-	id, err := c.CreateChat(strings.TrimSpace(name))
+	id, err := c.CreateChat(strings.TrimSpace(name), !history)
 	return hexs(id), err
 }
 
@@ -1030,6 +1054,8 @@ type Settings struct {
 	OutputVol      float64  `json:"outputVol"`
 	CamDevice      string   `json:"camDevice"`
 	NoNotify       bool     `json:"noNotify"`
+	RelayOnly      bool     `json:"relayOnly"`
+	QuietLookup    bool     `json:"quietLookup"`
 	Lang           string   `json:"lang"`
 	Profile        string   `json:"profile"`
 	Profiles       []string `json:"profiles"`
@@ -1045,9 +1071,9 @@ func (a *App) Settings() Settings {
 		Connector: a.cfg.Connector, Connectors: a.cfg.Connectors,
 		ConnectorLists: a.cfg.ConnectorLists, MediaDir: a.cfg.MediaDir,
 		Accent: a.cfg.Accent, OutputVol: a.cfg.OutputVol, CamDevice: a.cfg.CamDevice,
-		NoNotify: a.cfg.NoNotify, Profile: a.cfg.Profile, Pinned: a.pinned,
+		NoNotify: a.cfg.NoNotify, RelayOnly: a.cfg.RelayOnly, QuietLookup: a.cfg.QuietLookup, Profile: a.cfg.Profile, Pinned: a.pinned,
 		WebhookOn: a.cfg.WebhookOn, WebhookPort: a.cfg.WebhookPort,
-		WebhookToken: a.cfg.WebhookToken, DataDir: a.cfg.DataDir,
+		DataDir:  a.cfg.DataDir,
 		Profiles: []string{},
 	}
 	if s.Connectors == nil {
@@ -1061,6 +1087,7 @@ func (a *App) Settings() Settings {
 	}
 	if c, err := a.live(); err == nil {
 		s.Lang = c.Lang()
+		s.WebhookToken = c.WebhookToken()
 	}
 	return s
 }
@@ -1072,9 +1099,13 @@ func (a *App) SaveSettings(s Settings) error {
 	a.cfg.MediaDir, a.cfg.Accent = s.MediaDir, s.Accent
 	a.cfg.CamDevice, a.cfg.NoNotify = s.CamDevice, s.NoNotify
 	a.cfg.OutputVol = s.OutputVol
+	a.cfg.RelayOnly = s.RelayOnly
+	a.cfg.QuietLookup = s.QuietLookup
 
 	c, _ := a.live()
 	if c != nil {
+		c.SetRelayOnly(s.RelayOnly)
+		c.SetQuietLookup(s.QuietLookup)
 		if s.Connector != "" && core.NormalizeWS(s.Connector) != a.cfg.Connector {
 			a.cfg.Connector = core.NormalizeWS(s.Connector)
 			c.SetConnector(a.cfg.Connector)
@@ -1099,7 +1130,11 @@ func (a *App) SaveSettings(s Settings) error {
 
 func (a *App) applyWebhook(c *core.Core, s Settings) error {
 	a.cfg.WebhookOn, a.cfg.WebhookPort = s.WebhookOn, s.WebhookPort
-	a.cfg.WebhookToken = s.WebhookToken
+	if s.WebhookToken != "" {
+		if err := c.SetWebhookToken(s.WebhookToken); err != nil {
+			return err
+		}
+	}
 	if !s.WebhookOn {
 		c.StopWebhook()
 		return nil
@@ -1129,7 +1164,11 @@ func (a *App) RefreshConnectors() (Settings, error) {
 }
 
 func (a *App) ChangePass(oldPass, newPass string) error {
-	return boot.ChangePass(a.profileDir(), []byte(oldPass), []byte(newPass))
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return boot.ChangePass(a.profileDir(), []byte(oldPass), []byte(newPass), c.St.Rekey)
 }
 
 // Backup writes the zip wherever the user points the native save dialog.

@@ -5,11 +5,15 @@ package core
 //
 //	curl -X POST http://127.0.0.1:PORT/send \
 //	  -H "Authorization: Bearer TOKEN" \
-//	  -d '{"chat":"nazwa czatu","text":"treść"}'
+//	  -d '{"chat":"ID czatu (hex) albo nazwa","text":"treść"}'
+//
+// Nazwa działa tylko, gdy jest jednoznaczna: nazwy czatów nie są unikalne,
+// więc bot z nazwą mógłby pisać nie tam, gdzie trzeba.
 
 import (
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -24,6 +28,21 @@ import (
 func NewWebhookToken() string {
 	return base64.RawURLEncoding.EncodeToString(crypt.RandBytes(32))
 }
+
+const webhookKey = "webhook_token"
+
+// WebhookToken: kept in the encrypted database, not in config.json, so it is
+// not readable from disk without the account password. Created on first use.
+func (c *Core) WebhookToken() string {
+	if t := c.St.Meta(webhookKey); len(t) > 0 {
+		return string(t)
+	}
+	t := NewWebhookToken()
+	c.St.PutMeta(webhookKey, []byte(t))
+	return t
+}
+
+func (c *Core) SetWebhookToken(t string) error { return c.St.PutMeta(webhookKey, []byte(t)) }
 
 func (c *Core) WebhookOn() bool {
 	c.mu.Lock()
@@ -52,17 +71,20 @@ func (c *Core) StartWebhook(port int, token string) error {
 			http.Error(w, "want {\"chat\":..,\"text\":..}", http.StatusBadRequest)
 			return
 		}
-		for _, ci := range c.Chats() {
-			if ci.Name == req.Chat {
-				if err := c.Send(ci.ID, req.Text); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-				return
+		id, n := c.webhookChat(req.Chat)
+		if n != 1 {
+			code := http.StatusNotFound
+			if n > 1 {
+				code = http.StatusConflict
 			}
+			http.Error(w, "no single chat with that name; use the chat ID", code)
+			return
 		}
-		http.Error(w, "no such chat", http.StatusNotFound)
+		if err := c.Send(id, req.Text); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
@@ -78,6 +100,19 @@ func (c *Core) StartWebhook(port int, token string) error {
 		}
 	}()
 	return nil
+}
+
+// webhookChat resolves a chat by hex ID, or by name; n is the match count.
+func (c *Core) webhookChat(q string) (id []byte, n int) {
+	for _, ci := range c.Chats() {
+		if hex.EncodeToString(ci.ID) == strings.ToLower(q) {
+			return ci.ID, 1
+		}
+		if ci.Name == q {
+			id, n = ci.ID, n+1
+		}
+	}
+	return id, n
 }
 
 func (c *Core) StopWebhook() {

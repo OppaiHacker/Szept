@@ -63,7 +63,7 @@ Szept requires **no central application server**. The only infrastructure is a l
 
 **Connection lifecycle:**
 1. **Register** — Client sends Ed25519-signed timestamp; connector maps pubkey to WebSocket.
-2. **Signal** — SDP offer (containing DTLS cert fingerprint + 32-byte obfuscation key) is Ed25519-signed and relayed. ±2 min freshness window, explicit addressee, glare tie-break (lower pubkey wins).
+2. **Signal** — SDP offer (containing DTLS cert fingerprint + 32-byte obfuscation key) is Ed25519-signed, sealed to the addressee (ephemeral X25519 + XChaCha20-Poly1305) and relayed; the connector cannot read it. ±2 min freshness window, explicit addressee, glare tie-break (lower pubkey wins).
 3. **Connect** — DTLS 1.2+ handshake directly between peers. Certificate is identity-bound — connector cannot MITM.
 4. **Sync** — Peers exchange DAG head hashes and pull missing events over the authenticated E2E channel.
 
@@ -81,27 +81,36 @@ A single connector works fine, but connectors can also join the **Cebulion Netwo
 
 | Component | Mechanism |
 |---|---|
-| **Shared secret** | The mesh only exists with `--mesh-secret`. A neighbour proves itself with `mesh_hello` (HMAC-SHA256 over the secret and a timestamp) before it may gossip or relay; client sockets never reach those operations. |
-| **SNDP Gossip** | Every 15 seconds, each connector pings its seeds and known neighbors via `/ndp/neighbors`, exchanging peer counts and RTT latencies. Neighbour URLs must be public `ws://`/`wss://` addresses — private and link-local targets are refused before and after DNS resolution. |
-| **Relaying** | When a signal's destination isn't local, `mesh_signal` goes to at most 4 active neighbours. Max 64 neighbours per connector. |
-| **Loop Prevention** | Each `mesh_signal` carries a random `TraceID` and a `TTL` (default 5). Seen traces are deduplicated for 5 minutes, capped at 100 000. |
-| **Load Balancing** | When `--max-peers` is reached, the connector upgrades the WebSocket, sends a `redirect` with active neighbor URLs, and closes — the client reconnects to a neighbor automatically. |
+| **Open mesh** | Anyone can run a connector and join with `--seeds`. There is no shared password, because in a volunteer network the censor would have it too. A hostile node is contained: payloads are end-to-end signed, every mesh socket is rate limited, and floods take several paths. `--mesh-secret` makes a private mesh of trusted nodes; `--mesh=false` keeps a connector standalone. `--private-gossip` hides a node from anyone walking the mesh: it shares no neighbours (except with `--mesh-secret` peers), sends no redirect lists, and asks its neighbours not to pass its address on. It still joins through `--seeds` and relays as usual. |
+| **Gossip** | Every 15 seconds each connector asks its seeds and neighbours for gossip over the same WebSocket. A reply holds at most 8 URLs, picked per asking /16 network, so nobody gets the full node list from one place. A gossiped URL is only a candidate until it answers our own dial. Neighbour URLs must be public `ws://`/`wss://` addresses, checked again after DNS resolution. |
+| **Lookup** | When a client asks about a key the connector does not host, the connector asks the mesh (`mesh_lookup`). The connector that hosts the key answers `mesh_found`, and every node on the way back remembers which neighbour leads to that key. Clients on different connectors can find each other. |
+| **Relaying** | A `mesh_signal` goes to the neighbour remembered for its key, plus up to 4 other neighbours, so one lying node cannot swallow it. Max 64 neighbours per connector, 64 queued frames per neighbour. |
+| **Loop prevention** | Each mesh frame carries a random `TraceID` and a `TTL` (5). Seen traces live in a ring of 20 000; a flood pushes out old entries and can no longer stop relaying. |
+| **Load balancing** | When `--max-peers` is reached, the connector sends a `redirect` with 3 neighbour URLs and closes. The client reconnects to a neighbour automatically. |
 | **Fallback URLs** | Clients maintain a list of `FallbackURLs` (populated from redirects and invite codes); on disconnect, they try each URL before backing off. A redirect may not downgrade `wss://` to `ws://`, and the list is capped at 8. |
-| **DNS Resilience** | If system DNS fails (`no such host`), the client falls back to resolving via `1.1.1.1:53`, and if port 53 is blocked, via DNS-over-HTTPS (DoH) to `1.1.1.1`. |
+| **DNS resilience** | If system DNS fails (`no such host`), the client falls back to resolving via `1.1.1.1:53`, and if port 53 is blocked, via DNS-over-HTTPS (DoH) to `1.1.1.1`. |
+
+**Hiding a connector from censors.** A connector only answers on a secret path (random by default, kept in `connector.path`, printed at start). Every other request gets a plain 404, or with `--decoy https://some-site` that site's pages. There is no status page. With `--domain` it serves `wss://` on 443 with an automatic Let's Encrypt certificate, so to an observer it is an ordinary HTTPS website.
+
+**Relay (TURN) and hiding your IP.** A connector with a known public address (`--domain`, `--public-url` or `--turn <IP>`) also runs STUN and TURN on UDP at its listen port. Clients then use the connector instead of Google's STUN, and peers behind carrier-grade NAT still connect through the relay. With **Settings → Connector → "Hide my IP address"** (`relay_only` in `config.json`) every connection goes through the relay only, so your contacts see the connector's address, never yours. The connector operator then sees who you talk to, when and how much (never the content), so the app asks for explicit consent and tells the other person that the link is relayed. `--turn off` disables the relay; `--turn-rate` caps its bandwidth for all users together (KB/s each way, default 2048, `0` = no cap).
+
+**History for new members.** A new group hides earlier messages from people added later: they get keys only from the moment they join, and the owner rotates the key after every add automatically. Tick "New members see earlier history" when creating the group to turn that off. A newcomer can read and write once the owner's client has rotated the key.
+
+**Hiding your contact list.** By default the app asks the connector every 30 s whether each contact is online, so the connector learns your whole contact list. **Settings → Connector → "Hide my contact list from the connector"** (`quiet_lookup`) asks only about people in chats you opened or used in the last 15 minutes. Presence dots for everyone else go stale.
 
 **Starting a connector in the mesh:**
 ```bash
-./bin/szept-connector --listen :7777 \
-  --public-url ws://c1.example.com:7777 \
-  --seeds ws://c2.example.com:7777,ws://c3.example.com:7777 \
-  --mesh-secret "$(cat /etc/szept/mesh.secret)"   # ten sam sekret na każdym węźle
+./bin/szept-connector --domain c1.example.com \
+  --seeds wss://c2.example.com/9f2c…,wss://c3.example.com/41ab… \
+  --decoy https://example.org
+# clients and other nodes use the URL it prints: wss://c1.example.com/<secret path>
 ```
 
 ### Switching connectors from the app
 
 ![Settings — connectors](assets/shots/settings-connectors.png)
 
-Settings → **Connectory** keeps a saved list of connectors to switch between, plus optional **dynamic lists**: an HTTP(S) address returning one `ws://` URL per line. A refresh appends new entries to your saved list — it never connects you anywhere by itself. Guards: 64 KB per list, 8 s timeout, `ws://` / `wss://` lines only. See [SECURITY.md](SECURITY.md#switching-connectors-and-dynamic-connector-lists) for what a list host does and does not learn.
+Settings → **Connectory** keeps a saved list of connectors to switch between, plus optional **dynamic lists**: an `https://` address returning one `ws://` URL per line. A refresh appends new entries to your saved list — it never connects you anywhere by itself. Guards: `https://` only, no redirects, 64 KB per list, 8 s timeout, `ws://` / `wss://` lines only. See [SECURITY.md](SECURITY.md#switching-connectors-and-dynamic-connector-lists) for what a list host does and does not learn.
 
 ---
 
@@ -111,7 +120,7 @@ Under strict firewalls or deep packet inspection, Szept wraps all peer-to-peer U
 
 ![Szept — Cebulion Traffic Obfuscation](assets/cebulion_obfuscation.jpg)
 
-- **Per-connection key** — the offerer generates a 32-byte ChaCha20 key and embeds it in the Ed25519-signed SDP offer (`sigPayload.Obf`). Only the addressed peer can derive the keystream.
+- **Per-connection key** — the offerer generates a 32-byte ChaCha20 key and embeds it in the Ed25519-signed SDP offer (`sigPayload.Obf`). The offer is sealed to the addressee, so only that peer (not the connector) can derive the keystream.
 - **Wire format** — `nonce(12B) || ChaCha20(len(2B) || plaintext || random_padding(0–64B))`. No MAC — DTLS underneath already authenticates, so a tampered datagram decrypts to garbage that DTLS drops.
 - **STUN bypass** — traffic to public STUN servers (discovered via `ResolveUDPAddr`) passes through unobfuscated so ICE server-reflexive candidates still work.
 - **mDNS disabled** — prevents `.local` multicast from leaking cleartext alongside the obfuscated flow.
@@ -180,9 +189,9 @@ Settings is a full-window view: sections on the left, content on the right.
 | **Nazwa / Awatar / Status i opis / Baner** | Your profile card, each with its own page; images go through the framing popup |
 | **Mój kod / QR** | Your friend code as text and QR, plus a field for someone else's |
 | **Backup & restore** | Save a zip (identity + live database snapshot); restore lands as a **new** account |
-| **Connectory** | Active connector, saved list, dynamic lists |
+| **Connectory** | Active connector, saved list, dynamic lists, "Hide my IP address", "Hide my contact list from the connector" |
 | **Głos i wideo** | Output volume (live, 0–200 %), camera device (V4L2 path on Linux) |
-| **Hasła i szyfrowanie** | Change the identity passphrase (old one verified first — a typo must not lock you out) |
+| **Hasła i szyfrowanie** | Change the identity passphrase (old one verified first — a typo must not lock you out); the database gets a new random key and is re-encrypted |
 | **Konta** | Multiple identities on one device |
 | **System** | Notifications, media folder, image cache |
 | **Wygląd** | Accent colour — applied live, remembered in `config.json` |
@@ -225,14 +234,17 @@ curl -X POST http://127.0.0.1:7780/send \
   -d '{"chat":"chat name","text":"hello from a bot"}'
 ```
 
+`chat` is the chat ID (hex) or its name. A name only works while exactly one chat has it, because chat names are not unique.
+
 | Response | Meaning |
 |---|---|
 | `204` | Sent — signed and encrypted like anything you type |
 | `400` | Body isn't `{"chat":…,"text":…}` |
 | `401` | Bad token |
 | `404` | No chat with that name |
+| `409` | Several chats share that name — pass the chat ID (hex) instead |
 
-Bound to `127.0.0.1` only, off by default, 32-byte token compared in constant time, 64 KB body cap. Anything on your machine that can read `config.json` can send as you — that is the feature and the risk in one sentence.
+Bound to `127.0.0.1` only, off by default, 32-byte token compared in constant time, 64 KB body cap. The token is kept in the encrypted database, not in `config.json`. Anything on your machine that has the token can send as you, which is the feature and the risk in one sentence.
 
 ![Settings — bots](assets/shots/settings-bots.png)
 
@@ -270,6 +282,16 @@ Cross builds:
 make connector-windows   # pure Go, no cgo
 make windows             # clients, needs mingw-w64
 make android             # APK, needs Android SDK/NDK + the fyne tool
+                         # release key: KEYSTORE=… KS_PASS=… KS_ALIAS=…
+make release SIGNKEY=~/.ssh/szept_release
+                         # reproducible connector for every platform + signed SHA256SUMS
+```
+
+Verify a release (`allowed_signers` holds `szept <published public key>`):
+
+```bash
+ssh-keygen -Y verify -f allowed_signers -I szept -n szept-release -s SHA256SUMS.sig < SHA256SUMS
+sha256sum -c SHA256SUMS
 ```
 
 ### Run a standalone connector
@@ -316,7 +338,7 @@ Both clients take `-data <dir>` and `-connector <url>`.
 | `~/.local/share/szept/szept.db` | Fully encrypted bbolt database |
 | `~/.local/share/szept/profiles/<name>/` | A second account: same two files, mode `0700` |
 
-`XDG_DATA_HOME` is honoured if set.
+`XDG_DATA_HOME` is honoured if set. On Windows the data dir is `%LOCALAPPDATA%\szept` (older installs keep `~/.local/share/szept`). `tmp/` inside it holds attachments opened in an external viewer and is wiped at every start and exit.
 
 `config.json` fields:
 
@@ -324,7 +346,7 @@ Both clients take `-data <dir>` and `-connector <url>`.
 |---|---|
 | `connector` | Active connector URL |
 | `connectors` | Saved connectors you switch between |
-| `connector_lists` | HTTP(S) addresses of dynamic connector lists |
+| `connector_lists` | `https://` addresses of dynamic connector lists |
 | `stun` | STUN servers (defaults are used when empty) |
 | `media_dir` | Folder browsed by the built-in gallery |
 | `profile` | Active account; empty = the default one |
@@ -332,7 +354,9 @@ Both clients take `-data <dir>` and `-connector <url>`.
 | `output_vol` | Call volume, `0..2` (0 = default 1) |
 | `cam_device` | Camera device, e.g. `/dev/video1` |
 | `no_notify` | Silence system notifications |
-| `webhook_on` / `webhook_port` / `webhook_token` | Local bot bridge |
+| `relay_only` | Connect only through the connector's TURN relay |
+| `quiet_lookup` | Look up only members of recently used chats |
+| `webhook_on` / `webhook_port` | Local bot bridge (the token is in the encrypted database) |
 
 ---
 
@@ -342,7 +366,7 @@ Both clients accept English and Polish aliases. Availability differs where the U
 
 | Command | Description | TUI | GUI |
 |---|---|:--:|:--:|
-| `/new <name>` · `/nowy` | Create group chat | ✅ | ✅ |
+| `/new <name>` · `/nowy` | Create group chat (people added later do not see earlier messages) | ✅ | ✅ |
 | `/dm <friend>` | Open 1:1 chat | ✅ | ✅ |
 | `/invite` · `/zapros` | One-time invite (code + PIN) | ✅ | ✅ |
 | `/join <code> <pin>` · `/dolacz` | Join group from invite | ✅ | ✅ |
@@ -351,7 +375,7 @@ Both clients accept English and Polish aliases. Availability differs where the U
 | `/kod` · `/code` | Your QR + field for someone else's code | — | ✅ |
 | `/search <q>` · `/szukaj` | Search encrypted history | ✅ | ✅ |
 | `/who` · `/kto` | List chat members | ✅ | ✅ |
-| `/kick <name>` | Remove member (rotates the epoch key) | ✅ | ✅ |
+| `/kick <name\|fingerprint>` | Remove member (rotates the epoch key). A name shared by several members removes nobody; use the fingerprint from `/who` | ✅ | ✅ |
 | `/rekey` | Manual epoch key rotation | ✅ | ✅ |
 | `/rename <name>` · `/zmien` | Rename chat | ✅ | ✅ |
 | `/send <path>` · `/wyslij` | Send file (GUI opens the picker) | ✅ | ✅ |
@@ -477,13 +501,13 @@ Wersja mobilna (ten sam kod, inna powłoka):
 
 ## 🏗️ Architektura
 
-Jedynym elementem infrastruktury jest **Connector** — ~200-liniowy, stateless relay. Mapuje `pubkey → gniazdo` i przekazuje podpisane SDP. **Nigdy** nie widzi treści, kluczy ani członkostwa.
+Jedynym elementem infrastruktury jest **Connector** — ~200-liniowy, stateless relay. Mapuje `pubkey → gniazdo` i przekazuje zaszyfrowane dla odbiorcy, podpisane SDP. **Nigdy** nie widzi treści, kluczy ani członkostwa.
 
 ![Szept — Architektura Connectora](assets/connector_architecture.jpg)
 
 **Przebieg połączenia:**
 1. **Rejestracja** — klient wysyła podpisany Ed25519 znacznik czasu; connector mapuje pubkey na WebSocket.
-2. **Sygnalizacja** — oferta SDP (odcisk certyfikatu DTLS + 32-bajtowy klucz obfuskacji) podpisana Ed25519, okno świeżości ±2 minuty, jawny adresat, rozstrzyganie kolizji (wygrywa niższy pubkey).
+2. **Sygnalizacja** — oferta SDP (odcisk certyfikatu DTLS + 32-bajtowy klucz obfuskacji) podpisana Ed25519 i zaszyfrowana dla odbiorcy (X25519 + XChaCha20-Poly1305), connector jej nie odczyta; okno świeżości ±2 minuty, jawny adresat, rozstrzyganie kolizji (wygrywa niższy pubkey).
 3. **Połączenie** — handshake DTLS 1.2+ bezpośrednio między peerami. Certyfikat związany z tożsamością — connector nie zrobi MITM.
 4. **Synchronizacja** — peery wymieniają hashe czół DAG i dociągają brakujące zdarzenia szyfrowanym kanałem.
 
@@ -498,25 +522,34 @@ Connector może działać sam lub dołączyć do **Sieci Cebulion** — rozprosz
 ![Szept — Sieć Cebulion](assets/cebulion_network.jpg)
 
 **Jak działa:**
-- **Wspólny sekret** — siatka istnieje tylko z `--mesh-secret`; sąsiad przedstawia się `mesh_hello` (HMAC-SHA256 z sekretu i znacznika czasu), zanim wolno mu cokolwiek przekazać. Gniazda klienckie nigdy tam nie sięgają.
-- **SNDP Gossip** — connectory co 15 sekund wymieniają listę sąsiadów i RTT; adresem sąsiada może być tylko publiczny `ws://`/`wss://`
-- **Przekazywanie** — sygnał do nieznanego lokalnie celu idzie do najwyżej 4 aktywnych sąsiadów (TTL + TraceID ucinają pętle)
+- **Otwarta siatka** — każdy może postawić connector i dołączyć przez `--seeds`. Nie ma wspólnego hasła, bo w sieci wolontariuszy znałby je też cenzor. Wrogi węzeł jest ograniczony: treść jest podpisana end-to-end, każde gniazdo meshu ma limit, a zalew idzie kilkoma drogami. `--mesh-secret` robi prywatną siatkę zaufanych węzłów, `--mesh=false` zostawia connector samodzielny. `--private-gossip` ukrywa węzeł przed przeszukiwaniem meshu: nie podaje sąsiadów (poza węzłami z `--mesh-secret`), nie wysyła list przekierowań i prosi sąsiadów, żeby nie podawali dalej jego adresu. Dalej dołącza przez `--seeds` i przekazuje ruch.
+- **Gossip** — co 15 sekund connector pyta sąsiadów o innych przez to samo gniazdo WebSocket. Odpowiedź ma najwyżej 8 adresów, wybranych według sieci /16 pytającego, więc nikt nie dostaje całej listy z jednego miejsca.
+- **Wyszukiwanie** — gdy klient pyta o klucz, którego connector nie ma u siebie, connector pyta siatkę (`mesh_lookup`). Klienci na różnych connectorach znajdują się nawzajem.
+- **Przekazywanie** — sygnał idzie do sąsiada zapamiętanego dla klucza i do najwyżej 4 innych (TTL + TraceID ucinają pętle)
 - **Failover** — padnięcie węzła = klient próbuje fallback URL-i (bez degradacji `wss://` do `ws://`)
-- **Load balancing** — przeciążony connector odsyła klienta do sąsiada z wolnymi slotami
+- **Load balancing** — przeciążony connector odsyła klienta do 3 sąsiadów
+
+**Ukrywanie connectora przed cenzorem.** Connector odpowiada tylko na tajnej ścieżce (losowa, zapisana w `connector.path`, wypisana przy starcie). Każde inne zapytanie dostaje zwykłe 404, a z `--decoy https://jakas-strona` treść tej strony. Nie ma strony statusu. Z `--domain` connector działa jako `wss://` na porcie 443 z automatycznym certyfikatem Let's Encrypt, więc z zewnątrz wygląda jak zwykła strona HTTPS.
+
+**Przekaźnik (TURN) i ukrywanie IP.** Connector ze znanym adresem publicznym (`--domain`, `--public-url` albo `--turn <IP>`) uruchamia też STUN i TURN na UDP, na swoim porcie. Klienci używają wtedy connectora zamiast STUN-a Google, a osoby za CGNAT operatora łączą się przez przekaźnik. Opcja **Ustawienia → Connector → „Ukryj mój adres IP”** (`relay_only` w `config.json`) puszcza każde połączenie tylko przez przekaźnik, więc rozmówcy widzą adres connectora, nigdy Twój. Operator connectora widzi wtedy, z kim, kiedy i ile rozmawiasz (nigdy treści), dlatego aplikacja prosi o wyraźną zgodę i informuje rozmówcę, że połączenie idzie przez przekaźnik. `--turn off` wyłącza przekaźnik, a `--turn-rate` ogranicza jego przepustowość dla wszystkich razem (KB/s w każdą stronę, domyślnie 2048, `0` = bez limitu).
+
+**Historia dla nowych osób.** Nowa grupa ukrywa wcześniejsze wiadomości przed osobami dodanymi później: dostają klucze od momentu dołączenia, a właściciel po każdym dodaniu automatycznie zmienia klucz. Zaznacz „Nowi członkowie widzą wcześniejszą historię” przy tworzeniu grupy, żeby to wyłączyć. Nowa osoba czyta i pisze, gdy klient właściciela zmieni klucz.
+
+**Ukrywanie listy kontaktów.** Domyślnie aplikacja co 30 s pyta connector, czy każdy kontakt jest online, więc connector poznaje całą Twoją listę kontaktów. Opcja **Ustawienia → Connector → „Ukryj listę kontaktów przed connectorem”** (`quiet_lookup`) pyta tylko o osoby z czatów otwartych albo używanych w ostatnich 15 minutach. Kropki obecności pozostałych osób przestają być aktualne.
 
 **Uruchomienie connectora w siatce:**
 ```bash
-./bin/szept-connector --listen :7777 \
-  --public-url ws://c1.example.com:7777 \
-  --seeds ws://c2.example.com:7777,ws://c3.example.com:7777 \
-  --mesh-secret "$(cat /etc/szept/mesh.secret)"   # ten sam sekret na każdym węźle
+./bin/szept-connector --domain c1.example.com \
+  --seeds wss://c2.example.com/9f2c…,wss://c3.example.com/41ab… \
+  --decoy https://example.org
+# klienci i inne węzły używają adresu wypisanego przy starcie: wss://c1.example.com/<tajna ścieżka>
 ```
 
 ### Przełączanie connectorów w aplikacji
 
 ![Ustawienia — connectory](assets/shots/settings-connectors.png)
 
-Ustawienia → **Connectory** trzymają listę adresów do przełączania oraz opcjonalne **dynamiczne listy**: adres HTTP(S) zwracający jeden `ws://` na linię. „Odśwież” dopisuje nowe wpisy do listy — sam z siebie nigdzie nie łączy. Limity: 64 KB na listę, 8 s timeout, tylko linie `ws://` i `wss://`. Co host listy widzi, a czego nie — [SECURITY.md](SECURITY.md#switching-connectors-and-dynamic-connector-lists).
+Ustawienia → **Connectory** trzymają listę adresów do przełączania oraz opcjonalne **dynamiczne listy**: adres `https://` zwracający jeden `ws://` na linię. „Odśwież” dopisuje nowe wpisy do listy — sam z siebie nigdzie nie łączy. Limity: tylko `https://`, bez przekierowań, 64 KB na listę, 8 s timeout, tylko linie `ws://` i `wss://`. Co host listy widzi, a czego nie — [SECURITY.md](SECURITY.md#switching-connectors-and-dynamic-connector-lists).
 
 ---
 
@@ -526,7 +559,7 @@ Pod restrykcyjnymi firewallami *Szept* owija cały ruch P2P w warstwę obfuskacj
 
 ![Szept — Obfuskacja Ruchu](assets/cebulion_obfuscation.jpg)
 
-- **Klucz na połączenie** — 32 bajty od strony ofertującej, w podpisanej Ed25519 ofercie SDP.
+- **Klucz na połączenie** — 32 bajty od strony ofertującej, w podpisanej Ed25519 ofercie SDP zaszyfrowanej dla odbiorcy.
 - **Format** — `nonce(12B) || ChaCha20(len(2B) || dane || padding(0–64B))`. Bez MAC — uwierzytelnia DTLS pod spodem.
 - **Omijanie STUN** — ruch do publicznych serwerów STUN idzie bez obfuskacji, żeby ICE działało.
 - **mDNS wyłączony** — żadnego multicastu `.local` obok zaszyfrowanego strumienia.
@@ -593,9 +626,9 @@ Ustawienia to widok na całe okno: sekcje po lewej, treść po prawej.
 | **Nazwa / Awatar / Status i opis / Baner** | Karta profilu, każdy element ma swoją stronę; obrazy przechodzą przez kadrowanie |
 | **Mój kod / QR** | Twój kod znajomego tekstem i jako QR, plus pole na cudzy |
 | **Backup & restore** | Zapis zipa (tożsamość + migawka bazy); przywracanie ląduje jako **nowe** konto |
-| **Connectory** | Aktywny connector, zapisana lista, dynamiczne listy |
+| **Connectory** | Aktywny connector, zapisana lista, dynamiczne listy, „Ukryj mój adres IP”, „Ukryj listę kontaktów przed connectorem” |
 | **Głos i wideo** | Głośność wyjścia (na żywo, 0–200 %), urządzenie kamery (ścieżka V4L2) |
-| **Hasła i szyfrowanie** | Zmiana hasła tożsamości (stare weryfikowane — literówka nie może odciąć konta) |
+| **Hasła i szyfrowanie** | Zmiana hasła tożsamości (stare weryfikowane — literówka nie może odciąć konta); baza dostaje nowy losowy klucz i jest szyfrowana od nowa |
 | **Konta** | Wiele tożsamości na jednym urządzeniu |
 | **System** | Powiadomienia, folder multimediów, cache obrazków |
 | **Wygląd** | Kolor akcentu — działa od razu, zapamiętany w `config.json` |
@@ -638,14 +671,17 @@ curl -X POST http://127.0.0.1:7780/send \
   -d '{"chat":"nazwa czatu","text":"cześć z bota"}'
 ```
 
+`chat` to ID czatu (hex) albo nazwa. Nazwa działa tylko, dopóki ma ją dokładnie jeden czat.
+
 | Odpowiedź | Znaczenie |
 |---|---|
 | `204` | Wysłane — podpisane i zaszyfrowane jak każda twoja wiadomość |
 | `400` | Ciało nie jest `{"chat":…,"text":…}` |
 | `401` | Zły token |
 | `404` | Nie ma czatu o tej nazwie |
+| `409` | Kilka czatów ma tę nazwę — podaj ID czatu (hex) |
 
-Nasłuch tylko na `127.0.0.1`, domyślnie wyłączony, 32-bajtowy token porównywany w stałym czasie, limit ciała 64 KB. Wszystko na twoim komputerze, co przeczyta `config.json`, może wysyłać jako ty — to jednocześnie cała funkcja i całe ryzyko.
+Nasłuch tylko na `127.0.0.1`, domyślnie wyłączony, 32-bajtowy token porównywany w stałym czasie, limit ciała 64 KB. Token leży w zaszyfrowanej bazie, nie w `config.json`. Wszystko na twoim komputerze, co zna token, może wysyłać jako ty — to jednocześnie cała funkcja i całe ryzyko.
 
 ![Ustawienia — boty](assets/shots/settings-bots.png)
 
@@ -683,6 +719,16 @@ Budowanie skrośne:
 make connector-windows   # czysty Go, bez cgo
 make windows             # klienci, wymaga mingw-w64
 make android             # APK, wymaga Android SDK/NDK i narzędzia fyne
+                         # klucz wydania: KEYSTORE=… KS_PASS=… KS_ALIAS=…
+make release SIGNKEY=~/.ssh/szept_release
+                         # powtarzalny connector na każdą platformę + podpisane SHA256SUMS
+```
+
+Sprawdzenie wydania (`allowed_signers` zawiera `szept <opublikowany klucz publiczny>`):
+
+```bash
+ssh-keygen -Y verify -f allowed_signers -I szept -n szept-release -s SHA256SUMS.sig < SHA256SUMS
+sha256sum -c SHA256SUMS
 ```
 
 ### Samodzielny connector
@@ -722,7 +768,7 @@ Oba klienty przyjmują `-data <katalog>` i `-connector <adres>`.
 | `~/.local/share/szept/szept.db` | W całości zaszyfrowana baza bbolt |
 | `~/.local/share/szept/profiles/<nazwa>/` | Drugie konto: te same dwa pliki, tryb `0700` |
 
-`XDG_DATA_HOME` jest respektowane.
+`XDG_DATA_HOME` jest respektowane. Na Windows katalog danych to `%LOCALAPPDATA%\szept` (starsze instalacje zostają w `~/.local/share/szept`). Podkatalog `tmp/` trzyma załączniki otwarte w zewnętrznej przeglądarce i jest czyszczony przy każdym starcie i wyjściu.
 
 Pola `config.json`:
 
@@ -730,7 +776,7 @@ Pola `config.json`:
 |---|---|
 | `connector` | Aktywny adres connectora |
 | `connectors` | Zapisane connectory do przełączania |
-| `connector_lists` | Adresy HTTP(S) dynamicznych list |
+| `connector_lists` | Adresy `https://` dynamicznych list |
 | `stun` | Serwery STUN (puste = domyślne) |
 | `media_dir` | Folder przeglądany przez wbudowaną galerię |
 | `profile` | Aktywne konto; puste = domyślne |
@@ -738,7 +784,9 @@ Pola `config.json`:
 | `output_vol` | Głośność rozmów, `0..2` (0 = domyślne 1) |
 | `cam_device` | Urządzenie kamery, np. `/dev/video1` |
 | `no_notify` | Wyciszenie powiadomień systemowych |
-| `webhook_on` / `webhook_port` / `webhook_token` | Lokalny most dla botów |
+| `relay_only` | Łączenie tylko przez przekaźnik TURN connectora |
+| `quiet_lookup` | Pytanie tylko o członków ostatnio używanych czatów |
+| `webhook_on` / `webhook_port` | Lokalny most dla botów (token jest w zaszyfrowanej bazie) |
 
 ---
 
@@ -748,7 +796,7 @@ Oba klienty przyjmują polskie i angielskie aliasy. Dostępność różni się t
 
 | Komenda | Opis | TUI | GUI |
 |---|---|:--:|:--:|
-| `/nowy <nazwa>` · `/new` | Utwórz grupę | ✅ | ✅ |
+| `/nowy <nazwa>` · `/new` | Utwórz grupę (osoby dodane później nie widzą wcześniejszych wiadomości) | ✅ | ✅ |
 | `/dm <znajomy>` | Czat na dwoje | ✅ | ✅ |
 | `/zapros` · `/invite` | Jednorazowe zaproszenie (kod + PIN) | ✅ | ✅ |
 | `/dolacz <kod> <pin>` · `/join` | Dołącz do grupy | ✅ | ✅ |
@@ -757,7 +805,7 @@ Oba klienty przyjmują polskie i angielskie aliasy. Dostępność różni się t
 | `/kod` · `/code` | Twój QR i pole na cudzy kod | — | ✅ |
 | `/szukaj <fraza>` · `/search` | Szukaj w historii | ✅ | ✅ |
 | `/kto` · `/who` | Członkowie czatu | ✅ | ✅ |
-| `/kick <nazwa>` | Usuń członka (rotuje klucz epoki) | ✅ | ✅ |
+| `/kick <nazwa\|odcisk>` | Usuń członka (rotuje klucz epoki). Gdy nazwę ma kilka osób, nikt nie jest usuwany; podaj odcisk z `/kto` | ✅ | ✅ |
 | `/rekey` | Ręczna rotacja klucza epoki | ✅ | ✅ |
 | `/zmien <nazwa>` · `/rename` | Zmień nazwę czatu | ✅ | ✅ |
 | `/wyslij <ścieżka>` · `/send` | Wyślij plik (GUI otwiera wybierak) | ✅ | ✅ |

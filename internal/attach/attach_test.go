@@ -93,13 +93,18 @@ func TestSafeName(t *testing.T) {
 			t.Errorf("SafeName(%q, png) = %q, chciałem %q", in, got, want)
 		}
 	}
-	// generic file: extension retained, but only one and alphanumeric
+	// generic file: only an allowlisted extension survives, the rest is .bin
 	generic := map[string]string{
 		"raport.pdf":       "raport.pdf",
-		"raport.pdf.exe":   "raport_pdf.exe",
+		"raport.pdf.exe":   "raport_pdf.bin",
 		"../../evil/x.zip": "x.zip",
 		"dane":             "dane.bin",
-		"a.t?r":            "a.tr",
+		"a.t?xt":           "a.txt",
+		"run.bat":          "run.bin",
+		"x.PS1":            "x.bin",
+		"app.hta":          "app.bin",
+		"skrót.lnk":        "skrót.bin",
+		"fake.png":         "fake.bin",
 	}
 	for in, want := range generic {
 		if got := SafeName(in, "application/octet-stream"); got != want {

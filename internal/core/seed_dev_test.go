@@ -135,7 +135,7 @@ func TestSeedDevice(t *testing.T) {
 	}
 
 	// group: ala creates, others enter via invite
-	grp, err := a.CreateChat("ekipa z osiedla")
+	grp, err := a.CreateChat("ekipa z osiedla", false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -90,7 +90,7 @@ func buildSeed(t *testing.T, dir string) {
 	putEvent(t, c, dm, bob.priv, event.KindProfile,
 		event.Body{Text: "na rowerze", Bio: "bob, sąsiad z 3 piętra", TS: time.Now().Unix()})
 
-	grp, err := c.CreateChat("ekipa-z-osiedla")
+	grp, err := c.CreateChat("ekipa-z-osiedla", false)
 	if err != nil {
 		t.Fatal(err)
 	}

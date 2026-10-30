@@ -28,7 +28,7 @@ import (
 const registerContext = "szept-register-v1"
 
 type Msg struct {
-	Op      string `json:"op"` // register | lookup | signal | error | ok | redirect | ndp_gossip | mesh_signal
+	Op      string `json:"op"` // register | lookup | signal | error | ok | ice | redirect | mesh_hello | ndp_gossip | mesh_signal | mesh_lookup | mesh_found
 	Pub     []byte `json:"pub,omitempty"`
 	To      []byte `json:"to,omitempty"`
 	From    []byte `json:"from,omitempty"`
@@ -37,12 +37,14 @@ type Msg struct {
 	Payload []byte `json:"payload,omitempty"`
 	Online  bool   `json:"online,omitempty"`
 	Err     string `json:"err,omitempty"`
+	ICE     *ICE   `json:"ice,omitempty"` // ok / ice reply: this connector's STUN+TURN relay
 
-	// --- New fields for SNDP and Cebulion Network (Load Balancing & Mesh in Cebulion Network) ---
-	Redirect []string       `json:"redirect,omitempty"`
-	TraceID  string         `json:"trace_id,omitempty"`
-	TTL      int            `json:"ttl,omitempty"`
-	Nodes    []NeighborInfo `json:"nodes,omitempty"`
+	// Cebulion Network: load balancing and the connector mesh
+	Redirect []string `json:"redirect,omitempty"`
+	TraceID  string   `json:"trace_id,omitempty"`
+	TTL      int      `json:"ttl,omitempty"`
+	Nodes    []string `json:"nodes,omitempty"`  // ndp_gossip reply: a few neighbour URLs
+	Hidden   bool     `json:"hidden,omitempty"` // mesh_hello: do not pass my URL on (--private-gossip)
 }
 
 func registerDigest(pub []byte, ts int64) []byte {
@@ -65,23 +67,33 @@ type client struct {
 	mu sync.Mutex
 	ts int64 // registration timestamp holding slot — see "register"
 
-	lookups   int       // lookups used in the current window (rate limit)
-	lookupWin time.Time // start of that window
+	lookups, signals, meshFrames window // per-socket rate limits
+}
+
+// window counts events in the current minute.
+type window struct {
+	n     int
+	start time.Time
 }
 
 // maxLookupsPerMinute throttles the presence oracle. `lookup` answers for any
 // pubkey — the connector cannot tell who is entitled to ask about whom — so the
 // best it can do is make enumerating the whole network expensive.
-const maxLookupsPerMinute = 60
+// maxSignalsPerMinute: a connection costs one offer + one answer; without a
+// cap one socket could flood the mesh with signals to random keys.
+const (
+	maxLookupsPerMinute = 60
+	maxSignalsPerMinute = 120
+)
 
-func (c *client) allowLookup() bool {
+func (c *client) allow(w *window, max int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if time.Since(c.lookupWin) > time.Minute {
-		c.lookupWin, c.lookups = time.Now(), 0
+	if time.Since(w.start) > time.Minute {
+		*w = window{start: time.Now()}
 	}
-	c.lookups++
-	return c.lookups <= maxLookupsPerMinute
+	w.n++
+	return w.n <= max
 }
 
 func (c *client) send(m Msg) error {
@@ -96,11 +108,17 @@ type Server struct {
 	peers      map[string]*client
 	ips        map[string]int // IP address -> open WS sessions
 	up         websocket.Upgrader
-	start      time.Time
 	MaxPeers   int
 	PublicURL  string
 	TrustProxy bool // read the client IP from X-Forwarded-For (only behind our own proxy)
 	mesh       *meshManager
+	turn       *turnRelay // nil = no relay (see StartTURN)
+
+	// Path: the only path that upgrades to the connector ("" = any). Everything
+	// else — a probe, a crawler, a wrong guess — gets Decoy, so a censor that
+	// scans the address sees an ordinary web server, not a Szept connector.
+	Path  string
+	Decoy http.Handler // nil = plain 404
 }
 
 // checkOrigin: the connector has no browser clients. Native clients send no
@@ -113,7 +131,6 @@ func NewServer() *Server {
 		peers: map[string]*client{},
 		ips:   map[string]int{},
 		up:    websocket.Upgrader{CheckOrigin: checkOrigin},
-		start: time.Now(),
 	}
 	s.mesh = newMeshManager(s, "", nil)
 	return s
@@ -136,14 +153,39 @@ func (s *Server) SetPublicURL(rawURL string) {
 	s.mesh.start()
 }
 
-// SetMeshSecret enables the connector mesh. An empty secret keeps it off, which
-// is the right default for a standalone connector: no socket can then reach
-// mesh_signal or ndp_gossip at all.
+// SetMeshSecret turns the open mesh into a private one: only nodes that know
+// the secret are accepted as neighbours.
 func (s *Server) SetMeshSecret(secret string) {
 	s.mesh.mu.Lock()
 	s.mesh.secret = []byte(secret)
 	s.mesh.mu.Unlock()
 	s.mesh.start()
+}
+
+// SetPrivateGossip hides this node from mesh walkers: it tells nobody about
+// its neighbours (except mesh peers proven by --mesh-secret), sends no
+// redirect lists, and asks its neighbours not to pass its own URL on. It
+// still finds the mesh through --seeds and relays as usual.
+func (s *Server) SetPrivateGossip() {
+	s.mesh.mu.Lock()
+	s.mesh.private = true
+	s.mesh.mu.Unlock()
+}
+
+// SetMeshOff keeps this connector standalone: no neighbours, no relaying.
+func (s *Server) SetMeshOff() {
+	s.mesh.mu.Lock()
+	s.mesh.off = true
+	s.mesh.mu.Unlock()
+}
+
+// SetPath / SetDecoy: see Server.Path.
+func (s *Server) SetPath(p string)        { s.Path = p }
+func (s *Server) SetDecoy(h http.Handler) { s.Decoy = h }
+func (s *Server) hosts(pub []byte) *client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peers[string(pub)]
 }
 
 // SetTrustProxy makes clientIP honour X-Forwarded-For on loopback connections.
@@ -178,8 +220,11 @@ func (s *Server) clientIP(r *http.Request) string {
 	trust := s.TrustProxy
 	s.mu.Unlock()
 	if ip := net.ParseIP(host); trust && ip != nil && ip.IsLoopback() {
+		// the last entry is the one our proxy appended; earlier ones come
+		// from the client and can be anything
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			host = strings.TrimSpace(strings.Split(xff, ",")[0])
+			parts := strings.Split(xff, ",")
+			host = strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 	if net.ParseIP(host) == nil {
@@ -220,21 +265,14 @@ func (s *Server) Count() int {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// plain HTTP (browser/curl) gets a status page — proves the connector is up
-	if !websocket.IsWebSocketUpgrade(r) {
-		if r.URL.Path == "/ndp/neighbors" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"url":         s.PublicURL,
-				"peer_count":  s.Count(),
-				"max_clients": s.MaxPeers,
-				"neighbors":   s.mesh.neighborInfos(),
-			})
-			return
+	// no status page, no banner: anything but an upgrade on our path looks
+	// like whatever the decoy is
+	if (s.Path != "" && r.URL.Path != s.Path) || !websocket.IsWebSocketUpgrade(r) {
+		if s.Decoy != nil {
+			s.Decoy.ServeHTTP(w, r)
+		} else {
+			http.NotFound(w, r)
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "szept-connector (Sieć Cebulion) OK\npeers online: %d\nuptime: %s\nmesh neighbors: %d\n",
-			s.Count(), time.Since(s.start).Round(time.Second), len(s.mesh.activeNeighborURLs()))
 		return
 	}
 	// per-IP slot first: the overload path below also upgrades the socket, so
@@ -248,10 +286,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.MaxPeers > 0 && s.Count() >= s.MaxPeers {
 		ws, err := s.up.Upgrade(w, r, nil)
 		if err == nil {
+			// a few neighbours, not all: a full list per connect is a free
+			// census of the mesh
+			ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			_ = ws.WriteJSON(Msg{
 				Op:       "redirect",
 				Err:      "connector high load",
-				Redirect: s.mesh.activeNeighborURLs(),
+				Redirect: s.mesh.shareable(ip, redirectShare, false),
 			})
 			ws.Close()
 		}
@@ -307,32 +348,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			meshPeer = true
-			c.send(Msg{Op: "ok"})
-		case "ndp_gossip":
-			if !meshPeer {
-				continue // not the client plane
-			}
+			// candidate only: it becomes a neighbour once it answers our dial
 			if len(m.From) > 0 {
-				s.mesh.addNeighbor(string(m.From), 0, 0)
+				if n := s.mesh.addNeighbor(string(m.From)); n != nil {
+					s.mesh.mu.Lock()
+					n.hidden = m.Hidden
+					s.mesh.mu.Unlock()
+					s.mesh.start()
+				}
 			}
-		case "mesh_signal":
-			if !meshPeer {
-				continue // not the client plane
-			}
-			if s.mesh.markTraceSeen(m.TraceID) {
+			c.send(Msg{Op: "ok"})
+		case "ndp_gossip", "mesh_signal", "mesh_lookup":
+			// meshPeer stays false for every ordinary client socket, which
+			// keeps these off the client plane
+			if !meshPeer || !c.allow(&c.meshFrames, maxMeshFramesPerMinute) {
 				continue
 			}
-			s.mu.Lock()
-			dst := s.peers[string(m.To)]
-			s.mu.Unlock()
-			if dst != nil {
-				// `From` on a relayed frame is a routing hint, never an identity:
-				// only the Ed25519 signature inside Payload (p2p.onSignal) proves
-				// who sent it.
-				dst.send(Msg{Op: "signal", From: m.From, To: m.To, Payload: m.Payload})
-			} else if m.TTL > 0 {
-				s.mesh.relayMeshSignal(m)
-			}
+			s.meshFrame(c, m, ip)
 		case "register":
 			if len(m.Pub) != ed25519.PublicKeySize ||
 				time.Since(time.Unix(m.TS, 0)) > time.Minute || time.Until(time.Unix(m.TS, 0)) > time.Minute ||
@@ -350,45 +382,86 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				c.send(Msg{Op: "error", Err: "stale register"})
 				continue
 			}
+			old := s.peers[string(m.Pub)]
 			pub = m.Pub
 			c.ts = m.TS
 			s.peers[string(pub)] = c
 			s.mu.Unlock()
-			c.send(Msg{Op: "ok"})
+			if old != nil && old != c {
+				old.ws.Close() // the key re-registered elsewhere; drop the stale socket
+			}
+			c.send(Msg{Op: "ok", ICE: s.iceFor(pub)})
+		case "ice":
+			// credentials expire after turnCredTTL; long sessions ask again
+			if pub != nil {
+				c.send(Msg{Op: "ice", ICE: s.iceFor(pub)})
+			}
 		case "lookup":
 			if pub == nil {
 				c.send(Msg{Op: "error", Err: "register first"})
 				continue
 			}
-			if !c.allowLookup() {
-				c.send(Msg{Op: "error", Err: "lookup rate limit"})
+			if !c.allow(&c.lookups, maxLookupsPerMinute) {
+				c.send(Msg{Op: "error", Err: "lookup rate limit", Pub: m.Pub})
 				continue
 			}
-			s.mu.Lock()
-			_, online := s.peers[string(m.Pub)]
-			s.mu.Unlock()
-			c.send(Msg{Op: "lookup", Pub: m.Pub, Online: online})
+			if s.hosts(m.Pub) != nil || !s.mesh.enabled() {
+				c.send(Msg{Op: "lookup", Pub: m.Pub, Online: s.hosts(m.Pub) != nil})
+				continue
+			}
+			// not ours: ask the mesh, without stalling this socket's reads
+			go func(pub []byte) {
+				c.send(Msg{Op: "lookup", Pub: pub, Online: s.mesh.lookup(pub)})
+			}(m.Pub)
 		case "signal":
 			if pub == nil {
 				c.send(Msg{Op: "error", Err: "register first"})
 				continue
 			}
-			s.mu.Lock()
-			dst := s.peers[string(m.To)]
-			s.mu.Unlock()
+			if !c.allow(&c.signals, maxSignalsPerMinute) {
+				c.send(Msg{Op: "error", Err: "signal rate limit"})
+				continue
+			}
+			dst := s.hosts(m.To)
 			if dst == nil {
-				// not ours — hand it to the mesh (no-op when the mesh is off)
-				s.mesh.relayMeshSignal(Msg{
-					Op:      "mesh_signal",
-					From:    pub,
-					To:      m.To,
-					Payload: m.Payload,
-					TTL:     5,
-				})
+				// not ours — hand it to the mesh, which reports back if
+				// nobody took it
+				go s.mesh.signal(c, pub, m.To, m.Payload)
 				continue
 			}
 			dst.send(Msg{Op: "signal", From: pub, To: m.To, Payload: m.Payload})
 		}
+	}
+}
+
+// meshFrame handles one frame from an authenticated mesh socket.
+func (s *Server) meshFrame(c *client, m Msg, ip string) {
+	switch m.Op {
+	case "ndp_gossip":
+		c.send(Msg{Op: "ndp_gossip", Nodes: s.mesh.gossipFor(ip)})
+	case "mesh_signal":
+		if s.mesh.markTraceSeen(m.TraceID, c) {
+			return
+		}
+		if dst := s.hosts(m.To); dst != nil {
+			// `From` on a relayed frame is a routing hint, never an identity:
+			// only the Ed25519 signature inside Payload (p2p.onSignal) proves
+			// who sent it.
+			dst.send(Msg{Op: "signal", From: m.From, To: m.To, Payload: m.Payload})
+			// receipt: walks back like a lookup answer and teaches the route
+			c.send(Msg{Op: "mesh_found", TraceID: m.TraceID, Pub: m.To})
+			return
+		}
+		s.mesh.relay(m, m.To)
+	case "mesh_lookup":
+		if s.mesh.markTraceSeen(m.TraceID, c) {
+			return
+		}
+		if s.hosts(m.Pub) != nil {
+			c.send(Msg{Op: "mesh_found", TraceID: m.TraceID, Pub: m.Pub})
+			return
+		}
+		s.mesh.relay(m, m.Pub)
 	}
 }
 
@@ -400,15 +473,25 @@ type Client struct {
 	Priv         ed25519.PrivateKey
 	Pub          ed25519.PublicKey
 	OnSignal     func(from []byte, payload []byte)
-	OnUp         func() // fires after each successful (re-)registration
-	OnDown       func() // fires when a registered session drops
+	// OnUndelivered: a signal to pub reached no connector hosting it.
+	OnUndelivered func(pub []byte)
+	OnUp          func() // fires after each successful (re-)registration
+	OnDown        func() // fires when a registered session drops
 
 	mu      sync.Mutex
 	ws      *websocket.Conn
-	lookups chan Msg
+	waiters map[string][]chan Msg // pubkey -> Lookup calls waiting for its answer
 	closed  bool
 	up      bool
 	lastErr string
+	ice     *ICE // relay offered by the current connector
+}
+
+// ICE returns the STUN/TURN relay of the current connector, or nil.
+func (c *Client) ICE() *ICE {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ice
 }
 
 // Up reports whether the client is currently registered with the connector.
@@ -427,7 +510,7 @@ func (c *Client) LastErr() string {
 }
 
 func NewClient(url string, priv ed25519.PrivateKey) *Client {
-	return &Client{URL: url, Priv: priv, Pub: priv.Public().(ed25519.PublicKey), lookups: make(chan Msg, 16)}
+	return &Client{URL: url, Priv: priv, Pub: priv.Public().(ed25519.PublicKey), waiters: map[string][]chan Msg{}}
 }
 
 // maxFallbacks caps the redirect list; a hostile connector must not be able to
@@ -498,13 +581,14 @@ func (c *Client) session() error {
 	c.mu.Unlock()
 	var ws *websocket.Conn
 	var dialErr error
+	var ice *ICE
 
 	ts := time.Now().Unix()
 	regMsg := Msg{Op: "register", Pub: c.Pub, TS: ts, Sig: SignRegister(c.Priv, c.Pub, ts)}
 
 	for _, u := range urlsToTry {
 		var conn *websocket.Conn
-		conn, _, dialErr = websocket.DefaultDialer.Dial(u, nil)
+		conn, _, dialErr = clientDialer.Dial(u, nil)
 		if dialErr != nil && strings.Contains(dialErr.Error(), "no such host") {
 			conn, dialErr = dialFallbackDNS(u)
 		}
@@ -525,6 +609,7 @@ func (c *Client) session() error {
 				} else if ack.Op == "ok" {
 					conn.SetReadDeadline(time.Time{})
 					ws = conn
+					ice = ack.ICE
 					break
 				} else {
 					conn.Close()
@@ -547,7 +632,25 @@ func (c *Client) session() error {
 	c.ws = ws
 	c.up = true
 	c.lastErr = ""
+	c.ice = ice
 	c.mu.Unlock()
+
+	if ice != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			t := time.NewTicker(turnCredTTL / 4)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					c.write(Msg{Op: "ice"})
+				}
+			}
+		}()
+	}
 
 	defer func() {
 		ws.Close()
@@ -574,10 +677,23 @@ func (c *Client) session() error {
 			if c.OnSignal != nil {
 				go c.OnSignal(m.From, m.Payload)
 			}
+		case "undelivered":
+			if c.OnUndelivered != nil {
+				go c.OnUndelivered(m.Pub)
+			}
+		case "ice":
+			c.mu.Lock()
+			c.ice = m.ICE
+			c.mu.Unlock()
 		case "lookup", "error":
-			select {
-			case c.lookups <- m:
-			default:
+			// an answer goes to the Lookups that asked about this key; one
+			// shared channel let concurrent lookups eat each other's replies
+			c.mu.Lock()
+			ws := c.waiters[string(m.Pub)]
+			delete(c.waiters, string(m.Pub))
+			c.mu.Unlock()
+			for _, w := range ws {
+				w <- m
 			}
 		}
 	}
@@ -592,7 +708,7 @@ func dialFallbackDNS(rawURL string) (*websocket.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, "1.1.1.1:53")
 	}}
-	d := *websocket.DefaultDialer
+	d := *clientDialer
 	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -608,6 +724,7 @@ func dialFallbackDNS(rawURL string) (*websocket.Conn, error) {
 		var dl net.Dialer
 		return dl.DialContext(ctx, network, net.JoinHostPort(ip, port))
 	}
+	d.NetDialTLSContext = chromeTLS(d.NetDialContext) // SNI stays the hostname
 	ws, _, err := d.Dial(rawURL, nil)
 	return ws, err
 }
@@ -615,6 +732,8 @@ func dialFallbackDNS(rawURL string) (*websocket.Conn, error) {
 // dohLookup: DNS over HTTPS when port 53 is blocked. Queries 1.1.1.1 by IP
 // (Cloudflare cert has IP SAN), so DNS is not required to query DNS.
 func dohLookup(ctx context.Context, host string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET",
 		"https://1.1.1.1/dns-query?type=A&name="+url.QueryEscape(host), nil)
 	if err != nil {
@@ -659,19 +778,29 @@ func (c *Client) Signal(to, payload []byte) error {
 
 // Lookup asks whether a peer is currently registered.
 func (c *Client) Lookup(pub []byte, timeout time.Duration) (bool, error) {
+	w := make(chan Msg, 1)
+	c.mu.Lock()
+	c.waiters[string(pub)] = append(c.waiters[string(pub)], w)
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.waiters[string(pub)] = slices.DeleteFunc(c.waiters[string(pub)], func(x chan Msg) bool { return x == w })
+		if len(c.waiters[string(pub)]) == 0 {
+			delete(c.waiters, string(pub))
+		}
+		c.mu.Unlock()
+	}()
 	if err := c.write(Msg{Op: "lookup", Pub: pub}); err != nil {
 		return false, err
 	}
-	deadline := time.After(timeout)
-	for {
-		select {
-		case m := <-c.lookups:
-			if m.Op == "lookup" && string(m.Pub) == string(pub) {
-				return m.Online, nil
-			}
-		case <-deadline:
-			return false, errors.New("lookup timeout")
+	select {
+	case m := <-w:
+		if m.Op == "error" {
+			return false, errors.New(m.Err)
 		}
+		return m.Online, nil
+	case <-time.After(timeout):
+		return false, errors.New("lookup timeout")
 	}
 }
 

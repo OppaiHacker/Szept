@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -9,39 +10,71 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
-	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"szept/internal/crypt"
 )
 
 // Cebulion Network:
-// Distributed mesh of connectors relaying signals for peers they do not host
-// themselves (mesh_signal), discovered over SNDP (Szept Neighbor Discovery Protocol).
+// an open mesh of volunteer connectors. Anyone can run one, on anything, and
+// join by pointing --seeds at a node they know. A node relays signals for peers
+// it does not host (mesh_signal) and answers whether it hosts a key
+// (mesh_lookup), so two clients on different connectors can still find and
+// reach each other.
 //
-// The mesh is a *separate authenticated plane*: it only exists when the operator
-// sets a shared secret (--mesh-secret). Without it, mesh_hello never succeeds,
-// no socket ever becomes a mesh peer and both mesh operations are dead code.
-// Client sockets must never reach these operations — see meshPeer in ServeHTTP.
+// Open means no shared password: in a network where anyone may run a node, the
+// censor would have it too. A hostile node is contained instead: every frame is
+// end-to-end signed by the clients, every mesh socket is rate limited, floods
+// go to several neighbours so one node cannot blackhole a signal, and nobody
+// gets the full node list (shareFor). --mesh-secret still exists for operators
+// who want a private mesh among nodes they trust.
+//
+// The whole plane runs over WebSocket on the connector's secret path — no
+// HTTP endpoint gives the mesh away to a probe.
 
 const (
-	// MaxNeighbors sets upper bound on stored neighbors in Cebulion Network (DoS / flood guard).
+	// MaxNeighbors caps the neighbour table (DoS / flood guard).
 	MaxNeighbors = 64
-	// maxJSONBytes limits response payload size from gossip endpoint /ndp/neighbors (OOM guard).
-	maxJSONBytes = 128 << 10
-	// maxSeenTraces caps the loop-detection map; past it we drop instead of growing.
-	maxSeenTraces = 100_000
+	// maxSeenTraces sizes the loop-detection ring. Past it the oldest trace is
+	// forgotten — a flood costs us duplicates, it can no longer stop relaying.
+	maxSeenTraces = 20_000
 	// maxTraceIDLen: trace ids we mint are 16 hex chars, anything longer is hostile.
 	maxTraceIDLen = 64
 	// maxBroadcastFanout limits amplification when the target connector is unknown.
 	maxBroadcastFanout = 4
-	// meshContext domain-separates the mesh handshake MAC.
+	// meshTTL: hops a signal or lookup may travel.
+	meshTTL = 5
+	// gossipShare / redirectShare: how many node URLs one asker ever gets.
+	gossipShare   = 8
+	redirectShare = 3
+	// maxGossipBlocks: network blocks (see netBlock) one node answers gossip
+	// for within gossipBlockTTL. Neighbours re-ask every 15 s and keep their
+	// slot; a censor walking the mesh from many blocks runs out of slots.
+	maxGossipBlocks = 32
+	gossipBlockTTL  = time.Hour
+	// maxMeshFramesPerMinute throttles one mesh socket.
+	maxMeshFramesPerMinute = 1200
+	// neighborQueue: frames waiting for one neighbour; a full queue drops,
+	// the flood's other branches still carry the frame.
+	neighborQueue = 64
+	// routeTTL: how long "key K lives behind neighbour N" is trusted.
+	routeTTL = 5 * time.Minute
+	// maxRoutes caps the route table; past it the table is reset.
+	maxRoutes = 10_000
+	// dialBackoff: a neighbour whose dial failed is not redialled by the
+	// gossip loop for this long, instead of a new dial every 15 s.
+	dialBackoff = 2 * time.Minute
+	// lookupWait: how long a mesh lookup or signal waits for mesh_found.
+	lookupWait = 2 * time.Second
+	// meshContext domain-separates the private-mesh handshake MAC.
 	meshContext = "szept-mesh-v1"
 )
 
@@ -63,34 +96,32 @@ func publicIP(ip net.IP) bool {
 }
 
 // safeDial refuses to connect to non-public addresses. String checks on the URL
-// are not enough: evil.example.com can resolve to 127.0.0.1, so the guard has to
-// sit after DNS resolution, right before the socket is opened.
+// are not enough: evil.example.com can resolve to 127.0.0.1, so the guard sits
+// after DNS resolution, and we dial the address we checked — a second lookup
+// could rebind. Every answer must be public, not just the first.
 func safeDial(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	ip := net.ParseIP(host)
-	if ip == nil || !publicIP(ip) {
-		return nil, errors.New("mesh: adres nie-publiczny: " + addr)
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
 	}
-	return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, addr)
+	for _, ip := range ips {
+		if !publicIP(ip) {
+			return nil, errors.New("mesh: adres nie-publiczny: " + addr)
+		}
+	}
+	return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
 }
 
 var meshDialer = &websocket.Dialer{
-	HandshakeTimeout: 3 * time.Second,
-	NetDialContext:   safeDial,
+	HandshakeTimeout:  3 * time.Second,
+	NetDialContext:    safeDial,
+	NetDialTLSContext: chromeTLS(safeDial),
 }
 
-var meshHTTP = &http.Client{
-	Timeout: 5 * time.Second,
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return errors.New("mesh: przekierowania są zabronione")
-	},
-	Transport: &http.Transport{DialContext: safeDial},
-}
-
-// Unique TraceID to prevent routing loops in Cebulion Network
 func newTraceID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
@@ -114,7 +145,6 @@ func isValidNeighborURL(raw string, publicURL string) bool {
 	if err != nil {
 		return false
 	}
-	// http/https are an internal detail of pingNode; a neighbour is always a socket
 	if scheme := strings.ToLower(u.Scheme); scheme != "ws" && scheme != "wss" {
 		return false
 	}
@@ -130,58 +160,99 @@ func isValidNeighborURL(raw string, publicURL string) bool {
 	return true
 }
 
-type NeighborInfo struct {
-	URL        string `json:"url"`
-	PeerCount  int    `json:"peer_count"`
-	MaxClients int    `json:"max_clients"`
-	PingMs     int64  `json:"ping_ms"`
+// shareSalt keys shareFor, so nobody outside this process can work out which
+// network block would be shown which nodes.
+var shareSalt = string(crypt.RandBytes(16))
+
+// netBlock: the asker's /16 (IPv4) or /48 (IPv6).
+func netBlock(askerIP string) string {
+	if ip := net.ParseIP(askerIP); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return string(v4[:2])
+		}
+		return string(ip[:6])
+	}
+	return askerIP
+}
+
+// shareFor picks up to n URLs for one asker. The same network block always
+// gets the same few, so walking the mesh from one block shows a handful of
+// nodes, not the whole list a censor would block.
+func shareFor(urls []string, askerIP string, n int) []string {
+	bucket := netBlock(askerIP)
+	rank := func(u string) []byte {
+		h := sha256.Sum256([]byte(shareSalt + bucket + "\x00" + u))
+		return h[:]
+	}
+	slices.SortFunc(urls, func(a, b string) int { return bytes.Compare(rank(a), rank(b)) })
+	return urls[:min(n, len(urls))]
 }
 
 type neighborNode struct {
-	url       string
-	peerCount int
-	pingMs    int64
-	lastSeen  time.Time
-	ws        *websocket.Conn
-	mu        sync.Mutex
+	url      string
+	added    time.Time
+	lastSeen time.Time   // last frame it sent us; zero = candidate, never reached
+	hidden   bool        // asked us not to pass its URL on (--private-gossip)
+	failed   time.Time   // last failed dial; the loop backs off (dialBackoff)
+	out      chan []byte // send queue of the open socket, nil = none
+}
+
+type route struct {
+	node *neighborNode
+	at   time.Time
 }
 
 type meshManager struct {
-	mu         sync.Mutex
-	server     *Server
-	publicURL  string
-	seeds      []string
-	secret     []byte
-	neighbors  map[string]*neighborNode // url -> node
-	seenTraces map[string]time.Time     // trace_id -> timestamp
-	started    bool
+	mu        sync.Mutex
+	server    *Server
+	publicURL string
+	seeds     []string
+	secret    []byte // optional: private mesh
+	off       bool
+	private   bool                     // --private-gossip
+	neighbors map[string]*neighborNode // url -> node
+
+	traces   map[string]*client // trace id -> socket it came in on (nil = ours)
+	traceLog []string           // ring over traces, oldest evicted
+	traceAt  int
+	waits    map[string]chan struct{} // our own lookups waiting for mesh_found
+	routes   map[string]route         // pubkey -> neighbour that answered for it
+	gossiped map[string]time.Time     // network block -> last gossip answer (maxGossipBlocks)
+	started  bool
 }
 
 func newMeshManager(s *Server, publicURL string, seeds []string) *meshManager {
-	m := &meshManager{
-		server:     s,
-		publicURL:  publicURL,
-		seeds:      seeds,
-		neighbors:  make(map[string]*neighborNode),
-		seenTraces: make(map[string]time.Time),
+	return &meshManager{
+		server:    s,
+		publicURL: publicURL,
+		seeds:     seeds,
+		neighbors: map[string]*neighborNode{},
+		traces:    map[string]*client{},
+		waits:     map[string]chan struct{}{},
+		routes:    map[string]route{},
+		gossiped:  map[string]time.Time{},
 	}
-	return m
 }
 
-// enabled reports whether the mesh plane exists at all. No secret = no mesh.
 func (m *meshManager) enabled() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.secret) > 0
+	return !m.off
 }
 
-// auth validates a mesh_hello frame: HMAC(secret, "szept-mesh-v1" || ts),
-// timestamp within a minute of now.
+// auth validates a mesh_hello. Open mesh: always. Private mesh:
+// HMAC(secret, "szept-mesh-v1" || ts), timestamp within a minute of now.
 func (m *meshManager) auth(ts int64, sig []byte) bool {
 	m.mu.Lock()
-	secret := m.secret
+	secret, off := m.secret, m.off
 	m.mu.Unlock()
-	if len(secret) == 0 || len(sig) != sha256.Size {
+	if off {
+		return false
+	}
+	if len(secret) == 0 {
+		return true
+	}
+	if len(sig) != sha256.Size {
 		return false
 	}
 	if d := time.Since(time.Unix(ts, 0)); d > time.Minute || d < -time.Minute {
@@ -190,248 +261,352 @@ func (m *meshManager) auth(ts int64, sig []byte) bool {
 	return hmac.Equal(sig, meshMAC(secret, ts))
 }
 
-// helloMsg is the first frame we send on every outbound neighbour socket.
+// helloMsg opens every outbound neighbour socket; From tells the far side
+// where to dial us back.
 func (m *meshManager) helloMsg() Msg {
 	m.mu.Lock()
-	secret := m.secret
+	secret, me := m.secret, m.publicURL
 	m.mu.Unlock()
 	ts := time.Now().Unix()
-	return Msg{Op: "mesh_hello", TS: ts, Sig: meshMAC(secret, ts)}
+	m.mu.Lock()
+	hidden := m.private
+	m.mu.Unlock()
+	msg := Msg{Op: "mesh_hello", TS: ts, From: []byte(me), Hidden: hidden}
+	if len(secret) > 0 {
+		msg.Sig = meshMAC(secret, ts)
+	}
+	return msg
 }
 
-// start launches the gossip loop once, and only for an enabled mesh.
+// start launches the gossip loop once.
 func (m *meshManager) start() {
 	m.mu.Lock()
-	run := !m.started && len(m.secret) > 0 && (len(m.seeds) > 0 || m.publicURL != "")
-	if run {
-		m.started = true
-	}
+	run := !m.started && !m.off
+	m.started = m.started || run
 	m.mu.Unlock()
 	if run {
 		go m.loop()
 	}
 }
 
-func (m *meshManager) activeNeighborURLs() []string {
+func active(n *neighborNode) bool { return time.Since(n.lastSeen) < 2*time.Minute }
+
+// shareable: up to n neighbour URLs to tell someone at ip about. None from
+// a --private-gossip node, unless the asker is a mesh peer proven by
+// --mesh-secret (meshPeer). Neighbours that asked to stay hidden are never
+// passed on.
+func (m *meshManager) shareable(ip string, n int, meshPeer bool) []string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	urls := make([]string, 0, len(m.neighbors))
-	now := time.Now()
-	for url, n := range m.neighbors {
-		if now.Sub(n.lastSeen) < 2*time.Minute && url != m.publicURL {
-			urls = append(urls, url)
-		}
+	if m.private && !(meshPeer && len(m.secret) > 0) {
+		m.mu.Unlock()
+		return nil
 	}
-	return urls
-}
-
-// neighborInfos snapshots neighbours for the /ndp/neighbors gossip endpoint.
-func (m *meshManager) neighborInfos() []NeighborInfo {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]NeighborInfo, 0, len(m.neighbors))
-	now := time.Now()
-	for url, n := range m.neighbors {
-		if now.Sub(n.lastSeen) < 2*time.Minute && url != m.publicURL {
-			out = append(out, NeighborInfo{URL: url, PeerCount: n.peerCount, PingMs: n.pingMs})
-		}
-	}
-	return out
-}
-
-func (m *meshManager) addNeighbor(url string, peerCount int, pingMs int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !isValidNeighborURL(url, m.publicURL) {
-		return
-	}
-	if len(m.neighbors) >= MaxNeighbors {
-		if _, ok := m.neighbors[url]; !ok {
-			return
-		}
-	}
-	n, ok := m.neighbors[url]
-	if !ok {
-		n = &neighborNode{url: url}
-		m.neighbors[url] = n
-	}
-	n.peerCount = peerCount
-	if pingMs > 0 {
-		n.pingMs = pingMs
-	}
-	n.lastSeen = time.Now()
-}
-
-// markTraceSeen reports whether this signal already passed through us.
-// A missing, oversized or overflow trace is treated as "seen" — dropping a
-// frame is always safer than growing an attacker-controlled map.
-func (m *meshManager) markTraceSeen(traceID string) bool {
-	if traceID == "" || len(traceID) > maxTraceIDLen {
-		return true
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, seen := m.seenTraces[traceID]; seen {
-		return true
-	}
-	if len(m.seenTraces) >= maxSeenTraces {
-		return true
-	}
-	m.seenTraces[traceID] = time.Now()
-	return false
-}
-
-func (m *meshManager) cleanupTraces() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cutoff := time.Now().Add(-5 * time.Minute)
-	for id, t := range m.seenTraces {
-		if t.Before(cutoff) {
-			delete(m.seenTraces, id)
-		}
-	}
-}
-
-// loop runs background SNDP gossip and seed discovery.
-func (m *meshManager) loop() {
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-
-	m.gossipSeeds()
-
-	for range ticker.C {
-		m.cleanupTraces()
-		m.gossipSeeds()
-	}
-}
-
-func (m *meshManager) gossipSeeds() {
-	allTargets := make(map[string]bool)
-	m.mu.Lock()
-	for _, s := range m.seeds {
-		if s != m.publicURL {
-			allTargets[s] = true
-		}
-	}
-	for url := range m.neighbors {
-		if url != m.publicURL {
-			allTargets[url] = true
+	var urls []string
+	for u, nb := range m.neighbors {
+		if active(nb) && !nb.hidden {
+			urls = append(urls, u)
 		}
 	}
 	m.mu.Unlock()
+	return shareFor(urls, ip, n)
+}
 
-	for target := range allTargets {
-		go m.pingNode(target)
+// addNeighbor records a candidate. It only becomes active once it answers our
+// own socket, so gossip cannot fill the table with live-looking junk; when the
+// table is full a never-reached or long-silent entry makes room.
+func (m *meshManager) addNeighbor(u string) *neighborNode {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !isValidNeighborURL(u, m.publicURL) {
+		return nil
+	}
+	if n, ok := m.neighbors[u]; ok {
+		return n
+	}
+	if len(m.neighbors) >= MaxNeighbors {
+		for old, n := range m.neighbors {
+			if !active(n) {
+				m.drop(old)
+				break
+			}
+		}
+		if len(m.neighbors) >= MaxNeighbors {
+			return nil
+		}
+	}
+	n := &neighborNode{url: u, added: time.Now()}
+	m.neighbors[u] = n
+	return n
+}
+
+// drop forgets a neighbour; caller holds m.mu. Closing the queue ends its socket.
+func (m *meshManager) drop(u string) {
+	if n := m.neighbors[u]; n != nil && n.out != nil {
+		close(n.out)
+		n.out = nil
+	}
+	delete(m.neighbors, u)
+}
+
+// markTraceSeen reports whether a frame already passed through us, and
+// remembers which socket it came from so mesh_found can walk back.
+func (m *meshManager) markTraceSeen(id string, from *client) bool {
+	if id == "" || len(id) > maxTraceIDLen {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, seen := m.traces[id]; seen {
+		return true
+	}
+	if len(m.traceLog) < maxSeenTraces {
+		m.traceLog = append(m.traceLog, id)
+	} else {
+		delete(m.traces, m.traceLog[m.traceAt])
+		m.traceLog[m.traceAt] = id
+		m.traceAt = (m.traceAt + 1) % maxSeenTraces
+	}
+	m.traces[id] = from
+	return false
+}
+
+// loop: every 15 s ask each neighbour (and seed) for gossip, which also keeps
+// the socket alive and proves the node is up; forget nodes silent for 10 min.
+func (m *meshManager) loop() {
+	req, _ := json.Marshal(Msg{Op: "ndp_gossip"})
+	for {
+		m.mu.Lock()
+		seeds := m.seeds
+		m.mu.Unlock()
+		for _, s := range seeds {
+			m.addNeighbor(s)
+		}
+		m.mu.Lock()
+		for u, n := range m.neighbors {
+			if time.Since(n.lastSeen) > 10*time.Minute && time.Since(n.added) > 10*time.Minute {
+				m.drop(u)
+				continue
+			}
+			if n.out == nil && time.Since(n.failed) < dialBackoff {
+				continue
+			}
+			m.sendLocked(n, req)
+		}
+		for k, r := range m.routes {
+			if time.Since(r.at) > routeTTL {
+				delete(m.routes, k)
+			}
+		}
+		m.mu.Unlock()
+		time.Sleep(15 * time.Second)
 	}
 }
 
-func (m *meshManager) pingNode(targetURL string) {
-	var httpURL string
-	switch {
-	case strings.HasPrefix(targetURL, "wss://"):
-		httpURL = "https://" + strings.TrimPrefix(targetURL, "wss://")
-	case strings.HasPrefix(targetURL, "ws://"):
-		httpURL = "http://" + strings.TrimPrefix(targetURL, "ws://")
+// sendLocked queues a frame for n, opening the socket if needed; caller holds
+// m.mu. A full queue drops the frame.
+func (m *meshManager) sendLocked(n *neighborNode, data []byte) {
+	if n.out == nil {
+		n.out = make(chan []byte, neighborQueue)
+		go m.run(n, n.out)
+	}
+	select {
+	case n.out <- data:
 	default:
-		return // isValidNeighborURL only ever admits ws:// and wss://
-	}
-
-	req, err := http.NewRequest("GET", httpURL+"/ndp/neighbors", nil)
-	if err != nil {
-		return
-	}
-	startTime := time.Now()
-	resp, err := meshHTTP.Do(req)
-	rtt := time.Since(startTime).Milliseconds()
-	if rtt <= 0 {
-		rtt = 1
-	}
-
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	var gossip struct {
-		URL        string         `json:"url"`
-		PeerCount  int            `json:"peer_count"`
-		MaxClients int            `json:"max_clients"`
-		Neighbors  []NeighborInfo `json:"neighbors"`
-	}
-
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&gossip); err != nil {
-		return
-	}
-
-	m.addNeighbor(targetURL, gossip.PeerCount, rtt)
-	for _, n := range gossip.Neighbors {
-		m.addNeighbor(n.URL, n.PeerCount, n.PingMs)
 	}
 }
 
-// relayMeshSignal forwards a signal towards peers we do not host ourselves.
-// No routing table — we do not know which connector holds the target,
-// so we flood a bounded number of neighbours and let TTL + TraceID kill loops.
-func (m *meshManager) relayMeshSignal(msg Msg) {
+// run owns one outbound neighbour socket: a writer draining out and a reader
+// for replies (ok, gossip, mesh_found). The old code never read this socket,
+// so the far side's read deadline killed it every 90 s.
+func (m *meshManager) run(n *neighborNode, out chan []byte) {
+	defer func() {
+		m.mu.Lock()
+		if n.out == out {
+			n.out = nil
+		}
+		m.mu.Unlock()
+	}()
+	ws, _, err := meshDialer.Dial(n.url, nil)
+	if err != nil {
+		m.mu.Lock()
+		n.failed = time.Now()
+		m.mu.Unlock()
+		return
+	}
+	defer ws.Close()
+	ws.SetReadLimit(256 << 10)
+	ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if ws.WriteJSON(m.helloMsg()) != nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			ws.SetReadDeadline(time.Now().Add(90 * time.Second))
+			var msg Msg
+			if ws.ReadJSON(&msg) != nil || msg.Op == "error" {
+				return
+			}
+			m.fromNeighbor(n, msg)
+		}
+	}()
+	for {
+		select {
+		case data, ok := <-out:
+			if !ok {
+				return
+			}
+			ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if ws.WriteMessage(websocket.TextMessage, data) != nil {
+				return
+			}
+		case <-done:
+			return
+		}
+	}
+}
+
+func (m *meshManager) fromNeighbor(n *neighborNode, msg Msg) {
+	m.mu.Lock()
+	n.lastSeen = time.Now()
+	m.mu.Unlock()
+	switch msg.Op {
+	case "ndp_gossip":
+		for _, u := range msg.Nodes[:min(len(msg.Nodes), gossipShare)] {
+			m.addNeighbor(u)
+		}
+	case "mesh_found":
+		m.found(n, msg)
+	}
+}
+
+// found walks a mesh_found back towards whoever asked. Only for a lookup that
+// went through us — an unsolicited answer could steer routes to a blackhole.
+func (m *meshManager) found(n *neighborNode, msg Msg) {
+	m.mu.Lock()
+	origin, ok := m.traces[msg.TraceID]
+	w := m.waits[msg.TraceID]
+	if ok && len(msg.Pub) > 0 {
+		if len(m.routes) >= maxRoutes {
+			clear(m.routes)
+		}
+		m.routes[string(msg.Pub)] = route{n, time.Now()}
+	}
+	m.mu.Unlock()
+	switch {
+	case !ok:
+	case w != nil:
+		select {
+		case w <- struct{}{}:
+		default:
+		}
+	case origin != nil:
+		origin.send(Msg{Op: "mesh_found", TraceID: msg.TraceID, Pub: msg.Pub})
+	}
+}
+
+// gossipFor: the nodes to tell a mesh peer at ip about, or none once
+// maxGossipBlocks other network blocks were answered within gossipBlockTTL.
+func (m *meshManager) gossipFor(ip string) []string {
+	b := netBlock(ip)
+	m.mu.Lock()
+	now := time.Now()
+	for k, t := range m.gossiped {
+		if now.Sub(t) > gossipBlockTTL {
+			delete(m.gossiped, k)
+		}
+	}
+	_, known := m.gossiped[b]
+	if !known && len(m.gossiped) >= maxGossipBlocks {
+		m.mu.Unlock()
+		return nil
+	}
+	m.gossiped[b] = now
+	m.mu.Unlock()
+	return m.shareable(ip, gossipShare, true)
+}
+
+// lookup asks the mesh whether some other connector hosts pub.
+func (m *meshManager) lookup(pub []byte) bool {
+	return m.ask(Msg{Op: "mesh_lookup", Pub: pub}, pub, maxBroadcastFanout)
+}
+
+// signal carries a client's signal to whichever connector hosts to. That
+// connector answers with mesh_found as a receipt. Without one the signal goes
+// out once more to every neighbour, and if that fails too the client hears
+// "undelivered", so it can retry later instead of waiting for an answer that
+// will never come.
+func (m *meshManager) signal(c *client, from, to, payload []byte) {
+	msg := Msg{Op: "mesh_signal", From: from, To: to, Payload: payload}
+	if m.enabled() && (m.ask(msg, to, maxBroadcastFanout) || m.ask(msg, to, MaxNeighbors)) {
+		return
+	}
+	c.send(Msg{Op: "undelivered", Pub: to})
+}
+
+// ask sends msg under a fresh trace and waits for its mesh_found.
+func (m *meshManager) ask(msg Msg, key []byte, fanout int) bool {
+	id := newTraceID()
+	w := make(chan struct{}, 1)
+	m.mu.Lock()
+	if len(m.neighbors) == 0 { // standalone: nobody to ask, answer now
+		m.mu.Unlock()
+		return false
+	}
+	m.waits[id] = w
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.waits, id)
+		m.mu.Unlock()
+	}()
+	if m.markTraceSeen(id, nil) {
+		return false
+	}
+	msg.TraceID, msg.TTL = id, meshTTL
+	m.relayN(msg, key, fanout)
+	select {
+	case <-w:
+		return true
+	case <-time.After(lookupWait):
+		return false
+	}
+}
+
+// relay forwards a mesh frame about key: to the neighbour that last answered
+// for that key, plus a bounded flood so a lying neighbour cannot swallow it.
+// TTL and the trace ring kill loops.
+func (m *meshManager) relay(msg Msg, key []byte) { m.relayN(msg, key, maxBroadcastFanout) }
+
+func (m *meshManager) relayN(msg Msg, key []byte, fanout int) {
 	if msg.TTL <= 0 || !m.enabled() {
 		return
 	}
 	msg.TTL--
-	if msg.TraceID == "" {
-		msg.TraceID = newTraceID()
-		if m.markTraceSeen(msg.TraceID) {
-			return
-		}
-	}
-
-	msg.Op = "mesh_signal"
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
-	hello := m.helloMsg()
-
 	m.mu.Lock()
-	me := m.publicURL
-	targets := make([]*neighborNode, 0, maxBroadcastFanout)
-	for _, n := range m.neighbors {
-		if len(targets) >= maxBroadcastFanout {
-			break
-		}
-		if time.Since(n.lastSeen) < 2*time.Minute {
-			targets = append(targets, n)
+	defer m.mu.Unlock()
+	var targets []*neighborNode
+	if r, ok := m.routes[string(key)]; ok && time.Since(r.at) < routeTTL && m.neighbors[r.node.url] == r.node {
+		targets = append(targets, r.node)
+	}
+	// active neighbours first, candidates only to fill up
+	limit := len(targets) + fanout
+	for _, wantActive := range []bool{true, false} {
+		for _, n := range m.neighbors {
+			if len(targets) >= limit {
+				break
+			}
+			if active(n) == wantActive && !slices.Contains(targets, n) {
+				targets = append(targets, n)
+			}
 		}
 	}
-	m.mu.Unlock()
-
 	for _, n := range targets {
-		go func(node *neighborNode) {
-			node.mu.Lock()
-			defer node.mu.Unlock()
-			if node.ws == nil {
-				ws, _, err := meshDialer.Dial(node.url, nil)
-				if err != nil {
-					return
-				}
-				node.ws = ws
-				// authenticate the plane before saying anything else
-				ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				if err := ws.WriteJSON(hello); err != nil {
-					ws.Close()
-					node.ws = nil
-					return
-				}
-				_ = ws.WriteJSON(Msg{Op: "ndp_gossip", From: []byte(me)})
-			}
-			node.ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if err := node.ws.WriteMessage(websocket.TextMessage, data); err != nil {
-				node.ws.Close()
-				node.ws = nil
-			}
-		}(n)
+		m.sendLocked(n, data)
 	}
 }

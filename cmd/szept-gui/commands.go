@@ -43,7 +43,7 @@ func init() {
 	commands = []cmdDef{
 		{name: "/pomoc", desc: "spis komend", run: (*ui).cmdHelp},
 		{name: "/help", desc: "command list", run: (*ui).cmdHelp},
-		{name: "/nowy", args: "<nazwa>", desc: "nowa grupa", run: (*ui).cmdNew},
+		{name: "/nowy", args: "<nazwa>", desc: "nowa grupa; nowi członkowie nie widzą wcześniejszej historii", run: (*ui).cmdNew},
 		{name: "/new", args: "<name>", desc: "create group", run: (*ui).cmdNew},
 		{name: "/dm", args: "<znajomy>", desc: "czat na dwoje ze znajomym", run: (*ui).cmdDM},
 		{name: "/kod", desc: "mój kod QR i pole na cudzy", run: func(u *ui, _ string) { u.codePage() }},
@@ -58,7 +58,7 @@ func init() {
 		{name: "/search", args: "<query>", desc: "search chat history", run: needChat((*ui).cmdSearch)},
 		{name: "/kto", desc: "członkowie czatu", run: needChat((*ui).cmdWho)},
 		{name: "/who", desc: "list chat members", run: needChat((*ui).cmdWho)},
-		{name: "/kick", args: "<nazwa>", desc: "usuń członka (rotuje klucz)", run: needChat((*ui).cmdKick)},
+		{name: "/kick", args: "<nazwa|odcisk>", desc: "usuń członka (rotuje klucz)", run: needChat((*ui).cmdKick)},
 		{name: "/rekey", desc: "rotacja klucza — nowa epoka", run: needChat((*ui).cmdRekey)},
 		{name: "/zmien", args: "<nazwa>", desc: "zmień nazwę czatu", run: needChat((*ui).cmdRename)},
 		{name: "/rename", args: "<name>", desc: "rename chat", run: needChat((*ui).cmdRename)},
@@ -126,7 +126,7 @@ func (u *ui) cmdNew(arg string) {
 		u.sysErr("Podaj nazwę: /nowy <nazwa>")
 		return
 	}
-	id, err := u.c.CreateChat(arg)
+	id, err := u.c.CreateChat(arg, true)
 	if err != nil {
 		u.sysErr(err.Error())
 		return
@@ -201,17 +201,26 @@ func (u *ui) cmdKick(ch *core.ChatInfo, arg string) {
 		u.sysErr("Podaj nazwę: /kick <nazwa>")
 		return
 	}
-	for _, m := range ch.Members {
-		if strings.EqualFold(m.Name, arg) {
-			if err := u.c.Kick(ch.ID, m.Pub); err != nil {
-				u.sysErr(err.Error())
-				return
-			}
-			u.sysOK("Usunięto "+m.Name, "Klucz zrotowany — dalszych wiadomości już nie odczyta.")
-			return
+	found := core.FindMembers(ch.Members, arg)
+	switch len(found) {
+	case 0:
+		u.sysErr("Nie ma tu nikogo o nazwie „" + arg + "”. Lista: /kto")
+		return
+	case 1:
+	default:
+		var b strings.Builder
+		for _, m := range found {
+			b.WriteString(m.Name + "  " + identity.Fingerprint(m.Pub) + "\n")
 		}
+		u.sysErr("Kilka osób nazywa się „" + arg + "”. Nikogo nie usunięto. Podaj odcisk: /kick <odcisk>\n" + strings.TrimRight(b.String(), "\n"))
+		return
 	}
-	u.sysErr("Nie ma tu nikogo o nazwie „" + arg + "”. Lista: /kto")
+	m := found[0]
+	if err := u.c.Kick(ch.ID, m.Pub); err != nil {
+		u.sysErr(err.Error())
+		return
+	}
+	u.sysOK("Usunięto "+m.Name, "Klucz zrotowany — dalszych wiadomości już nie odczyta.")
 }
 
 func (u *ui) cmdRekey(ch *core.ChatInfo, _ string) {

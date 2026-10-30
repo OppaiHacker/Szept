@@ -195,7 +195,7 @@ func (m *model) exec(line string) tea.Cmd {
 	ch := m.curChat()
 	switch parts[0] {
 	case "/pomoc", "/help":
-		m.log("/nowy <nazwa> · /dm <znajomy> · /zapros · /dolacz <kod> <pin> · /znajomy <kod> · /mojkod · /kto · /kick <nazwa> · /rekey · /zmien <nazwa> · /connector <adres> · /call · /rozlacz · /mic · /cam · /ekran · /quit")
+		m.log("/nowy <nazwa> · /dm <znajomy> · /zapros · /dolacz <kod> <pin> · /znajomy <kod> · /mojkod · /kto · /kick <nazwa|odcisk> · /rekey · /zmien <nazwa> · /connector <adres> · /call · /rozlacz · /mic · /cam · /ekran · /quit")
 		m.log("/wyslij <ścieżka> [podpis] · /zapisz <nr> · /szukaj <fraza> · /r <nr> <emoji> · /usun <nr> (u wszystkich) · /ukryj <nr> (u siebie) · /awatar <ścieżka>")
 	case "/szukaj", "/search":
 		if ch == nil || arg == "" {
@@ -269,10 +269,10 @@ func (m *model) exec(line string) tea.Cmd {
 			m.logErr("podaj nazwę grupy")
 			break
 		}
-		if _, err := m.c.CreateChat(arg); err != nil {
+		if _, err := m.c.CreateChat(arg, true); err != nil {
 			m.logErr(err.Error())
 		} else {
-			m.log("utworzono grupę „" + arg + "”")
+			m.log("utworzono grupę „" + arg + "” (nowi członkowie bez wcześniejszej historii)")
 		}
 	case "/dm":
 		fs, _ := m.c.St.Friends()
@@ -415,18 +415,18 @@ func (m *model) exec(line string) tea.Cmd {
 		}
 	case "/kick":
 		if ch == nil || arg == "" {
-			m.logErr("użycie: /kick <nazwa>")
+			m.logErr("użycie: /kick <nazwa|odcisk>")
 			break
 		}
-		for _, mem := range ch.Members {
-			if strings.EqualFold(mem.Name, arg) {
-				if err := m.c.Kick(ch.ID, mem.Pub); err != nil {
-					m.logErr(err.Error())
-				} else {
-					m.log("usunięto " + mem.Name + " + rotacja klucza")
-				}
-				break
-			}
+		found := core.FindMembers(ch.Members, arg)
+		if len(found) != 1 {
+			m.logErr(fmt.Sprintf("„%s” pasuje do %d osób, nikogo nie usunięto. Użyj odcisku z /kto", arg, len(found)))
+			break
+		}
+		if err := m.c.Kick(ch.ID, found[0].Pub); err != nil {
+			m.logErr(err.Error())
+		} else {
+			m.log("usunięto " + found[0].Name + " + rotacja klucza")
 		}
 	case "/rekey":
 		if ch == nil {
@@ -729,6 +729,10 @@ func halfblocks(img image.Image, cols int) string {
 		cols = 16
 	}
 	b := img.Bounds()
+	// a GIF whose header says 5x5 can decode to a 0-wide first frame
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return ""
+	}
 	rows := b.Dy() * cols / b.Dx() / 2
 	if rows < 4 {
 		rows = 4

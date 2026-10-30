@@ -303,7 +303,7 @@ function renderGate() {
               <input class="input" id="g-name" value="${esc(b.profile)}" placeholder="np. ala"></div>
             <div class="field"><label>Connector</label>
               <input class="input" id="g-conn" value="${esc(b.connector)}" placeholder="ws://twoj-vps:7777"></div>
-            <div class="field"><label>Hasło klucza <span style="text-transform:none;color:var(--faint)">(opcjonalne)</span></label>
+            <div class="field"><label>Hasło klucza <span style="text-transform:none;color:var(--faint)">(zalecane)</span></label>
               <input class="input" id="g-pass" type="password" placeholder="•••••"></div>
             <p class="hint-text" style="padding:0 16px">Connector to lekki serwer spotkań — sam nie widzi treści rozmów.</p>
             <p class="hint-text err" style="padding:0 16px">Bez hasła klucz i cała historia rozmów leżą na dysku bez szyfrowania — kto ma dostęp do urządzenia, przeczyta wszystko.</p>
@@ -637,10 +637,42 @@ function buildConv() {
   wireMsgScroll($("#msgs"));
 }
 
+// What a relay operator can and cannot do. Shown when you turn relay-only on,
+// and when a link — yours or the other side's choice — runs through a relay.
+const RELAY_FACTS = `
+  <p>Połączenie idzie przez przekaźnik (TURN) connectora, a nie bezpośrednio między wami.</p>
+  <ul class="relay-facts">
+    <li><b>Operator connectora widzi</b>, kto z kim rozmawia, kiedy, jak długo i ile danych przesyłacie. Może to zapisywać.</li>
+    <li><b>Może zablokować albo zepsuć połączenie</b> w dowolnej chwili.</li>
+    <li>Connector może postawić każdy, także cenzor albo policja. Jeśli nie wiesz, kto prowadzi Twój connector, zakładaj, że te dane trafiają do wroga.</li>
+    <li><b>Nie widzi treści</b>: wiadomości, pliki i rozmowy głosowe są szyfrowane end-to-end między wami. Nagrany ruch to dla niego szum, a klucze nie przechodzą przez connector.</li>
+  </ul>`;
+
+const relayWarned = new Set(); // pubs we already told you about this session
+
+function relayInfo() {
+  return modal({ title: "Rozmowa przez przekaźnik", body: RELAY_FACTS, actions: [{ label: "Rozumiem", kind: "primary", value: true }] });
+}
+
+// Tell once per person and session when a link goes through a relay — also
+// when it was the other side who chose relay-only.
+function warnRelayed(people) {
+  for (const m of people) {
+    if (!m.relay || relayWarned.has(m.pub)) continue;
+    relayWarned.add(m.pub);
+    toast(`Połączenie z ${m.name} idzie przez przekaźnik connectora (${m.relay}). Operator widzi, że rozmawiacie, ale nie treść.`, "warn");
+  }
+}
+
 function updateHead(c) {
-  const sub = c.direct
+  const relayed = c.members.filter((m) => !m.me && m.relay);
+  warnRelayed(relayed);
+  const sub = (c.direct
     ? (c.members.find((m) => !m.me)?.online ? "online" : "offline")
-    : `${c.members.length} osób · ${c.online} online`;
+    : `${c.members.length} osób · ${c.online} online`);
+  const relayTag = relayed.length
+    ? ` · <button class="relay-tag" data-act="relay-info" title="${esc(relayed.map((m) => `${m.name}: ${m.relay}`).join(", "))}">przez przekaźnik</button>`
+    : "";
   // The whole name block is the shortcut everyone reaches for first: the peer's
   // profile in a direct chat, the member list in a group.
   const idAct = c.direct ? `data-act="profile" data-pub="${c.peer}"` : `data-act="members"`;
@@ -651,7 +683,7 @@ function updateHead(c) {
       : avatar("", c.name, c.id, "sq")}
       <div class="titles">
         <div class="t">${esc(c.name)}</div>
-        <div class="s">${esc(sub)}${c.hidden ? ` · <em>${c.hidden} schowanych</em>` : ""}</div>
+        <div class="s">${esc(sub)}${relayTag}${c.hidden ? ` · <em>${c.hidden} schowanych</em>` : ""}</div>
       </div>
     </div>
     <button class="icon-btn" data-act="search-chat" title="Szukaj">${icon("search")}</button>
@@ -862,9 +894,18 @@ function cmdHelp() {
 }
 
 async function cmdNew(arg) {
-  const name = arg || await promptBox({ title: "Nowa grupa", label: "Nazwa", placeholder: "np. ekipa", ok: "Załóż" });
-  if (!name) return;
-  try { openChat(await api("CreateGroup", name)); } catch (e) { fail(e); }
+  const r = await modal({
+    title: "Nowa grupa",
+    body: `<div class="field"><label>Nazwa</label><input class="input" id="pv" value="${esc(arg || "")}" placeholder="np. ekipa"></div>
+      <label class="check-line"><input type="checkbox" id="ph"> Nowi członkowie widzą wcześniejszą historię</label>
+      <p class="hint-text">Bez tego nowa osoba widzi tylko to, co napisano po jej dołączeniu: dostaje klucze od momentu wejścia, a Ty po każdym dodaniu kogoś zmieniasz klucz automatycznie.</p>`,
+    actions: [
+      { label: "Anuluj", kind: "ghost", value: null },
+      { label: "Załóż", kind: "primary", get value() { return { name: $("#pv").value.trim(), history: $("#ph").checked }; } },
+    ],
+  });
+  if (!r || !r.name) return;
+  try { openChat(await api("CreateGroup", r.name, r.history)); } catch (e) { fail(e); }
 }
 
 async function cmdDM(arg) {
@@ -1387,6 +1428,12 @@ function settingsBody() {
         <div class="btn-row"><button class="btn primary" data-act="save-conn">Zapisz i połącz</button></div>
       </div>
       <div class="block">
+        <div class="toggle"><div class="tx"><b>Ukryj mój adres IP</b><span>połączenia idą tylko przez przekaźnik connectora, rozmówcy widzą jego adres zamiast twojego. Wolniej. ${me.connRelay ? "Ten connector ma przekaźnik." : "Ten connector nie ma przekaźnika — z włączoną opcją nie połączysz się z nikim."}</span></div>
+          <button class="switch ${s.relayOnly ? "on" : ""}" data-act="toggle-relay"></button></div>
+        <div class="toggle"><div class="tx"><b>Ukryj listę kontaktów przed connectorem</b><span>Normalnie aplikacja co 30 s pyta connector o każdy kontakt, więc connector zna całą Twoją listę kontaktów. Z tą opcją pyta tylko o osoby z czatów otwartych albo używanych w ostatnich 15 minutach. Kropki obecności pozostałych kontaktów nie będą aktualne.</span></div>
+          <button class="switch ${s.quietLookup ? "on" : ""}" data-act="toggle-quiet"></button></div>
+      </div>
+      <div class="block">
         <h4>Zapisane adresy</h4>
         ${s.connectors.length
           ? s.connectors.map((c) => `<div class="list-line"><span class="mono">${esc(c)}</span>
@@ -1470,7 +1517,7 @@ function settingsBody() {
       </div>`;
 
     case "security": return `
-      <h2>Hasło i kopia</h2><p class="lead">Baza jest szyfrowana kluczem wyprowadzonym z seeda, a seed chroni hasło tożsamości.</p>
+      <h2>Hasło i kopia</h2><p class="lead">Baza jest szyfrowana losowym kluczem, który chroni hasło. Zmiana hasła losuje nowy klucz i przepisuje bazę.</p>
       <div class="block">
         <h4>Hasło klucza</h4>
         <div class="field"><label>Stare hasło</label><input class="input" id="p-old" type="password" placeholder="(puste jeśli nie było)"></div>
@@ -1609,6 +1656,7 @@ async function refresh() {
   refreshing = true;
   try {
     S.snap = await api("Snapshot");
+    warnRelayed(S.snap.friends);
     await refreshConv();
     paint();
   } catch (e) {
@@ -1658,8 +1706,16 @@ function paint() {
 const HANDLERS = {
   /* gate */
   "do-setup": async () => {
+    const pass = $("#g-pass").value;
+    // seizure of the device is in the threat model: no password has to be a
+    // deliberate choice, never a skipped field
+    if (!pass && !(await confirmBox("Bez hasła?",
+      "Każdy, kto weźmie to urządzenie (policja na granicy, złodziej, ktoś z domowników), przeczyta cały klucz i całą historię rozmów. Hasło szyfruje jedno i drugie. Kontynuować bez hasła?"))) {
+      $("#g-pass").focus();
+      return;
+    }
     try {
-      await api("Setup", $("#g-name").value, $("#g-conn").value, $("#g-pass").value);
+      await api("Setup", $("#g-name").value, $("#g-conn").value, pass);
       await boot();
     } catch (e) { gateError(errText(e)); }
   },
@@ -1812,7 +1868,7 @@ const HANDLERS = {
   "del-conn": (el) => saveSettings({ connectors: S.settings.connectors.filter((c) => c !== el.dataset.v) }),
   "add-list": () => {
     const v = $("#s-newlist").value.trim();
-    if (!/^https?:\/\//.test(v)) return toast("Adres listy musi zaczynać się od http(s)://", "err");
+    if (!/^https:\/\//.test(v)) return toast("Adres listy musi zaczynać się od https://", "err");
     saveSettings({ connectorLists: [...new Set([...S.settings.connectorLists, v])] });
   },
   "del-list": (el) => saveSettings({ connectorLists: S.settings.connectorLists.filter((c) => c !== el.dataset.v) }),
@@ -1825,6 +1881,21 @@ const HANDLERS = {
     lang: $("#s-lang")?.value ?? S.settings.lang,
   }),
   "toggle-notify": () => saveSettings({ noNotify: !S.settings.noNotify }),
+  "toggle-relay": async () => {
+    if (S.settings.relayOnly) return saveSettings({ relayOnly: false });
+    const ok = await modal({
+      title: "Ukryć Twój adres IP?",
+      body: `<p>Rozmówcy zobaczą adres connectora zamiast Twojego. W zamian wszystko, co robisz, przechodzi przez connector.</p>${RELAY_FACTS}
+        <p>Każdy Twój rozmówca dostanie informację, że łączycie się przez przekaźnik. Rozmowy będą wolniejsze, a gdy connector nie ma przekaźnika, nie połączysz się z nikim.</p>`,
+      actions: [
+        { label: "Anuluj", kind: "ghost", value: false },
+        { label: "Rozumiem, włącz", kind: "danger", value: true },
+      ],
+    });
+    if (ok) saveSettings({ relayOnly: true });
+  },
+  "toggle-quiet": () => saveSettings({ quietLookup: !S.settings.quietLookup }),
+  "relay-info": () => relayInfo(),
   theme: (el) => { setTheme(el.dataset.v); renderSettings(); },
   accent: (el) => { applyAccent(el.dataset.v); saveSettings({ accent: el.dataset.v }); },
   "save-accent": () => {

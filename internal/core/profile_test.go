@@ -13,7 +13,7 @@ import (
 // musi wylądować i w indeksie, i w zwiniętym stanie członka.
 func TestProfileCard(t *testing.T) {
 	c := newCore(t, "ala", "ws://127.0.0.1:9/")
-	chat, err := c.CreateChat("ekipa")
+	chat, err := c.CreateChat("ekipa", false)
 	if err != nil {
 		t.Fatal(err)
 	}

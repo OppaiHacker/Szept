@@ -23,7 +23,8 @@ func encodeJPEG(img image.Image, maxW int, quality int) []byte {
 	if b.Dx() > maxW {
 		h := b.Dy() * maxW / b.Dx()
 		dst := image.NewRGBA(image.Rect(0, 0, maxW, h))
-		xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
+		// Src, not Over: the frame is opaque, and Over blends every pixel
+		xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
 		img = dst
 	}
 	var out bytes.Buffer
@@ -108,40 +109,7 @@ func startFFmpegCamera(device string, cb func([]byte)) (func(), error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	go func() {
-		r := bufio.NewReaderSize(out, 1<<20)
-		var frame []byte
-		in := false
-		for {
-			b, err := r.ReadByte()
-			if err != nil {
-				return
-			}
-			if !in {
-				if b == 0xFF {
-					nb, err := r.ReadByte()
-					if err != nil {
-						return
-					}
-					if nb == 0xD8 { // SOI
-						frame = append(frame[:0], 0xFF, 0xD8)
-						in = true
-					}
-				}
-				continue
-			}
-			frame = append(frame, b)
-			if b == 0xD9 && len(frame) > 2 && frame[len(frame)-2] == 0xFF { // EOI
-				cp := make([]byte, len(frame))
-				copy(cp, frame)
-				cb(cp)
-				in = false
-			}
-			if len(frame) > 4<<20 { // runaway, resync
-				in = false
-			}
-		}
-	}()
+	go func() { splitJPEG(bufio.NewReaderSize(out, 1<<20), cb) }()
 	stopped := make(chan struct{})
 	go func() { cmd.Wait(); close(stopped) }()
 	return func() {
@@ -154,3 +122,34 @@ func startFFmpegCamera(device string, cb func([]byte)) (func(), error) {
 }
 
 var _ = io.Discard
+
+// splitJPEG cuts an MJPEG stream into frames (SOI FF D8 .. EOI FF D9). It
+// reads up to each 0xD9 in one call instead of a byte at a time.
+func splitJPEG(r *bufio.Reader, cb func([]byte)) {
+	soi := []byte{0xFF, 0xD8}
+	var frame []byte
+	for {
+		chunk, err := r.ReadSlice(0xD9)
+		frame = append(frame, chunk...)
+		if err != nil && err != bufio.ErrBufferFull {
+			return
+		}
+		if len(frame) > 4<<20 { // runaway, resync
+			frame = frame[:0]
+			continue
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		at := bytes.Index(frame, soi)
+		if at < 0 {
+			frame = frame[:0]
+			continue
+		}
+		frame = frame[:copy(frame, frame[at:])]
+		if len(frame) >= 4 && frame[len(frame)-2] == 0xFF { // EOI
+			cb(bytes.Clone(frame))
+			frame = frame[:0]
+		}
+	}
+}

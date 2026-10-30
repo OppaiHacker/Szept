@@ -25,3 +25,7 @@ bin/
 *.md
 !/README.md
 !/SECURITY.md
+
+# connector state (secret path, Let's Encrypt cache)
+connector.path
+autocert/

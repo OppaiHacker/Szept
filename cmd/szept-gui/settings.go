@@ -162,10 +162,50 @@ func (u *ui) connectorsPage() {
 
 	reopen := func() { u.popPage(); u.connectorsPage() }
 
+	var relay *widget.Check
+	setRelay := func(on bool) {
+		u.cfg.RelayOnly = on
+		u.saveCfg()
+		u.c.SetRelayOnly(on)
+	}
+	relay = widget.NewCheck("Ukryj mój adres IP", func(on bool) {
+		if !on || u.cfg.RelayOnly {
+			setRelay(on)
+			return
+		}
+		relay.SetChecked(false) // stays off unless the warning is accepted
+		dialog.NewCustomConfirm("Ukryć Twój adres IP?", "Rozumiem, włącz", "Anuluj",
+			u.dlgBody("Rozmówcy zobaczą adres connectora zamiast Twojego. W zamian wszystko, co robisz, przechodzi przez connector.\n\n"+
+				relayFacts+"\n\nKażdy Twój rozmówca dostanie informację, że łączycie się przez przekaźnik. "+
+				"Rozmowy będą wolniejsze, a gdy connector nie ma przekaźnika, nie połączysz się z nikim."),
+			func(ok bool) {
+				if ok {
+					setRelay(true)
+					relay.SetChecked(true)
+				}
+			}, u.w).Show()
+	})
+	relay.Checked = u.cfg.RelayOnly
+	relayHint := "Połączenia idą tylko przez przekaźnik connectora, rozmówcy widzą jego adres zamiast twojego. Wolniej. "
+	if u.c.ConnRelay() {
+		relayHint += "Ten connector ma przekaźnik."
+	} else {
+		relayHint += "Ten connector nie ma przekaźnika — z włączoną opcją nie połączysz się z nikim."
+	}
+
+	quiet := widget.NewCheck("Ukryj listę kontaktów przed connectorem", func(on bool) {
+		u.cfg.QuietLookup = on
+		u.saveCfg()
+		u.c.SetQuietLookup(on)
+	})
+	quiet.Checked = u.cfg.QuietLookup
+
 	rows := container.NewVBox(
 		widget.NewLabelWithStyle("Aktywny connector", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		active, saveActive,
 		mutedWrap("Stan: "+u.connState()),
+		relay, mutedWrap(relayHint),
+		quiet, mutedWrap("Normalnie aplikacja co 30 s pyta connector o każdy kontakt, więc connector zna całą Twoją listę kontaktów. Z tą opcją pyta tylko o osoby z czatów otwartych albo używanych w ostatnich 15 minutach. Kropki obecności pozostałych kontaktów nie będą aktualne."),
 		vspace(6), section("ZAPISANE"),
 	)
 	for _, cn := range u.cfg.Connectors {
@@ -219,8 +259,8 @@ func (u *ui) connectorsPage() {
 	rows.Add(container.NewBorder(nil, nil, nil,
 		widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 			url := strings.TrimSpace(newL.Text)
-			if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-				u.fail(fmt.Errorf("adres listy musi zaczynać się od http(s)://"))
+			if !strings.HasPrefix(url, "https://") {
+				u.fail(fmt.Errorf("adres listy musi zaczynać się od https://"))
 				return
 			}
 			u.cfg.ConnectorLists = boot.AppendUnique(u.cfg.ConnectorLists, url)
@@ -324,7 +364,7 @@ func (u *ui) passPage() {
 			u.fail(fmt.Errorf("nowe hasła się różnią"))
 			return
 		}
-		if err := boot.ChangePass(u.cfg.DataDir, []byte(old.Text), []byte(new1.Text)); err != nil {
+		if err := boot.ChangePass(u.cfg.DataDir, []byte(old.Text), []byte(new1.Text), u.c.St.Rekey); err != nil {
 			u.fail(err)
 			return
 		}
@@ -335,8 +375,8 @@ func (u *ui) passPage() {
 		section("HASŁO SZYFROWANIA"),
 		old, new1, new2, change,
 		mutedWrap("Hasło chroni klucz tożsamości (argon2id → XChaCha20-Poly1305). "+
-			"Baza danych jest szyfrowana kluczem wyprowadzonym z seeda tożsamości, "+
-			"więc zmiana hasła obejmuje ją automatycznie — bez przepisywania bazy. "+
+			"Baza danych jest szyfrowana osobnym losowym kluczem, trzymanym w tym samym pliku. "+
+			"Zmiana hasła losuje nowy klucz i przepisuje bazę, więc stara kopia pliku ze starym hasłem jej nie otworzy. "+
 			"Puste nowe hasło = brak hasła przy starcie."),
 		vspace(8), section("CO JEST CZYM"),
 		mutedWrap("Wiadomości: XChaCha20-Poly1305 kluczami epok czatu. "+
@@ -589,9 +629,6 @@ func (u *ui) botsPage() {
 	if u.cfg.WebhookPort == 0 {
 		u.cfg.WebhookPort = 7780
 	}
-	if u.cfg.WebhookToken == "" {
-		u.cfg.WebhookToken = core.NewWebhookToken()
-	}
 	port := widget.NewEntry()
 	port.SetText(fmt.Sprint(u.cfg.WebhookPort))
 
@@ -600,7 +637,7 @@ func (u *ui) botsPage() {
 		fmt.Sscan(port.Text, &u.cfg.WebhookPort)
 		u.saveCfg()
 		if on {
-			if err := u.c.StartWebhook(u.cfg.WebhookPort, u.cfg.WebhookToken); err != nil {
+			if err := u.c.StartWebhook(u.cfg.WebhookPort, u.c.WebhookToken()); err != nil {
 				u.fail(err)
 				return
 			}
@@ -613,16 +650,18 @@ func (u *ui) botsPage() {
 	enable.Checked = u.c.WebhookOn()
 
 	tok := widget.NewEntry()
-	tok.SetText(u.cfg.WebhookToken)
+	tok.SetText(u.c.WebhookToken())
 	tok.Disable()
 	copyTok := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-		u.w.Clipboard().SetContent(u.cfg.WebhookToken)
+		u.w.Clipboard().SetContent(u.c.WebhookToken())
 		u.toast("Token w schowku")
 	})
 	regen := widget.NewButtonWithIcon("Nowy token", theme.ViewRefreshIcon(), func() {
-		u.cfg.WebhookToken = core.NewWebhookToken()
-		tok.SetText(u.cfg.WebhookToken)
-		u.saveCfg()
+		if err := u.c.SetWebhookToken(core.NewWebhookToken()); err != nil {
+			u.fail(err)
+			return
+		}
+		tok.SetText(u.c.WebhookToken())
 		if u.c.WebhookOn() {
 			apply(true) // przeładuj nasłuch ze świeżym tokenem
 		}

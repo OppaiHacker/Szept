@@ -286,12 +286,18 @@ func (u *ui) bannerPage() {
 	set := func(data []byte) {
 		u.cropDlg("Kadr baneru", data, attach.BannerW, attach.BannerH, false,
 			func(crop image.Rectangle) {
-				if err := u.c.SetBanner(data, crop); err != nil {
-					u.fail(err)
-					return
-				}
-				redraw()
-				u.toast("Baner zmieniony")
+				// an animated banner is dithered frame by frame: off the UI thread
+				go func() {
+					err := u.c.SetBanner(data, crop)
+					fyne.Do(func() {
+						if err != nil {
+							u.fail(err)
+							return
+						}
+						redraw()
+						u.toast("Baner zmieniony")
+					})
+				}()
 			})
 	}
 	pickSys := bigButton("Wybierz z galerii", theme.FolderOpenIcon(), func() {
@@ -335,12 +341,17 @@ func (u *ui) avatarPage() {
 	}
 	set := func(data []byte) {
 		u.cropDlg("Kadr awatara", data, 1, 1, true, func(crop image.Rectangle) {
-			if err := u.c.SetAvatar(data, crop); err != nil {
-				u.fail(err)
-				return
-			}
-			redraw()
-			u.toast("Awatar zmieniony")
+			go func() { // an animated avatar is re-encoded frame by frame too
+				err := u.c.SetAvatar(data, crop)
+				fyne.Do(func() {
+					if err != nil {
+						u.fail(err)
+						return
+					}
+					redraw()
+					u.toast("Awatar zmieniony")
+				})
+			}()
 		})
 	}
 	pickSys := bigButton("Wybierz z galerii", theme.FolderOpenIcon(), func() {

@@ -10,6 +10,10 @@ AAPT2            ?= $(dir $(ZIPALIGN))aapt2
 APKSIGNER        ?= $(dir $(ZIPALIGN))apksigner
 ANDROID_JAR      ?= $(lastword $(sort $(wildcard $(ANDROID_HOME)/platforms/*/android.jar)))
 KEYSTORE         ?= $(HOME)/.android/szept-debug.keystore
+# Release APKs: pass your own keystore, e.g.
+#   make android KEYSTORE=~/keys/szept-release.jks KS_PASS=... KS_ALIAS=szept
+KS_PASS          ?= android
+KS_ALIAS         ?= androiddebugkey
 APKWORK          := $(BIN)/apkres
 WINCC            ?= x86_64-w64-mingw32-gcc
 
@@ -39,7 +43,7 @@ fresh = mkdir -p $(@D) && rm -f $@
 # Build rules are .PHONY on purpose: they list no sources, so without this
 # `make` after a code edit does nothing and keeps the old binary. Go's own
 # build cache is what keeps repeated builds cheap.
-.PHONY: all test clean windows connector-windows android install uninstall \
+.PHONY: all test clean windows connector-windows android install uninstall release \
 	$(NATIVE) $(WINDOWS) $(BIN)/szept-connector.exe $(BIN)/szept.apk
 
 all: $(NATIVE)
@@ -69,6 +73,33 @@ connector-windows: $(BIN)/szept-connector.exe
 $(BIN)/szept-connector.exe:
 	@$(fresh)
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o $@ ./cmd/connector
+
+# Release: reproducible connector binaries for every platform people run one
+# on (servers, Raspberry Pi, OpenWrt routers), plus SHA256SUMS signed with an
+# SSH key. -trimpath, no VCS stamp and an empty build ID make the connector
+# byte-identical for anyone building the same commit with the same Go version
+# (written to GOVERSION, e.g. GOTOOLCHAIN=go1.27.3 make release), so a user
+# can rebuild it and compare hashes. Clients use cgo, so
+# theirs match only with the same C toolchain; build them and the APK
+# separately and put them in $(REL) before signing.
+#   make release SIGNKEY=~/.ssh/szept_release
+# Verify (allowed_signers holds "szept <public key>"):
+#   ssh-keygen -Y verify -f allowed_signers -I szept -n szept-release \
+#     -s SHA256SUMS.sig < SHA256SUMS && sha256sum -c SHA256SUMS
+REL      := $(BIN)/release
+REPRO    := -trimpath -buildvcs=false -ldflags="-s -w -buildid="
+PLATFORMS := linux/amd64 linux/arm64 linux/arm linux/mips linux/mipsle windows/amd64 darwin/arm64
+
+release:
+	rm -rf $(REL) && mkdir -p $(REL)
+	for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; ext=$$([ $$os = windows ] && echo .exe); \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(REPRO) \
+			-o $(REL)/szept-connector-$$os-$$arch$$ext ./cmd/connector || exit 1; \
+	done
+	go version > $(REL)/GOVERSION
+	cd $(REL) && sha256sum GOVERSION szept-* > SHA256SUMS
+	$(if $(SIGNKEY),ssh-keygen -Y sign -f $(SIGNKEY) -n szept-release $(REL)/SHA256SUMS,@echo "SIGNKEY not set: SHA256SUMS left unsigned")
 
 # APK: requires Android SDK+NDK and fyne tool (go install fyne.io/tools/cmd/fyne@latest).
 # Permissions/manifest: cmd/szept-gui/AndroidManifest.xml
@@ -120,8 +151,8 @@ $(BIN)/szept.apk: | $(KEYSTORE)
 	# align first, sign second: apksigner's v2/v3 signatures cover the whole file,
 	# so zipalign afterwards would invalidate them.
 	$(ZIPALIGN) -p -f 4 cmd/szept-gui/szept.apk $@
-	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass pass:android --key-pass pass:android \
-		--ks-key-alias androiddebugkey $@
+	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass pass:$(KS_PASS) --key-pass pass:$(KS_PASS) \
+		--ks-key-alias $(KS_ALIAS) $@
 	rm -rf cmd/szept-gui/szept.apk $@.idsig $(APKWORK)
 
 # Rebuilding the manifest means re-signing, so the APK no longer carries fyne's

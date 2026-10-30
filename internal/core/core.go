@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"math/rand/v2"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -30,7 +32,15 @@ import (
 type Config struct {
 	Connector string   `json:"connector"`
 	STUN      []string `json:"stun,omitempty"`
-	DataDir   string   `json:"-"`
+	// RelayOnly: talk to peers only through the connector's TURN relay, so
+	// contacts never learn our IP. Needs a connector that runs TURN.
+	RelayOnly bool `json:"relay_only,omitempty"`
+	// QuietLookup: ask the connector only about members of chats the user
+	// opened or wrote in recently, instead of every contact every 30 s. The
+	// connector then no longer learns the whole contact list, at the cost of
+	// presence for everyone else.
+	QuietLookup bool   `json:"quiet_lookup,omitempty"`
+	DataDir     string `json:"-"`
 	// MediaDir: directory browsed by built-in gallery (Android doesn't have
 	// single obvious place for photos, and system file picker doesn't
 	// show thumbnail grid).
@@ -38,7 +48,7 @@ type Config struct {
 
 	// Connectors: zapisana lista connectorów do przełączania w ustawieniach.
 	Connectors []string `json:"connectors,omitempty"`
-	// ConnectorLists: adresy HTTP dynamicznych list (tekst, jeden ws:// na
+	// ConnectorLists: adresy HTTPS dynamicznych list (tekst, jeden ws:// na
 	// linię) — „Odśwież” w ustawieniach dopisuje wpisy do Connectors.
 	ConnectorLists []string `json:"connector_lists,omitempty"`
 
@@ -49,9 +59,9 @@ type Config struct {
 
 	Profile string `json:"profile,omitempty"` // aktywne konto (profil), "" = domyślne
 
-	WebhookOn    bool   `json:"webhook_on,omitempty"`
-	WebhookPort  int    `json:"webhook_port,omitempty"`
-	WebhookToken string `json:"webhook_token,omitempty"`
+	WebhookOn   bool `json:"webhook_on,omitempty"`
+	WebhookPort int  `json:"webhook_port,omitempty"`
+	// the webhook token lives in the encrypted database, see WebhookToken
 }
 
 // Ctrl is the JSON message format on the reliable "ctrl" data channel.
@@ -62,6 +72,7 @@ type Ctrl struct {
 	IDs     [][]byte          `json:"ids,omitempty"`
 	Events  [][]byte          `json:"events,omitempty"`
 	Epochs  map[uint32][]byte `json:"epochs,omitempty"`
+	MEpochs map[uint32][]byte `json:"mepochs,omitempty"` // member keys for epochs before a join (no-history chats)
 	Secret  []byte            `json:"secret,omitempty"`
 	Pin     string            `json:"pin,omitempty"` // redeem: one-time PIN
 	Name    string            `json:"name,omitempty"`
@@ -76,6 +87,7 @@ type Ctrl struct {
 	Part  []byte `json:"part,omitempty"`
 	Idx   int    `json:"idx,omitempty"`
 	Total int    `json:"total,omitempty"`
+	Need  []int  `json:"need,omitempty"` // blobreq: only these parts (resume)
 }
 
 type pendingRedeem struct {
@@ -94,7 +106,10 @@ type Core struct {
 
 	mu         sync.Mutex
 	orphans    map[string]map[string]*event.Event // chatKey -> eventID -> event
+	genesis    map[string]*event.Event            // chatKey -> genesis we could not decrypt yet
 	states     map[string]*foldedState            // chatKey -> cached fold (see ChatState)
+	folders    map[string]*event.Folder           // chatKey -> fold behind states (see checkout)
+	foldGen    map[string]uint64
 	redeem     *pendingRedeem
 	calls      map[string]*Call
 	listeners  []chan struct{}
@@ -104,6 +119,7 @@ type Core struct {
 	assemblers map[string]map[uint32]*assembly // peer+label -> frame -> video parts
 	typing     map[string]map[string]time.Time // chatKey -> pubKeyStr -> lastTyping
 	acks       map[string]map[string]string    // eventIDStr -> pubKeyStr -> status ("delivered"|"read")
+	active     map[string]time.Time            // chatKey -> last opened or written (QuietLookup)
 
 	// media hooks (set by calls.go / UIs)
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
@@ -113,7 +129,6 @@ type Core struct {
 	stopCam      func()
 	stopScreen   func()
 	webhook      *http.Server
-	tempDir      string // per-session scratch for externally opened attachments
 }
 
 const langKey = "lang"
@@ -133,23 +148,30 @@ func Open(cfg Config, id *identity.Identity) (*Core, error) {
 	c := &Core{
 		ID: id, St: st, Conn: conn, Cfg: cfg,
 		orphans:    map[string]map[string]*event.Event{},
+		genesis:    map[string]*event.Event{},
 		states:     map[string]*foldedState{},
+		folders:    map[string]*event.Folder{},
+		foldGen:    map[string]uint64{},
 		calls:      map[string]*Call{},
 		wants:      map[string]*blobWant{},
 		incoming:   map[string]*blobAsm{},
 		serving:    map[string]int{},
 		assemblers: map[string]map[uint32]*assembly{},
 		typing:     map[string]map[string]time.Time{},
+		active:     map[string]time.Time{},
 		acks:       map[string]map[string]string{},
 	}
 	c.P2P = p2p.NewManager(id.Priv, conn, cfg.STUN)
+	c.P2P.SetRelayOnly(cfg.RelayOnly)
 	c.P2P.Accept = c.acceptPeer
+	c.P2P.Ticket = c.inviteTicket
 	c.P2P.OnPeerUp = c.onPeerUp
 	c.P2P.OnPeerDown = func(pub []byte) { c.onPeerDown(pub) }
 	c.P2P.OnCtrl = c.onCtrl
 	c.P2P.OnMedia = c.onMedia
 	conn.OnUp = func() { c.connectAll(); c.Notify() }
 	conn.OnDown = c.Notify
+	c.cleanTempDir() // plaintext a crash left behind
 	return c, nil
 }
 
@@ -168,6 +190,18 @@ func (c *Core) ConnErr() string { return c.conn().LastErr() }
 
 // SetConnector switches to a new connector URL live: new client, rewired
 // callbacks, old session closed. Persisting the URL is the caller's job.
+// SetRelayOnly: route every new peer connection through the connector's TURN
+// relay (contacts see the connector's IP, not ours).
+func (c *Core) SetRelayOnly(on bool) {
+	c.mu.Lock()
+	c.Cfg.RelayOnly = on
+	c.mu.Unlock()
+	c.P2P.SetRelayOnly(on)
+}
+
+// ConnRelay reports whether the current connector offers a TURN relay.
+func (c *Core) ConnRelay() bool { return c.conn().ICE() != nil }
+
 func (c *Core) SetConnector(url string) {
 	old := c.conn()
 	if old.URL == url {
@@ -232,7 +266,7 @@ func (c *Core) Notify() {
 
 // ---- trust boundary ----
 
-func (c *Core) acceptPeer(pub []byte) bool {
+func (c *Core) acceptPeer(pub, ticket []byte) bool {
 	if c.St.IsFriend(pub) {
 		return true
 	}
@@ -249,10 +283,22 @@ func (c *Core) acceptPeer(pub []byte) bool {
 		}
 	}
 	// holder of a fresh invite we issued: we can't know the pub in advance,
-	// so invites also allow inbound: anyone may connect IF we have any unused,
-	// unexpired invite outstanding; the redeem secret+PIN gate membership.
-	// Leaks "some invite exists" to strangers; acceptable.
-	return c.St.OpenInviteCount() > 0
+	// so the offer carries the hash of the invite secret. Without it a
+	// stranger gets nothing, not even our ICE candidates (IP). Secret+PIN
+	// still gate membership in handleRedeem.
+	return len(ticket) == sha256.Size && c.St.InviteOpen(ticket)
+}
+
+// inviteTicket: offers to the inviter of a pending redeem carry the secret hash.
+func (c *Core) inviteTicket(pub []byte) []byte {
+	c.mu.Lock()
+	r := c.redeem
+	c.mu.Unlock()
+	if r == nil || !bytes.Equal(r.Inviter, pub) {
+		return nil
+	}
+	h := sha256.Sum256(r.Secret)
+	return h[:]
 }
 
 // ---- chats ----
@@ -273,11 +319,106 @@ type foldedState struct {
 	err error
 }
 
-// invalidate: call after writing an event or epoch key for this chat.
+// invalidate: call after writing an epoch key for this chat (or anything else
+// that a cached fold cannot see).
 func (c *Core) invalidate(chat []byte) {
 	c.mu.Lock()
 	delete(c.states, string(chat))
+	delete(c.folders, string(chat))
+	c.foldGen[string(chat)]++
 	c.mu.Unlock()
+}
+
+// Cached folds. folders holds the Folder behind states, advanced to the last
+// stored event, so a new event is validated by applying just that event
+// instead of decrypting and replaying the whole history (the old O(N) per
+// event, O(N²) per sync). foldGen bumps on every publish and invalidation: a
+// fold built from an older snapshot (a concurrent ingest got there first) is
+// dropped instead of overwriting a newer one.
+
+// checkout takes the cached Folder for exclusive use. Apply mutates it, so
+// it leaves the cache until publish puts a successor back.
+func (c *Core) checkout(chat []byte) (*event.Folder, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	f := c.folders[string(chat)]
+	delete(c.folders, string(chat))
+	return f, c.foldGen[string(chat)]
+}
+
+// publish returns a read-only copy of f's state for the caller.
+func (c *Core) publish(chat []byte, gen uint64, f *event.Folder, err error) *event.State {
+	if err != nil {
+		f = nil
+	}
+	var st *event.State
+	if f != nil {
+		st = f.St.Clone() // readers keep it; Apply must not touch it
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := string(chat)
+	if c.foldGen[k] != gen {
+		delete(c.states, k)
+		delete(c.folders, k)
+		c.foldGen[k]++
+		return st
+	}
+	c.foldGen[k]++
+	if f == nil {
+		c.states[k] = &foldedState{err: err}
+		return nil
+	}
+	c.folders[k] = f
+	c.states[k] = &foldedState{st: st}
+	return st
+}
+
+// foldWith validates e against the chat's stored history and returns the
+// Folder with e applied: one Apply when e sorts after the cached fold, a full
+// replay otherwise. A rejected e leaves a cached Folder as it was, and
+// foldWith hands it back to the cache.
+func (c *Core) foldWith(chat []byte, f *event.Folder, gen uint64, e *event.Event, keys, mkeys map[uint32][]byte) (*event.Folder, error) {
+	if f != nil && f.SameKeys(keys, mkeys) && f.After(e) {
+		if err := f.Apply(e); err != nil {
+			c.putBack(chat, gen, f)
+			return nil, err
+		}
+		return f, nil
+	}
+	return c.fullFold(chat, e, keys, mkeys)
+}
+
+// putBack returns an unchanged Folder to the cache.
+func (c *Core) putBack(chat []byte, gen uint64, f *event.Folder) {
+	c.mu.Lock()
+	if c.foldGen[string(chat)] == gen {
+		c.folders[string(chat)] = f
+	}
+	c.mu.Unlock()
+}
+
+// fullFold replays the stored history, plus extra if given.
+func (c *Core) fullFold(chat []byte, extra *event.Event, keys, mkeys map[uint32][]byte) (*event.Folder, error) {
+	evs, err := c.St.Events(chat)
+	if err != nil {
+		return nil, err
+	}
+	if extra != nil {
+		evs = append(evs, extra)
+	}
+	event.SortCanonical(evs)
+	// FoldTrusted semantics: everything stored passed ingest's checks
+	f := event.NewFolder(chat, keys, mkeys, false)
+	for _, e := range evs {
+		if err := f.Apply(e); err != nil {
+			return nil, err
+		}
+	}
+	if len(f.St.Owner) == 0 {
+		return nil, errors.New("no genesis event")
+	}
+	return f, nil
 }
 
 // ChatState returns folded state of chat. Result is read-only — shared by
@@ -290,27 +431,26 @@ func (c *Core) invalidate(chat []byte) {
 func (c *Core) ChatState(chat []byte) (*event.State, error) {
 	c.mu.Lock()
 	cached := c.states[string(chat)]
+	gen := c.foldGen[string(chat)]
 	c.mu.Unlock()
 	if cached != nil {
 		return cached.st, cached.err
 	}
-	st, err := c.foldChat(chat)
-	c.mu.Lock()
-	c.states[string(chat)] = &foldedState{st: st, err: err}
-	c.mu.Unlock()
-	return st, err
+	keys, mkeys, err := c.chatKeys(chat)
+	if err != nil {
+		return nil, err
+	}
+	f, err := c.fullFold(chat, nil, keys, mkeys)
+	return c.publish(chat, gen, f, err), err
 }
 
-func (c *Core) foldChat(chat []byte) (*event.State, error) {
-	evs, err := c.St.Events(chat)
-	if err != nil {
-		return nil, err
+// chatKeys: content keys, and member keys held for epochs without one.
+func (c *Core) chatKeys(chat []byte) (keys, mkeys map[uint32][]byte, err error) {
+	if keys, err = c.St.ChatKeys(chat); err != nil {
+		return nil, nil, err
 	}
-	keys, err := c.St.ChatKeys(chat)
-	if err != nil {
-		return nil, err
-	}
-	return event.FoldTrusted(evs, chat, keys)
+	mkeys, err = c.St.MemberKeys(chat)
+	return keys, mkeys, err
 }
 
 type ChatInfo struct {
@@ -384,6 +524,9 @@ func (c *Core) displayName(st *event.State) string {
 	return strings.Join(others, ", ")
 }
 
+// PeerName: friend name, or the key fingerprint for a stranger.
+func (c *Core) PeerName(pub []byte) string { return c.memberName(nil, pub) }
+
 func (c *Core) memberName(st *event.State, pub []byte) string {
 	if bytes.Equal(pub, c.ID.Pub) {
 		return c.ID.Name
@@ -422,7 +565,7 @@ func (c *Core) NickHistory(pub []byte) []NickEntry {
 		if err != nil {
 			continue
 		}
-		keys, _ := c.St.ChatKeys(chat)
+		keys, mkeys, _ := c.chatKeys(chat)
 		event.SortCanonical(evs) // events within one chat in DAG order
 		for _, e := range evs {
 			if e.Kind != event.KindNick && e.Kind != event.KindCreate {
@@ -431,12 +574,8 @@ func (c *Core) NickHistory(pub []byte) []NickEntry {
 			if !bytes.Equal(e.Author, pub) {
 				continue
 			}
-			key, ok := keys[e.Epoch]
+			b, ok := e.Open(keys, mkeys)
 			if !ok {
-				continue
-			}
-			b, err := e.Decrypt(key)
-			if err != nil {
 				continue
 			}
 			name := b.Name
@@ -495,7 +634,7 @@ func (c *Core) Messages(chat []byte) []Msg {
 	if err != nil {
 		return nil
 	}
-	keys, _ := c.St.ChatKeys(chat)
+	keys, mkeys, _ := c.chatKeys(chat)
 	st, errFold := c.ChatState(chat)
 	if errFold != nil {
 		st = &event.State{Members: map[string]*event.Member{}, Reactions: map[string]map[string]string{}, Deleted: map[string]bool{}}
@@ -504,16 +643,13 @@ func (c *Core) Messages(chat []byte) []Msg {
 	hidden := c.St.Hidden(chat)
 	var out []Msg
 	for _, e := range evs {
-		key, ok := keys[e.Epoch]
-		if !ok {
-			continue
-		}
 		id := e.ID()
 		if hidden[string(id)] {
 			continue // hidden locally (soft delete) — bytes remain in DAG
 		}
-		b, err := e.Decrypt(key)
-		if err != nil {
+		// content from before joining a chat without history stays unreadable
+		b, ok := e.Open(keys, mkeys)
+		if !ok {
 			continue
 		}
 		name := c.memberName(st, e.Author)
@@ -557,6 +693,7 @@ func (c *Core) Messages(chat []byte) []Msg {
 // ---- Typing, ACKs, Reactions, Delete, Search ----
 
 func (c *Core) SendTyping(chat []byte, active bool) {
+	c.markActive(chat)
 	st, err := c.ChatState(chat)
 	if err != nil {
 		return
@@ -571,19 +708,22 @@ func (c *Core) SendTyping(chat []byte, active bool) {
 }
 
 func (c *Core) TypingPeers(chat []byte) []string {
+	var pubs []string
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	m := c.typing[string(chat)]
-	if m == nil {
+	now := time.Now()
+	for pubStr, t := range c.typing[string(chat)] {
+		if now.Sub(t) < 4*time.Second {
+			pubs = append(pubs, pubStr)
+		}
+	}
+	c.mu.Unlock()
+	if len(pubs) == 0 {
 		return nil
 	}
-	st, _ := c.foldChat(chat)
+	st, _ := c.ChatState(chat)
 	var names []string
-	now := time.Now()
-	for pubStr, t := range m {
-		if now.Sub(t) < 4*time.Second {
-			names = append(names, c.memberName(st, []byte(pubStr)))
-		}
+	for _, p := range pubs {
+		names = append(names, c.memberName(st, []byte(p)))
 	}
 	return names
 }
@@ -627,6 +767,7 @@ func (c *Core) AckStatus(eventID []byte) string {
 }
 
 func (c *Core) MarkChatRead(chat []byte) {
+	c.markActive(chat)
 	evs, err := c.St.Events(chat)
 	if err != nil {
 		return
@@ -644,7 +785,15 @@ func (c *Core) ReactMsg(chat []byte, targetID []byte, emoji string) error {
 }
 
 func (c *Core) DeleteMsg(chat []byte, targetID []byte) error {
-	_, err := c.appendEvent(chat, event.KindDelete, event.Body{Target: targetID, TS: time.Now().Unix()})
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return err
+	}
+	if t, err := c.St.GetEvent(chat, targetID); err != nil ||
+		!bytes.Equal(t.Author, c.ID.Pub) && !bytes.Equal(st.Owner, c.ID.Pub) {
+		return errors.New("możesz usunąć tylko swoją wiadomość")
+	}
+	_, err = c.appendEvent(chat, event.KindDelete, event.Body{Target: targetID, TS: time.Now().Unix()})
 	return err
 }
 
@@ -765,12 +914,15 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 	if err != nil {
 		return nil, err
 	}
-	keys, err := c.St.ChatKeys(chat)
+	keys, mkeys, err := c.chatKeys(chat)
 	if err != nil {
 		return nil, err
 	}
 	key, ok := keys[st.Epoch]
 	if !ok {
+		if st.NoHistory {
+			return nil, errors.New("czekam na nowy klucz od właściciela czatu")
+		}
 		return nil, fmt.Errorf("brak klucza epoki %d", st.Epoch)
 	}
 	// heads and lamport from single read: Fold requires Lamport = max(parents)+1,
@@ -781,14 +933,16 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 		return nil, err
 	}
 	// validate against the fold before persisting
-	evs, _ := c.St.Events(chat)
-	if _, err := event.FoldTrusted(append(evs, e), chat, keys); err != nil {
+	f, gen := c.checkout(chat)
+	f, err = c.foldWith(chat, f, gen, e, keys, mkeys)
+	if err != nil {
 		return nil, err
 	}
 	if _, err := c.St.AddEvent(chat, e); err != nil {
+		c.invalidate(chat)
 		return nil, err
 	}
-	c.invalidate(chat)
+	c.publish(chat, gen, f, nil)
 	// same bookkeeping as on the receiving side (ingest): an attachment we
 	// authored ourselves must land in the blob-to-chat index too
 	if blobKind(kind) {
@@ -799,13 +953,15 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 	return e, nil
 }
 
-func (c *Core) CreateChat(name string) ([]byte, error) {
+// CreateChat starts a group. noHistory: people added later do not get the
+// content keys from before they joined (see event.State.NoHistory).
+func (c *Core) CreateChat(name string, noHistory bool) ([]byte, error) {
 	key := crypt.NewKey()
-	// Blob = sha256 of the epoch-1 key: the genesis event vouches for the key,
-	// so a peer cannot hand us a different one later (see handleKeys).
-	sum := sha256.Sum256(key)
+	// Blob / MHash = sha256 of the epoch-1 keys: the genesis event vouches for
+	// them, so a peer cannot hand us different ones later (see handleKeys).
+	sum, msum := keySums(key)
 	e, err := event.New(c.ID.Priv, make([]byte, 32), event.KindCreate,
-		event.Body{Name: name, Text: c.ID.Name, Blob: sum[:], TS: time.Now().Unix()}, 1, nil, 1, key)
+		event.Body{Name: name, Text: c.ID.Name, Blob: sum, MHash: msum, NoHist: noHistory, TS: time.Now().Unix()}, 1, nil, 1, key)
 	if err != nil {
 		return nil, err
 	}
@@ -837,7 +993,7 @@ func (c *Core) CreateDirect(friend store.Friend) ([]byte, error) {
 			return []byte(idStr), nil
 		}
 	}
-	chat, err := c.CreateChat("")
+	chat, err := c.CreateChat("", false)
 	if err != nil {
 		return nil, err
 	}
@@ -849,12 +1005,20 @@ func (c *Core) CreateDirect(friend store.Friend) ([]byte, error) {
 }
 
 func (c *Core) Send(chat []byte, text string) error {
+	c.markActive(chat)
 	_, err := c.appendEvent(chat, event.KindMsg, event.Body{Text: text, TS: time.Now().Unix()})
 	return err
 }
 
 func (c *Core) Rename(chat []byte, name string) error {
-	_, err := c.appendEvent(chat, event.KindRename, event.Body{Name: name, TS: time.Now().Unix()})
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(st.Owner, c.ID.Pub) {
+		return errors.New("tylko właściciel może zmienić nazwę czatu")
+	}
+	_, err = c.appendEvent(chat, event.KindRename, event.Body{Name: name, TS: time.Now().Unix()})
 	if err == nil {
 		c.St.PutChat(chat, store.ChatMeta{Name: name})
 	}
@@ -877,7 +1041,7 @@ func (c *Core) Kick(chat []byte, pub []byte) error {
 // (same rule as inbound — acceptPeer).
 func (c *Core) dropUnauthorized() {
 	for _, p := range c.P2P.Peers() {
-		if !c.acceptPeer(p.Pub) {
+		if !c.acceptPeer(p.Pub, nil) {
 			p.Close()
 		}
 	}
@@ -894,9 +1058,9 @@ func (c *Core) Rekey(chat []byte) error {
 	// the rekey event announces sha256 of the key the next epoch will use, so
 	// members can tell the real key from one a peer made up
 	newKey := crypt.NewKey()
-	sum := sha256.Sum256(newKey)
+	sum, msum := keySums(newKey)
 	if _, err := c.appendEvent(chat, event.KindRekey,
-		event.Body{Blob: sum[:], TS: time.Now().Unix()}); err != nil {
+		event.Body{Blob: sum, MHash: msum, TS: time.Now().Unix()}); err != nil {
 		return err
 	}
 	if err := c.St.PutChatKey(chat, st.Epoch+1, newKey); err != nil {
@@ -914,11 +1078,10 @@ func (c *Core) pushKeys(chat []byte, pub []byte) {
 	if err != nil {
 		return
 	}
-	keys, err := c.St.ChatKeys(chat)
+	keys, mkeys, err := c.chatKeys(chat)
 	if err != nil {
 		return
 	}
-	msg := Ctrl{T: "keys", Chat: chat, Epochs: keys}
 	for _, m := range st.Members {
 		if m.Removed || bytes.Equal(m.Pub, c.ID.Pub) {
 			continue
@@ -927,7 +1090,49 @@ func (c *Core) pushKeys(chat []byte, pub []byte) {
 			continue
 		}
 		if p := c.P2P.Peer(m.Pub); p != nil {
-			p.SendCtrl(msg)
+			p.SendCtrl(keysFor(chat, st, m, keys, mkeys))
+		}
+	}
+}
+
+// keysFor: the keys member m may hold. In a chat without history, content
+// keys only from m.JoinEpoch on; member keys (enough to fold membership and
+// profiles) for every epoch.
+func keysFor(chat []byte, st *event.State, m *event.Member, keys, mkeys map[uint32][]byte) Ctrl {
+	msg := Ctrl{T: "keys", Chat: chat, Epochs: keys}
+	if !st.NoHistory {
+		return msg
+	}
+	msg.Epochs, msg.MEpochs = map[uint32][]byte{}, maps.Clone(mkeys)
+	for ep, k := range keys {
+		if ep >= m.JoinEpoch {
+			msg.Epochs[ep] = k
+		} else {
+			msg.MEpochs[ep] = event.MemberKey(k)
+		}
+	}
+	return msg
+}
+
+func keySums(key []byte) (sum, msum []byte) {
+	a, b := sha256.Sum256(key), sha256.Sum256(event.MemberKey(key))
+	return a[:], b[:]
+}
+
+// autoRekey: in a chat without history the owner opens a new epoch after
+// every add, so the newcomer's first content key is one no earlier message
+// used.
+func (c *Core) autoRekey(chat []byte) {
+	st, err := c.ChatState(chat)
+	if err != nil || !st.NoHistory || !bytes.Equal(st.Owner, c.ID.Pub) {
+		return
+	}
+	for _, m := range st.Members {
+		if !m.Removed && m.JoinEpoch > st.Epoch {
+			if err := c.Rekey(chat); err != nil {
+				log.Printf("core: auto rekey: %v", err)
+			}
+			return
 		}
 	}
 }
@@ -963,37 +1168,105 @@ func (c *Core) ensurePeer(pub []byte) {
 	}
 }
 
+// activeFor: with QuietLookup a chat keeps its members looked up for this
+// long after the user last opened or wrote in it.
+const activeFor = 15 * time.Minute
+
+// SetQuietLookup switches QuietLookup (see Config).
+func (c *Core) SetQuietLookup(on bool) {
+	c.mu.Lock()
+	c.Cfg.QuietLookup = on
+	c.mu.Unlock()
+}
+
+// markActive notes that the user is in this chat. With QuietLookup its
+// members are looked up right away instead of at the next round.
+func (c *Core) markActive(chat []byte) {
+	c.mu.Lock()
+	quiet := c.Cfg.QuietLookup
+	stale := time.Since(c.active[string(chat)]) > time.Minute
+	c.active[string(chat)] = time.Now()
+	c.mu.Unlock()
+	if !quiet || !stale {
+		return
+	}
+	go func() {
+		if st, err := c.ChatState(chat); err == nil {
+			for _, m := range st.Members {
+				if !m.Removed {
+					c.ensurePeer(m.Pub)
+				}
+			}
+		}
+	}()
+}
+
+// lookupsPerRound keeps connectAll (every 30 s) under the connector's
+// 60 lookups/min. Past that, a random slice per round: 100 offline contacts
+// are all checked within ~2 min instead of the same 40 failing forever.
+const lookupsPerRound = 25
+
 func (c *Core) connectAll() {
+	for _, pub := range c.lookupTargets() {
+		go c.ensurePeer(pub)
+	}
+}
+
+// lookupTargets: who to ask the connector about this round.
+func (c *Core) lookupTargets() [][]byte {
 	seen := map[string]bool{string(c.ID.Pub): true}
-	if fs, err := c.St.Friends(); err == nil {
-		for _, f := range fs {
-			if !seen[string(f.Pub)] {
-				seen[string(f.Pub)] = true
-				go c.ensurePeer(f.Pub)
+	var want [][]byte
+	add := func(pub []byte) {
+		if !seen[string(pub)] {
+			seen[string(pub)] = true
+			if c.P2P.Peer(pub) == nil {
+				want = append(want, pub)
 			}
 		}
 	}
+	c.mu.Lock()
+	quiet := c.Cfg.QuietLookup
+	active := maps.Clone(c.active)
+	c.mu.Unlock()
+	if fs, err := c.St.Friends(); err == nil && !quiet {
+		for _, f := range fs {
+			add(f.Pub)
+		}
+	}
 	for idStr := range c.chatIDs() {
+		if quiet && time.Since(active[idStr]) > activeFor {
+			continue
+		}
 		st, err := c.ChatState([]byte(idStr))
 		if err != nil {
 			continue
 		}
 		for _, m := range st.Members {
-			if !m.Removed && !seen[string(m.Pub)] {
-				seen[string(m.Pub)] = true
-				go c.ensurePeer(m.Pub)
+			if !m.Removed {
+				add(m.Pub)
 			}
 		}
 	}
+	rand.Shuffle(len(want), func(i, j int) { want[i], want[j] = want[j], want[i] })
 	c.mu.Lock()
 	r := c.redeem
 	c.mu.Unlock()
 	if r != nil && !seen[string(r.Inviter)] {
-		go c.ensurePeer(r.Inviter)
+		want = append([][]byte{r.Inviter}, want...) // the invite must not wait
 	}
+	return want[:min(len(want), lookupsPerRound)]
 }
 
 func (c *Core) Online(pub []byte) bool { return c.P2P.Peer(pub) != nil }
+
+// Relay: address of the TURN relay our link to pub goes through, "" if direct
+// or offline.
+func (c *Core) Relay(pub []byte) string {
+	if p := c.P2P.Peer(pub); p != nil {
+		return p.Relay()
+	}
+	return ""
+}
 
 func (c *Core) onPeerDown(pub []byte) {
 	c.mu.Lock()
@@ -1015,4 +1288,18 @@ func (c *Core) SetLang(lang string) error {
 
 func (c *Core) Lang() string {
 	return i18n.Lang()
+}
+
+// FindMembers matches a member by name (case-insensitive) or by fingerprint.
+// Names are not unique and anyone can pick any nick, so callers that act on
+// the result (kick) must refuse unless exactly one member matches.
+func FindMembers(members []event.Member, q string) []event.Member {
+	q = strings.TrimSpace(q)
+	var out []event.Member
+	for _, m := range members {
+		if strings.EqualFold(m.Name, q) || strings.EqualFold(identity.Fingerprint(m.Pub), q) {
+			out = append(out, m)
+		}
+	}
+	return out
 }

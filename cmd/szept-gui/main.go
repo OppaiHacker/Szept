@@ -198,18 +198,19 @@ type chatRow struct {
 // event count — otherwise every refresh would decrypt full history
 // of every chat, which is noticeable on mobile.
 type chatPrev struct {
-	n    int
+	rev  uint64
 	text string
 	ts   time.Time
 }
 
 type ui struct {
-	a       fyne.App
-	w       fyne.Window
-	c       *core.Core
-	cfg     *core.Config
-	cfgFile string
-	mobile  bool
+	relayWarned map[string]bool // pubs already told about a relayed link
+	a           fyne.App
+	w           fyne.Window
+	c           *core.Core
+	cfg         *core.Config
+	cfgFile     string
+	mobile      bool
 
 	// konta (profile): baseDir to katalog danych bez profilu (albo ten z
 	// -data / piaskownicy Androida), enter — wejście do aplikacji po
@@ -266,11 +267,6 @@ type ui struct {
 	hints   []cmdDef        // currently matched
 	hintSel int             // highlighted hint
 	sys     map[string][]sysMsg
-
-	clipBar  *fyne.Container // "detected code in clipboard"
-	clipLbl  *canvas.Text
-	clipCode string
-	clipSeen string // code already dismissed/used — don't show twice
 
 	statusDot *canvas.Circle
 	statusLbl *canvas.Text
@@ -361,8 +357,9 @@ func main() {
 		vidImgs: map[string]*canvas.Image{},
 		decoded: map[string]any{},
 		seen:    map[string]int{}, unread: map[string]int{},
-		prev: map[string]chatPrev{},
-		sys:  map[string][]sysMsg{},
+		relayWarned: map[string]bool{},
+		prev:        map[string]chatPrev{},
+		sys:         map[string][]sysMsg{},
 	}
 
 	u.enter = func(id *identity.Identity) {
@@ -372,9 +369,10 @@ func main() {
 			return
 		}
 		u.c = c
+		u.prev = map[string]chatPrev{} // keyed by store revision, which restarts per account
 		c.Start()
-		if cfg.WebhookOn && cfg.WebhookPort > 0 && cfg.WebhookToken != "" {
-			if err := c.StartWebhook(cfg.WebhookPort, cfg.WebhookToken); err != nil {
+		if cfg.WebhookOn && cfg.WebhookPort > 0 {
+			if err := c.StartWebhook(cfg.WebhookPort, c.WebhookToken()); err != nil {
 				u.fail(err)
 			}
 		}
@@ -551,7 +549,7 @@ func (u *ui) setupScreen() {
 	conn.PlaceHolder = "ws://1.2.3.4:7777"
 	conn.SetText(u.cfg.Connector)
 	pass := widget.NewPasswordEntry()
-	pass.PlaceHolder = "(opcjonalne)"
+	pass.PlaceHolder = "(zalecane)"
 	form := widget.NewForm(
 		widget.NewFormItem("Nazwa", name),
 		widget.NewFormItem("Connector", conn),
@@ -564,14 +562,34 @@ func (u *ui) setupScreen() {
 			u.info("szept", "Podaj nazwę i adres connectora.")
 			return
 		}
-		u.cfg.Connector = core.NormalizeWS(conn.Text)
-		id, err := boot.CreateIdentity(u.cfg.DataDir, name.Text, []byte(pass.Text))
-		if err != nil {
-			u.fail(err)
+		create := func() {
+			u.cfg.Connector = core.NormalizeWS(conn.Text)
+			id, err := boot.CreateIdentity(u.cfg.DataDir, name.Text, []byte(pass.Text))
+			if err != nil {
+				u.fail(err)
+				return
+			}
+			u.saveCfg()
+			u.enter(id)
+		}
+		if pass.Text != "" {
+			create()
 			return
 		}
-		u.saveCfg()
-		u.enter(id)
+		// seizure of the device is in the threat model: no password has to be
+		// a deliberate choice, never a skipped field
+		d := dialog.NewConfirm("Bez hasła?",
+			"Każdy, kto weźmie to urządzenie (policja na granicy, złodziej, ktoś z domowników),\n"+
+				"przeczyta cały klucz i całą historię rozmów. Hasło szyfruje jedno i drugie.\n"+
+				"Kontynuować bez hasła?",
+			func(ok bool) {
+				if ok {
+					create()
+				}
+			}, u.w)
+		d.SetConfirmText("Bez hasła")
+		d.SetDismissText("Ustawię hasło")
+		d.Show()
 	}
 	title := "Pierwsze uruchomienie"
 	if u.cfg.Profile != "" {
@@ -681,7 +699,6 @@ func (u *ui) buildMain() {
 	u.buildConv()   // shared conversation view (chat.go)
 	u.startAnims()  // single ticker for all GIFs (media.go)
 	u.buildStatus() // connection bar
-	u.buildClipBar()
 
 	// Friends tab
 	u.friendBox = container.NewVBox()
@@ -696,8 +713,6 @@ func (u *ui) buildMain() {
 	}
 	u.refresh()
 	u.updateStatus()
-	u.checkClipboard()
-	u.a.Lifecycle().SetOnEnteredForeground(func() { fyne.Do(u.checkClipboard) })
 }
 
 // buildMobileShell: bottom tabs Chats | Friends | Settings and stacked pages above.
@@ -720,8 +735,7 @@ func (u *ui) buildMobileShell(friendsTab fyne.CanvasObject) {
 	head := container.NewBorder(nil, nil, vcenter(brand(21)), vcenter(u.statusChip()))
 	top := container.NewVBox(
 		container.NewStack(canvas.NewRectangle(cDeep),
-			tightVBox(0, pad(11, 14, head), hairline())),
-		u.clipBar)
+			tightVBox(0, pad(11, 14, head), hairline())))
 
 	home := container.NewBorder(top, nav, nil, nil,
 		container.NewStack(canvas.NewRectangle(cBg), u.tabBody))
@@ -749,7 +763,6 @@ func (u *ui) buildDesktopShell(friendsTab fyne.CanvasObject) {
 		container.NewTabItemWithIcon("Czaty", theme.ListIcon(), chatsTab),
 		container.NewTabItemWithIcon("Znajomi", theme.AccountIcon(), friendsTab),
 	)
-	u.nav.OnSelected = func(*container.TabItem) { u.checkClipboard() }
 	gear := widget.NewButtonWithIcon("", theme.SettingsIcon(), u.openSettings)
 	gear.Importance = widget.LowImportance
 	// przełącznik kont pod ręką — wcześniej siedział cztery kliknięcia głęboko
@@ -763,7 +776,7 @@ func (u *ui) buildDesktopShell(friendsTab fyne.CanvasObject) {
 	left := container.NewBorder(container.NewPadded(head), nil, nil, nil, u.nav)
 	split := container.NewHSplit(left, u.center)
 	split.SetOffset(0.26)
-	u.mainRoot = container.NewBorder(u.clipBar, u.statusBar, nil, nil, split)
+	u.mainRoot = container.NewBorder(nil, u.statusBar, nil, nil, split)
 	u.w.SetContent(u.mainRoot)
 }
 
@@ -914,6 +927,7 @@ func (u *ui) refresh() {
 	}
 	u.rebuildVisible()
 	u.setTabBadge(0, total)
+	u.warnRelayed()
 
 	ch := u.cur()
 	if ch == nil {
@@ -1069,6 +1083,26 @@ func (u *ui) dlgSize(w, h float32) fyne.Size {
 
 // toast: brief notice without taking over screen. On mobile a dialog would be
 // overkill, and user just wants confirmation.
+// relayFacts: what a relay operator can and cannot do.
+const relayFacts = "• Operator connectora widzi, kto z kim rozmawia, kiedy, jak długo i ile danych przesyłacie. Może to zapisywać.\n" +
+	"• Może zablokować albo zepsuć połączenie w dowolnej chwili.\n" +
+	"• Connector może postawić każdy, także cenzor albo policja. Jeśli nie wiesz, kto prowadzi Twój connector, zakładaj, że te dane trafiają do wroga.\n" +
+	"• Nie widzi treści: wiadomości, pliki i rozmowy głosowe są szyfrowane end-to-end między wami. Nagrany ruch to dla niego szum, a klucze nie przechodzą przez connector."
+
+// warnRelayed tells once per person and session that a link goes through a
+// relay — also when it was the other side who chose relay-only.
+func (u *ui) warnRelayed() {
+	for _, p := range u.c.P2P.Peers() {
+		addr := p.Relay()
+		if addr == "" || u.relayWarned[string(p.Pub)] {
+			continue
+		}
+		u.relayWarned[string(p.Pub)] = true
+		u.sysInfo("Połączenie przez przekaźnik",
+			u.c.PeerName(p.Pub)+" — połączenie idzie przez przekaźnik connectora ("+addr+").\n\n"+relayFacts)
+	}
+}
+
 func (u *ui) toast(text string) {
 	if ch := u.cur(); ch != nil && u.chatOpen() {
 		u.sysOK(text, "")
@@ -1143,54 +1177,6 @@ func (u *ui) showFrame(chat, from []byte, kind string, img image.Image) {
 	}
 	ci.Image = img
 	ci.Refresh()
-}
-
-// ---- clipboard: replacing in-app QR scanner ----
-
-func (u *ui) buildClipBar() {
-	// tinted plate rather than a fixed purple: the wash is the accent with an
-	// alpha, so a custom accent takes this bar with it
-	plate := canvas.NewRectangle(cSurface2)
-	plate.CornerRadius = 14
-	tint := canvas.NewRectangle(cAccentSoft)
-	tint.CornerRadius = 14
-	u.clipLbl = canvas.NewText("", cFg)
-	u.clipLbl.TextSize = fs(12)
-	use := bigButton("Użyj", theme.ConfirmIcon(), func() {
-		code := u.clipCode
-		u.clipSeen = code
-		u.clipBar.Hide()
-		u.applyCode(code)
-	})
-	no := widget.NewButtonWithIcon("", theme.CancelIcon(), func() {
-		u.clipSeen = u.clipCode
-		u.clipBar.Hide()
-	})
-	row := container.NewBorder(nil, nil, nil, tightHBox(4, use, no), vcenter(u.clipLbl))
-	u.clipBar = pad(6, 8, container.NewStack(plate, tint, pad(6, 10, row)))
-	u.clipBar.Hide()
-}
-
-// checkClipboard: phone camera reads QR and places text in clipboard —
-// upon returning to app we pick it up automatically, without in-app scanner.
-func (u *ui) checkClipboard() {
-	if u.clipBar == nil || u.c == nil {
-		return
-	}
-	s := strings.TrimSpace(u.a.Clipboard().Content())
-	own := s == u.c.FriendCode() // own code copied from page — don't suggest
-	if own || s == u.clipSeen ||
-		(!strings.HasPrefix(s, "SZF-") && !strings.HasPrefix(s, "SZC-")) {
-		u.clipBar.Hide()
-		return
-	}
-	u.clipCode = s
-	u.clipLbl.Text = "Wykryto kod znajomego w schowku"
-	if strings.HasPrefix(s, "SZC-") {
-		u.clipLbl.Text = "Wykryto zaproszenie w schowku"
-	}
-	u.clipLbl.Refresh()
-	u.clipBar.Show()
 }
 
 func (u *ui) applyCode(s string) {

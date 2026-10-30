@@ -84,6 +84,17 @@ func TestStoreRoundtrip(t *testing.T) {
 	if after := s.EventCount(chat); after != before {
 		t.Fatalf("EventCount %d -> %d, avatar incremented badge", before, after)
 	}
+	// cached tally follows new messages, and a duplicate add is not counted
+	m2, _ := event.New(priv, chat, event.KindMsg, event.Body{Text: "x"}, 4, [][]byte{av.ID()}, 1, key)
+	rev := s.Rev(chat)
+	s.AddEvent(chat, m2)
+	s.AddEvent(chat, m2)
+	if after := s.EventCount(chat); after != before+1 {
+		t.Fatalf("EventCount after message = %d, want %d", after, before+1)
+	}
+	if s.Rev(chat) == rev {
+		t.Fatal("Rev did not change on a new event")
+	}
 
 	pinHash := sha256.Sum256([]byte("123456"))
 	inv := Invite{Chat: chat, PinHash: pinHash[:], Exp: time.Now().Add(time.Minute).Unix()}
@@ -118,8 +129,8 @@ func TestStoreRoundtrip(t *testing.T) {
 	if _, err := s.TakeInvite(h2, nil); err == nil {
 		t.Fatal("expired invite accepted")
 	}
-	if n := s.OpenInviteCount(); n != 0 {
-		t.Fatalf("OpenInviteCount = %d, want 0", n)
+	if s.InviteOpen(h2) {
+		t.Fatal("expired invite counted as open")
 	}
 }
 

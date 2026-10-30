@@ -17,6 +17,7 @@ package core
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
@@ -41,6 +42,11 @@ const (
 	// assembly holds up to MaxFileBytes, and requests can match count of
 	// attachment events sent to us (~300 bytes each).
 	asmBudget = 64 << 20
+	// senderBudget: one sender's share of asmBudget, so a member who announces
+	// fake files and stalls mid-transfer cannot block everyone else's.
+	senderBudget = attach.MaxFileBytes + blobChunk
+	asmIdle      = 30 * time.Second // assembly that got no part this long is dropped
+	asmAlive     = 5 * time.Second  // a part this recent means the transfer is running
 )
 
 // blobWant: attachment not yet downloaded.
@@ -57,7 +63,8 @@ type blobAsm struct {
 	parts [][]byte
 	got   int
 	bytes int
-	born  time.Time
+	from  string // sender charged for this buffer
+	last  time.Time
 }
 
 // ---- sending ----
@@ -69,6 +76,7 @@ type blobAsm struct {
 // a thumbnail and only the thumbnail is broadcast. Full bytes remain with holders
 // and travel only upon tapping "download" (see FetchBlob).
 func (c *Core) SendFile(chat []byte, name string, data []byte, caption string) error {
+	c.markActive(chat)
 	meta, err := attach.Check(data, name)
 	if err != nil {
 		return err
@@ -140,32 +148,22 @@ func (c *Core) SaveAttachment(hash []byte, name, dir string) (string, error) {
 	}
 }
 
-// TempDir returns a private, per-session scratch directory for attachments a
-// user opens in an external viewer. Plaintext in the shared os.TempDir() stayed
-// readable to every local account until reboot; this one is 0700 and Close()
-// deletes it with everything in it.
+// TempDir returns a private scratch directory for attachments a user opens in
+// an external viewer. It lives in the account's data dir (0700), not the shared
+// os.TempDir(), and is wiped at Open and Close, so plaintext left by a crash or
+// a killed process is gone on the next start. The store lock means only one
+// process owns a data dir, so the wipe never hits a live session.
 func (c *Core) TempDir() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.tempDir == "" {
-		d, err := os.MkdirTemp("", "szept-")
-		if err != nil {
-			return os.TempDir() // no scratch space: better a shared dir than none
-		}
-		c.tempDir = d
+	d := c.tempPath()
+	if os.MkdirAll(d, 0o700) != nil {
+		return os.TempDir() // no scratch space: better a shared dir than none
 	}
-	return c.tempDir
+	return d
 }
 
-func (c *Core) cleanTempDir() {
-	c.mu.Lock()
-	d := c.tempDir
-	c.tempDir = ""
-	c.mu.Unlock()
-	if d != "" {
-		os.RemoveAll(d)
-	}
-}
+func (c *Core) tempPath() string { return filepath.Join(c.Cfg.DataDir, "tmp") }
+
+func (c *Core) cleanTempDir() { os.RemoveAll(c.tempPath()) }
 
 // BlobBytes returns attachment content if available locally.
 func (c *Core) BlobBytes(hash []byte) ([]byte, bool) { return c.St.GetBlob(hash) }
@@ -443,8 +441,22 @@ func (c *Core) askBlob(hash []byte) {
 		c.mu.Unlock()
 		return
 	}
+	a := c.incoming[string(hash)]
+	if a != nil && time.Since(a.last) < asmAlive {
+		c.mu.Unlock()
+		return // parts are still flowing; asking again would send them twice
+	}
 	w.asked = time.Now()
 	chat, author := w.chat, w.author
+	// resume: a half-assembled file asks only for the parts it still lacks
+	var need []int
+	if a != nil {
+		for i, part := range a.parts {
+			if part == nil {
+				need = append(need, i)
+			}
+		}
+	}
 	c.mu.Unlock()
 
 	st, err := c.ChatState(chat)
@@ -467,7 +479,7 @@ func (c *Core) askBlob(hash []byte) {
 		}
 	}
 	if target != nil {
-		target.SendCtrl(Ctrl{T: "blobreq", Chat: chat, Blob: hash})
+		target.SendCtrl(Ctrl{T: "blobreq", Chat: chat, Blob: hash, Need: need})
 	}
 }
 
@@ -484,7 +496,7 @@ func (c *Core) retryWants(force bool) {
 	}
 	// drop stuck assembly buffers
 	for h, a := range c.incoming {
-		if time.Since(a.born) > 5*time.Minute {
+		if time.Since(a.last) > asmIdle {
 			delete(c.incoming, h)
 		}
 	}
@@ -546,7 +558,17 @@ func (c *Core) serveBlob(p *p2p.Peer, m Ctrl) {
 			c.mu.Unlock()
 		}()
 		total := (len(data) + blobChunk - 1) / blobChunk
-		for idx := 0; idx < total; idx++ {
+		idxs := m.Need
+		if len(idxs) == 0 {
+			idxs = make([]int, total)
+			for i := range idxs {
+				idxs[i] = i
+			}
+		}
+		for _, idx := range idxs {
+			if idx < 0 || idx >= total {
+				continue
+			}
 			end := (idx + 1) * blobChunk
 			if end > len(data) {
 				end = len(data)
@@ -555,14 +577,47 @@ func (c *Core) serveBlob(p *p2p.Peer, m Ctrl) {
 			for i := 0; p.BufferedCtrl() > sendBufHigh && i < 500; i++ {
 				time.Sleep(20 * time.Millisecond)
 			}
-			if err := p.SendCtrl(Ctrl{
-				T: "blobpart", Chat: m.Chat, Blob: m.Blob,
-				Idx: idx, Total: total, Part: data[idx*blobChunk : end],
-			}); err != nil {
+			if err := p.SendRaw(blobFrame(m.Chat, m.Blob, idx, total, data[idx*blobChunk:end])); err != nil {
 				return
 			}
 		}
 	}()
+}
+
+// File parts travel as raw bytes on the ctrl channel instead of base64 inside
+// JSON, which cost a third more on links that are often slow and metered.
+// Frame: blobTag | len(chat) | chat | blob hash | idx u32 | total u32 | part.
+// The tag can never start a JSON message, so onCtrl tells them apart.
+const blobTag = 0x01
+
+func blobFrame(chat, hash []byte, idx, total int, part []byte) []byte {
+	b := make([]byte, 0, 2+len(chat)+len(hash)+8+len(part))
+	b = append(b, blobTag, byte(len(chat)))
+	b = append(b, chat...)
+	b = append(b, hash...)
+	b = binary.BigEndian.AppendUint32(b, uint32(idx))
+	b = binary.BigEndian.AppendUint32(b, uint32(total))
+	return append(b, part...)
+}
+
+func parseBlobFrame(b []byte) (Ctrl, bool) {
+	if len(b) < 2 || b[0] != blobTag {
+		return Ctrl{}, false
+	}
+	n := int(b[1])
+	b = b[2:]
+	if len(b) < n+sha256.Size+8 {
+		return Ctrl{}, false
+	}
+	m := Ctrl{T: "blobpart", Chat: b[:n], Blob: b[n : n+sha256.Size]}
+	b = b[n+sha256.Size:]
+	m.Idx = int(binary.BigEndian.Uint32(b))
+	m.Total = int(binary.BigEndian.Uint32(b[4:]))
+	m.Part = b[8:]
+	if m.Idx < 0 || m.Total < 0 { // 32-bit int platforms
+		return Ctrl{}, false
+	}
+	return m, true
 }
 
 // handleBlobPart assembles chunks only for blobs we requested.
@@ -584,17 +639,24 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 		c.mu.Unlock()
 		return // unrequested
 	}
-	held := 0
+	a := c.incoming[key]
+	from := string(p.Pub)
+	if a != nil {
+		from = a.from
+	}
+	held, mine := 0, 0
 	for _, as := range c.incoming {
 		held += as.bytes
+		if as.from == from {
+			mine += as.bytes
+		}
 	}
-	if held+len(m.Part) > asmBudget {
+	if held+len(m.Part) > asmBudget || mine+len(m.Part) > senderBudget {
 		c.mu.Unlock()
 		return // assembly memory budget exhausted
 	}
-	a := c.incoming[key]
 	if a == nil {
-		a = &blobAsm{parts: make([][]byte, m.Total), born: time.Now()}
+		a = &blobAsm{parts: make([][]byte, m.Total), from: from}
 		c.incoming[key] = a
 	} else if len(a.parts) != m.Total {
 		// a contradictory Total is dropped, never acted on: rebuilding the buffer
@@ -602,6 +664,7 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 		c.mu.Unlock()
 		return
 	}
+	a.last = time.Now()
 	if a.parts[m.Idx] == nil {
 		a.parts[m.Idx] = bytes.Clone(m.Part)
 		a.got++
