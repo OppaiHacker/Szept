@@ -1,0 +1,5 @@
+# Upstream C sources built through cgo: keep them out of the language stats.
+internal/media/opus/libopus/** linguist-vendored
+internal/media/opus/z_*.c linguist-generated
+internal/media/rnnoise/*.c linguist-vendored
+internal/media/rnnoise/*.h linguist-vendored
