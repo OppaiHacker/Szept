@@ -22,11 +22,11 @@ jobs:
       # GTK3 + webkit2gtk-4.1: what most distros still ship (see WAILS_TAGS)
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - run: make bin/szept-wails WAILS_TAGS=gtk3
-      - run: tar -czf szept-wails-linux-amd64.tar.gz -C bin szept-wails -C ../cmd/szept-wails Icon.png
+      - run: mv bin/szept-wails szept-wails-linux-amd64
       - uses: actions/upload-artifact@v4
         with:
           name: szept-wails-linux-amd64
-          path: szept-wails-linux-amd64.tar.gz
+          path: szept-wails-linux-amd64
 
   windows:
     # cross-compiled with mingw-w64, the same way `make windows` does it locally
@@ -40,11 +40,11 @@ jobs:
       # Ubuntu ships ImageMagick 6, whose `convert` takes the same arguments
       - run: command -v magick || sudo ln -s "$(command -v convert)" /usr/local/bin/magick
       - run: make bin/szept-wails.exe
-      - run: cd bin && zip ../szept-wails-windows-amd64.zip szept-wails.exe
+      - run: mv bin/szept-wails.exe szept-wails-windows-amd64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: szept-wails-windows-amd64
-          path: szept-wails-windows-amd64.zip
+          path: szept-wails-windows-amd64.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
