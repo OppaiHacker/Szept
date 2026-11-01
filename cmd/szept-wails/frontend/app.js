@@ -2536,6 +2536,14 @@ function settingsBody() {
 transport to WebRTC (pion), a stan leży lokalnie w bbolt.
 Connector kojarzy peerów i nie widzi treści.</div>
         </div>
+      </div>
+      <div class="block">
+        <h4>Licencja</h4>
+        <p class="hint-text">Szept to wolne oprogramowanie na licencji GNU GPL w wersji 3 lub dowolnej późniejszej
+(GPL-3.0-or-later). Możesz go używać, zmieniać i rozpowszechniać na jej warunkach.</p>
+        <p class="hint-text">Program jest dostarczany „tak jak jest”, <b>bez żadnej gwarancji</b>, w tym gwarancji
+bezpieczeństwa i przydatności do określonego celu, w zakresie dozwolonym przez prawo.
+Szczegóły w punktach 15 i 16 licencji: https://www.gnu.org/licenses/gpl-3.0.html</p>
       </div>`;
   }
 }

@@ -441,11 +441,19 @@ Both start from a throwaway data directory with sample chats. The mobile ones re
 The threat model, the guarantees and the honest limits are in **[SECURITY.md](SECURITY.md)** — including what the connector can see, what lands on your own disk, and the known trade-offs.
 
 ---
+
+## 📄 License
+
+[GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
+
+Szept is provided **as is, without any warranty** — including any warranty of security or fitness for a particular purpose — to the extent permitted by applicable law. The authors are not liable for any damage arising from its use. See sections 15 and 16 of the [license](LICENSE).
+
+---
 ---
 
 # 🇵🇱 Szept — Komunikator Peer-to-Peer z Szyfrowaniem End-to-End
 
-> **Brak centralnych serwerów. Całkowita prywatność. Komunikacja odporna na cenzurę.**
+> **Brak centralnych serwerów. Bez numeru telefonu. Komunikacja odporna na cenzurę.**
 >
 > *Szept* to komunikator peer-to-peer z pełnym szyfrowaniem end-to-end, napisany w Go. Dostępny w wersji konsolowej (**TUI**), graficznej (**GUI**) na Linuksa i Windowsa, oraz mobilnej na **Androida**.
 
@@ -875,3 +883,5 @@ Model zagrożeń, gwarancje i uczciwie wypisane ograniczenia siedzą w **[SECURI
 ## 📄 Licencja
 
 [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
+
+Szept jest dostarczany **„tak jak jest”, bez żadnej gwarancji**, w tym gwarancji bezpieczeństwa i przydatności do określonego celu, w zakresie dozwolonym przez prawo. Autorzy nie odpowiadają za szkody wynikłe z jego użycia. Szczegóły w punktach 15 i 16 [licencji](LICENSE).
