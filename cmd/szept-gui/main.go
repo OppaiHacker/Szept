@@ -579,8 +579,8 @@ func (u *ui) setupScreen() {
 		// seizure of the device is in the threat model: no password has to be
 		// a deliberate choice, never a skipped field
 		d := dialog.NewConfirm("Bez hasła?",
-			"Każdy, kto weźmie to urządzenie (policja na granicy, złodziej, ktoś z domowników),\n"+
-				"przeczyta cały klucz i całą historię rozmów. Hasło szyfruje jedno i drugie.\n"+
+			"Hasło szyfruje klucz tożsamości i historię rozmów zapisane na tym urządzeniu.\n"+
+				"Bez niego są przechowywane bez szyfrowania. Hasło możesz ustawić także później.\n"+
 				"Kontynuować bez hasła?",
 			func(ok bool) {
 				if ok {

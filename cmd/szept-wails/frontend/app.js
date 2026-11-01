@@ -564,7 +564,7 @@ function renderGate() {
             <div class="field"><label>Hasło klucza <span style="color:var(--muted);font-weight:400">(zalecane)</span></label>
               <input class="input" id="g-pass" type="password" placeholder="•••••"></div>
             <p class="hint-text" style="padding:0 16px">Connector tylko kojarzy urządzenia. Treści rozmów nie widzi.</p>
-            <p class="hint-text err" style="padding:0 16px">Bez hasła klucz i historia leżą na dysku jawnie. Kto ma dostęp do urządzenia, przeczyta wszystko.</p>
+            <p class="hint-text" style="padding:0 16px">Hasło szyfruje klucz i historię rozmów na tym urządzeniu. Możesz je ustawić także później w ustawieniach.</p>
           ` : `
             <div class="field"><label>Hasło</label>
               <input class="input" id="g-pass" type="password" placeholder="hasło klucza" autofocus></div>
@@ -2946,7 +2946,7 @@ const HANDLERS = {
     // seizure of the device is in the threat model: no password has to be a
     // deliberate choice, never a skipped field
     if (!pass && !(await confirmBox("Bez hasła?",
-      "Każdy, kto weźmie to urządzenie (policja na granicy, złodziej, ktoś z domowników), przeczyta cały klucz i całą historię rozmów. Hasło szyfruje jedno i drugie. Kontynuować bez hasła?"))) {
+      "Hasło szyfruje klucz tożsamości i historię rozmów zapisane na tym urządzeniu. Bez niego są przechowywane bez szyfrowania. Hasło możesz ustawić także później w ustawieniach. Kontynuować bez hasła?"))) {
       $("#g-pass").focus();
       return;
     }

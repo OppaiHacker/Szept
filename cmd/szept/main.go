@@ -81,9 +81,8 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-			fmt.Println("UWAGA: bez hasła identity.key i baza (cała historia rozmów)")
-			fmt.Println("       zapisują się bez szyfrowania — kto ma dostęp do tego")
-			fmt.Println("       urządzenia lub kopii pliku, przeczyta wszystko.")
+			fmt.Println("Hasło szyfruje identity.key i bazę z historią rozmów.")
+			fmt.Println("Bez niego są przechowywane bez szyfrowania.")
 			if strings.ToLower(prompt(r, "Na pewno bez hasła? [t/N]", "n")) != "t" {
 				fmt.Println("Przerwane — uruchom ponownie i podaj hasło.")
 				os.Exit(1)
