@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 
 	"szept/internal/connector"
+	"szept/internal/version"
 )
 
 // secretPath returns the path clients must dial. "auto" keeps a random one in
@@ -109,7 +110,7 @@ func main() {
 			host += p
 		}
 	}
-	log.Printf("szept-connector nasłuchuje na %s", ln.Addr())
+	log.Printf("szept-connector %s nasłuchuje na %s", version.String(), ln.Addr())
 	log.Printf("klienci łączą się adresem: %s://%s%s", scheme, host, path)
 	if scheme == "ws" {
 		log.Print("UWAGA: bez TLS rejestracja idzie jawnym tekstem i DPI rozpozna connector — użyj --domain albo --cert/--key")
@@ -181,6 +182,16 @@ func main() {
 	}
 
 	// ReadHeaderTimeout: without this, slow/hung requests keep connections open (Slowloris).
+	// which client versions are out there: enough to know when an old one
+	// can be dropped, without logging who runs what
+	go func() {
+		for range time.Tick(time.Hour) {
+			if v := cServer.Versions(); len(v) > 0 {
+				log.Printf("klienci wg wersji: %v", v)
+			}
+		}
+	}()
+
 	srv := &http.Server{Handler: cServer, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	if *domain != "" {
 		// TLS-ALPN-01 runs on 443 itself, no port 80 needed

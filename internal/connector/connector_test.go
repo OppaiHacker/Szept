@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"szept/internal/version"
 	"testing"
 	"time"
 
@@ -722,5 +723,29 @@ func TestClockSkewRecovers(t *testing.T) {
 	}
 	if s := clockSkew.Load(); s < -2 || s > 2 {
 		t.Fatalf("skew not corrected: %d", s)
+	}
+}
+
+// Client and connector tell each other their versions on register.
+func TestVersionExchange(t *testing.T) {
+	defer func(v string) { version.V = v }(version.V)
+	version.V = "v9.8.7"
+	s := NewServer()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	c := NewClient("ws"+strings.TrimPrefix(srv.URL, "http"), priv)
+	go c.Run()
+	defer c.Close()
+	for deadline := time.Now().Add(5 * time.Second); !c.Up(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("never registered")
+		}
+	}
+	if v := c.ServerVersion(); v != "v9.8.7" {
+		t.Errorf("client sees connector version %q", v)
+	}
+	if n := s.Versions()["v9.8.7"]; n != 1 {
+		t.Errorf("connector counts %v", s.Versions())
 	}
 }

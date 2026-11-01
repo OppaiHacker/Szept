@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"szept/internal/version"
 )
 
 const registerContext = "szept-register-v1"
@@ -46,6 +48,8 @@ type Msg struct {
 	TTL      int      `json:"ttl,omitempty"`
 	Nodes    []string `json:"nodes,omitempty"`  // ndp_gossip reply: a few neighbour URLs
 	Hidden   bool     `json:"hidden,omitempty"` // mesh_hello: do not pass my URL on (--private-gossip)
+
+	Ver string `json:"ver,omitempty"` // register: client's version; ok: connector's version
 }
 
 // clockSkew: seconds the connector's clock is ahead of ours, learned from a
@@ -88,9 +92,10 @@ func SignRegister(priv ed25519.PrivateKey, pub []byte, ts int64) []byte {
 // ---- server ----
 
 type client struct {
-	ws *websocket.Conn
-	mu sync.Mutex
-	ts int64 // registration timestamp holding slot — see "register"
+	ws  *websocket.Conn
+	mu  sync.Mutex
+	ts  int64  // registration timestamp holding slot — see "register"
+	ver string // version the client reported, see Versions
 
 	lookups, signals, meshFrames window // per-socket rate limits
 }
@@ -126,6 +131,18 @@ func (c *client) send(m Msg) error {
 	defer c.mu.Unlock()
 	c.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return c.ws.WriteJSON(m)
+}
+
+// Versions counts registered clients per reported version ("" = too old to
+// say).
+func (s *Server) Versions() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := map[string]int{}
+	for _, c := range s.peers {
+		n[c.ver]++
+	}
+	return n
 }
 
 type Server struct {
@@ -413,12 +430,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			old := s.peers[string(m.Pub)]
 			pub = m.Pub
 			c.ts = m.TS
+			c.ver = version.Clean(m.Ver)
 			s.peers[string(pub)] = c
 			s.mu.Unlock()
 			if old != nil && old != c {
 				old.ws.Close() // the key re-registered elsewhere; drop the stale socket
 			}
-			c.send(Msg{Op: "ok", ICE: s.iceFor(pub)})
+			c.send(Msg{Op: "ok", ICE: s.iceFor(pub), Ver: version.String()})
 		case "ice":
 			// credentials expire after turnCredTTL; long sessions ask again
 			if pub != nil {
@@ -512,7 +530,15 @@ type Client struct {
 	closed  bool
 	up      bool
 	lastErr string
-	ice     *ICE // relay offered by the current connector
+	ice     *ICE   // relay offered by the current connector
+	srvVer  string // the current connector's version ("" = too old to say)
+}
+
+// ServerVersion: what the connector we're registered with reports running.
+func (c *Client) ServerVersion() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.srvVer
 }
 
 // ICE returns the STUN/TURN relay of the current connector, or nil.
@@ -612,7 +638,8 @@ func (c *Client) session() error {
 	var ice *ICE
 
 	ts := Now().Unix()
-	regMsg := Msg{Op: "register", Pub: c.Pub, TS: ts, Sig: SignRegister(c.Priv, c.Pub, ts)}
+	regMsg := Msg{Op: "register", Pub: c.Pub, TS: ts, Sig: SignRegister(c.Priv, c.Pub, ts), Ver: version.String()}
+	var srvVer string
 
 	for _, u := range urlsToTry {
 		var conn *websocket.Conn
@@ -641,6 +668,7 @@ func (c *Client) session() error {
 					conn.SetReadDeadline(time.Time{})
 					ws = conn
 					ice = ack.ICE
+					srvVer = version.Clean(ack.Ver)
 					break
 				} else {
 					conn.Close()
@@ -667,6 +695,7 @@ func (c *Client) session() error {
 	c.up = true
 	c.lastErr = ""
 	c.ice = ice
+	c.srvVer = srvVer
 	c.mu.Unlock()
 
 	if ice != nil {

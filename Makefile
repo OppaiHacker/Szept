@@ -28,6 +28,10 @@ WAILS_TAGS ?= $(shell pkg-config --exists webkitgtk-6.0 2>/dev/null || echo gtk3
 # production: Wails' debug mode would force the webview inspector on; with the
 # tag it opens only in developer mode (settings) or with -devtools.
 GOTAGS     := -tags $(subst $(eval) ,$(comma),$(strip production $(WAILS_TAGS)))
+# Release tag stamped into szept-wails; only stamped builds update themselves
+# (internal/update). Defaults to the tag on HEAD, empty between releases.
+VERSION    ?= $(shell git describe --tags --exact-match 2>/dev/null)
+STAMP      := -X szept/internal/version.V=$(VERSION)
 
 # Binary name -> package. Every build rule below derives the package from the
 # target it is building, so a new client costs one line here and one in BINS.
@@ -47,14 +51,14 @@ fresh = mkdir -p $(@D) && rm -f $@
 # Build rules are .PHONY on purpose: they list no sources, so without this
 # `make` after a code edit does nothing and keeps the old binary. Go's own
 # build cache is what keeps repeated builds cheap.
-.PHONY: all test clean windows connector-windows android install uninstall release \
+.PHONY: all test clean windows connector-windows android install uninstall release sign-release windows-installer \
 	$(NATIVE) $(WINDOWS) $(BIN)/szept-connector.exe $(BIN)/szept.apk
 
 all: $(NATIVE)
 
 $(NATIVE): $(BIN)/%:
 	@$(fresh)
-	go build $(GOTAGS) -o $@ $(pkg-$*)
+	go build $(GOTAGS) -ldflags "$(STAMP)" -o $@ $(pkg-$*)
 
 test:
 	go vet $(GOTAGS) ./...
@@ -75,7 +79,20 @@ $(WINDOWS): $(BIN)/%.exe:
 	magick cmd/szept-wails/Icon.png -define icon:auto-resize=256,64,48,32,16 $(BIN)/szept.ico
 	echo '32512 ICON "$(BIN)/szept.ico"' | $(WINDRES) -O coff -o $(pkg-$*)/rsrc_windows_amd64.syso
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=$(WINCC) \
-		go build -tags production $(if $(filter szept,$*),,-ldflags -H=windowsgui) -o $@ $(pkg-$*)
+		go build -tags production -ldflags "$(STAMP) $(if $(filter szept,$*),,-H=windowsgui)" -o $@ $(pkg-$*)
+
+# Installer: NSIS (Arch: yay -S nsis, Debian: apt install nsis), per-user, no
+# admin. Bundles Microsoft's WebView2 bootstrapper for bare Windows 10 boxes;
+# it runs only when the runtime is missing.
+windows-installer: $(BIN)/szept-setup.exe
+
+$(BIN)/szept-setup.exe: $(BIN)/szept-wails.exe
+	@$(fresh)
+	test -s $(BIN)/MicrosoftEdgeWebview2Setup.exe || curl -fsSL -o $(BIN)/MicrosoftEdgeWebview2Setup.exe \
+		https://go.microsoft.com/fwlink/p/?LinkId=2124703
+	makensis -V2 -DVERSION=$(or $(VERSION),dev) -DEXE=$(CURDIR)/$(BIN)/szept-wails.exe \
+		-DICON=$(CURDIR)/$(BIN)/szept.ico -DWEBVIEW=$(CURDIR)/$(BIN)/MicrosoftEdgeWebview2Setup.exe \
+		-DOUT=$(CURDIR)/$@ cmd/szept-wails/installer.nsi
 
 # Connector is pure Go — cross-compilation with no dependencies:
 connector-windows: $(BIN)/szept-connector.exe
@@ -97,7 +114,7 @@ $(BIN)/szept-connector.exe:
 #   ssh-keygen -Y verify -f allowed_signers -I szept -n szept-release \
 #     -s SHA256SUMS.sig < SHA256SUMS && sha256sum -c SHA256SUMS
 REL      := $(BIN)/release
-REPRO    := -trimpath -buildvcs=false -ldflags="-s -w -buildid="
+REPRO    = -trimpath -buildvcs=false -ldflags="-s -w -buildid= $(STAMP)"
 PLATFORMS := linux/amd64 linux/arm64 linux/arm linux/mips linux/mipsle windows/amd64 darwin/arm64
 
 release:
@@ -110,6 +127,18 @@ release:
 	go version > $(REL)/GOVERSION
 	cd $(REL) && sha256sum GOVERSION szept-* > SHA256SUMS
 	$(if $(SIGNKEY),ssh-keygen -Y sign -f $(SIGNKEY) -n szept-release $(REL)/SHA256SUMS,@echo "SIGNKEY not set: SHA256SUMS left unsigned")
+
+# Desktop clients update themselves only from releases whose SHA256SUMS is
+# signed with this key (public half in internal/update). CI publishes the
+# release unsigned; check it, then sign it from your machine:
+#   make sign-release TAG=v0.2.0
+sign-release: SIGNKEY ?= $(HOME)/.ssh/szept_release
+sign-release:
+	@test -n "$(TAG)" || { echo "TAG=vX.Y.Z required"; exit 1; }
+	rm -rf $(BIN)/sign && mkdir -p $(BIN)/sign
+	gh release download $(TAG) -p SHA256SUMS -D $(BIN)/sign
+	ssh-keygen -Y sign -f $(SIGNKEY) -n szept-release $(BIN)/sign/SHA256SUMS
+	gh release upload $(TAG) $(BIN)/sign/SHA256SUMS.sig --clobber
 
 # APK: requires Android SDK+NDK and fyne tool (go install fyne.io/tools/cmd/fyne@latest).
 # Permissions/manifest: cmd/szept-gui/AndroidManifest.xml

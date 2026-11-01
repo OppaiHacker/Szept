@@ -22,7 +22,7 @@ jobs:
           go-version-file: go.mod
       # GTK3 + webkit2gtk-4.1: what most distros still ship (see WAILS_TAGS)
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
-      - run: make bin/szept-wails WAILS_TAGS=gtk3
+      - run: make bin/szept-wails WAILS_TAGS=gtk3 VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
       - run: mv bin/szept-wails szept-wails-linux-amd64
       - uses: actions/upload-artifact@v4
         with:
@@ -37,15 +37,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 imagemagick
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 imagemagick nsis
       # Ubuntu ships ImageMagick 6, whose `convert` takes the same arguments
       - run: command -v magick || sudo ln -s "$(command -v convert)" /usr/local/bin/magick
-      - run: make bin/szept-wails.exe
-      - run: mv bin/szept-wails.exe szept-wails-windows-amd64.exe
+      - run: make bin/szept-setup.exe VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+      # the bare exe is what installed copies update themselves from
+      - run: mv bin/szept-wails.exe szept-wails-windows-amd64.exe && mv bin/szept-setup.exe szept-setup-windows-amd64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: szept-wails-windows-amd64
-          path: szept-wails-windows-amd64.exe
+          path: |
+            szept-wails-windows-amd64.exe
+            szept-setup-windows-amd64.exe
 
   connector:
     runs-on: ubuntu-24.04
@@ -55,7 +58,7 @@ jobs:
         with:
           go-version-file: go.mod
       # reproducible build, see the release target in the Makefile
-      - run: make release
+      - run: make release VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: szept-connector
@@ -71,7 +74,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - run: sha256sum GOVERSION szept-* > SHA256SUMS
+      # VERSION is covered by the sums, so the signature (make sign-release)
+      # pins the version too; clients ignore releases until it is signed
+      - run: echo "$GITHUB_REF_NAME" > VERSION && sha256sum GOVERSION VERSION szept-* > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" szept-* GOVERSION SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" szept-* GOVERSION VERSION SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes

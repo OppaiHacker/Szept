@@ -20,12 +20,13 @@ import (
 	"szept/internal/identity"
 	"szept/internal/p2p"
 	"szept/internal/store"
+	"szept/internal/version"
 )
 
 // ---- peer lifecycle ----
 
 func (c *Core) onPeerUp(p *p2p.Peer) {
-	p.SendCtrl(Ctrl{T: "hello", Name: c.ID.Name})
+	p.SendCtrl(Ctrl{T: "hello", Name: c.ID.Name, Ver: version.String()})
 	// offer sync for every chat this peer belongs to
 	for idStr := range c.chatIDs() {
 		chat := []byte(idStr)
@@ -95,6 +96,9 @@ func (c *Core) onCtrl(p *p2p.Peer, data []byte) {
 	}
 	switch m.T {
 	case "hello":
+		if v := version.Clean(m.Ver); v != "" {
+			peerVer.Store(string(p.Pub), v)
+		}
 		// a peer names itself, never you: "hello" only ever writes PeerName, so a
 		// name the user gave this contact stays put (see store.Friend)
 		if m.Name != "" && c.St.IsFriend(p.Pub) {
