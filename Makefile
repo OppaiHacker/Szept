@@ -75,7 +75,7 @@ $(WINDOWS): $(BIN)/%.exe:
 	magick cmd/szept-wails/Icon.png -define icon:auto-resize=256,64,48,32,16 $(BIN)/szept.ico
 	echo '32512 ICON "$(BIN)/szept.ico"' | $(WINDRES) -O coff -o $(pkg-$*)/rsrc_windows_amd64.syso
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=$(WINCC) \
-		go build $(if $(filter szept,$*),,-ldflags -H=windowsgui) -o $@ $(pkg-$*)
+		go build -tags production $(if $(filter szept,$*),,-ldflags -H=windowsgui) -o $@ $(pkg-$*)
 
 # Connector is pure Go — cross-compilation with no dependencies:
 connector-windows: $(BIN)/szept-connector.exe
