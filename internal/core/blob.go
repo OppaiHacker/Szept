@@ -432,16 +432,15 @@ func blobKind(kind string) bool {
 // noteAttachment: after ingesting attachment event we decrypt it to
 // read content hash and queue missing bytes.
 func (c *Core) noteAttachment(chat []byte, e *event.Event) {
-	keys, err := c.St.ChatKeys(chat)
+	// Open, not the content key alone: someone who joined without history
+	// holds only member keys for earlier epochs, and the server look, avatars
+	// and profiles set back then are sealed with those
+	keys, mkeys, err := c.chatKeys(chat)
 	if err != nil {
 		return
 	}
-	key, ok := keys[e.Epoch]
+	b, ok := e.Open(keys, mkeys)
 	if !ok {
-		return
-	}
-	b, err := e.Decrypt(key)
-	if err != nil {
 		return
 	}
 	// remember which chat we hold these bytes through — serveBlob checks it

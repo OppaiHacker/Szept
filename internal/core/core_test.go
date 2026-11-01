@@ -740,6 +740,14 @@ func TestNoHistoryForNewMembers(t *testing.T) {
 	if err := a.Send(chat, "stare"); err != nil {
 		t.Fatal(err)
 	}
+	// the server look set before b joined is sealed with an epoch b holds
+	// only the member key for; b must still fetch the icon and banner
+	if err := a.SetServerImage(chat, testImagePNG(t), image.Rectangle{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetServerImage(chat, testImagePNG(t), image.Rectangle{}, true); err != nil {
+		t.Fatal(err)
+	}
 	code, pin, err := a.NewInvite(chat)
 	if err != nil {
 		t.Fatal(err)
@@ -779,6 +787,11 @@ func TestNoHistoryForNewMembers(t *testing.T) {
 	if keys, _ := b.St.ChatKeys(chat); keys[1] != nil {
 		t.Fatal("newcomer holds the epoch-1 content key")
 	}
+	waitFor(t, "b fetches the server icon and banner", 40*time.Second, func() bool {
+		st, err := b.ChatState(chat)
+		return err == nil && len(st.Icon) == 32 && len(st.Banner) == 32 &&
+			b.St.HasBlob(st.Icon) && b.St.HasBlob(st.Banner)
+	})
 }
 
 func TestChannels(t *testing.T) {
