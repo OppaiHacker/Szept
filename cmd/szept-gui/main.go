@@ -1086,7 +1086,7 @@ func (u *ui) dlgSize(w, h float32) fyne.Size {
 // relayFacts: what a relay operator can and cannot do.
 const relayFacts = "• Operator connectora widzi, kto z kim rozmawia, kiedy, jak długo i ile danych przesyłacie. Może to zapisywać.\n" +
 	"• Może zablokować albo zepsuć połączenie w dowolnej chwili.\n" +
-	"• Connector może postawić każdy, także cenzor albo policja. Jeśli nie wiesz, kto prowadzi Twój connector, zakładaj, że te dane trafiają do wroga.\n" +
+	"• Connector może prowadzić każdy. Najlepiej używaj connectora, którego operatora znasz albo któremu ufasz.\n" +
 	"• Nie widzi treści: wiadomości, pliki i rozmowy głosowe są szyfrowane end-to-end między wami. Nagrany ruch to dla niego szum, a klucze nie przechodzą przez connector."
 
 // warnRelayed tells once per person and session that a link goes through a

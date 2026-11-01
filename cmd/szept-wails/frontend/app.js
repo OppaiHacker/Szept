@@ -1022,7 +1022,7 @@ const RELAY_FACTS = `
   <ul class="relay-facts">
     <li><b>Operator connectora widzi</b>, kto z kim rozmawia, kiedy, jak długo i ile danych przesyłacie. Może to zapisywać.</li>
     <li><b>Może zablokować albo zepsuć połączenie</b> w dowolnej chwili.</li>
-    <li>Connector może postawić każdy, także cenzor albo policja. Jeśli nie wiesz, kto prowadzi Twój connector, zakładaj, że te dane trafiają do wroga.</li>
+    <li>Connector może prowadzić każdy. Najlepiej używaj connectora, którego operatora znasz albo któremu ufasz.</li>
     <li><b>Nie widzi treści</b>: wiadomości, pliki i rozmowy głosowe są szyfrowane end-to-end między wami. Nagrany ruch to dla niego szum, a klucze nie przechodzą przez connector.</li>
   </ul>`;
 
