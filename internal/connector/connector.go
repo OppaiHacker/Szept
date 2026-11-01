@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -45,6 +46,30 @@ type Msg struct {
 	TTL      int      `json:"ttl,omitempty"`
 	Nodes    []string `json:"nodes,omitempty"`  // ndp_gossip reply: a few neighbour URLs
 	Hidden   bool     `json:"hidden,omitempty"` // mesh_hello: do not pass my URL on (--private-gossip)
+}
+
+// clockSkew: seconds the connector's clock is ahead of ours, learned from a
+// register rejected as "bad register". A PC whose clock is minutes off would
+// otherwise fail the connector's ±1 min freshness check and every peer's
+// ±2 min signal check; timestamps from Now() agree with the connector instead.
+var clockSkew atomic.Int64
+
+// Now is the local time corrected by clockSkew; use it for signed timestamps.
+func Now() time.Time { return time.Now().Add(time.Duration(clockSkew.Load()) * time.Second) }
+
+// learnSkew adopts the connector's clock when ours is more than 30 s off.
+// A bad signature also yields "bad register", so a small difference changes
+// nothing. Reports whether the skew changed (worth retrying at once).
+func learnSkew(serverTS int64) bool {
+	if serverTS == 0 { // older connector: sends no time
+		return false
+	}
+	d := serverTS - time.Now().Unix()
+	if old := clockSkew.Load(); d-old > 30 || old-d > 30 {
+		clockSkew.Store(d)
+		return true
+	}
+	return false
 }
 
 func registerDigest(pub []byte, ts int64) []byte {
@@ -371,7 +396,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if len(m.Pub) != ed25519.PublicKeySize ||
 				time.Since(time.Unix(m.TS, 0)) > time.Minute || time.Until(time.Unix(m.TS, 0)) > time.Minute ||
 				!ed25519.Verify(ed25519.PublicKey(m.Pub), registerDigest(m.Pub, m.TS), m.Sig) {
-				c.send(Msg{Op: "error", Err: "bad register"})
+				// our clock goes along so a client whose clock is off can correct it
+				c.send(Msg{Op: "error", Err: "bad register", TS: time.Now().Unix()})
 				continue
 			}
 			if pub != nil && !bytes.Equal(pub, m.Pub) {
@@ -585,7 +611,7 @@ func (c *Client) session() error {
 	var dialErr error
 	var ice *ICE
 
-	ts := time.Now().Unix()
+	ts := Now().Unix()
 	regMsg := Msg{Op: "register", Pub: c.Pub, TS: ts, Sig: SignRegister(c.Priv, c.Pub, ts)}
 
 	for _, u := range urlsToTry {
@@ -618,6 +644,9 @@ func (c *Client) session() error {
 					break
 				} else {
 					conn.Close()
+					if ack.Err == "bad register" && learnSkew(ack.TS) {
+						return fmt.Errorf("zegar komputera różni się od connectora o %d s, poprawiam", clockSkew.Load())
+					}
 					return errors.New("register rejected: " + ack.Err)
 				}
 			} else {

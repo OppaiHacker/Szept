@@ -700,3 +700,27 @@ func TestGossipURLBudget(t *testing.T) {
 		t.Fatalf("spis mesha: %d adresów, limit %d", len(learned), maxGossipURLs)
 	}
 }
+
+// A client whose clock is 5 minutes behind is first rejected, then adopts the
+// connector's time from the "bad register" reply and registers.
+func TestClockSkewRecovers(t *testing.T) {
+	srv := httptest.NewServer(NewServer())
+	defer srv.Close()
+	defer clockSkew.Store(0)
+	clockSkew.Store(-300)
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	c := NewClient("ws"+strings.TrimPrefix(srv.URL, "http"), priv)
+	go c.Run()
+	defer c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for !c.Up() {
+		if time.Now().After(deadline) {
+			t.Fatalf("never registered, skew=%d err=%q", clockSkew.Load(), c.LastErr())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if s := clockSkew.Load(); s < -2 || s > 2 {
+		t.Fatalf("skew not corrected: %d", s)
+	}
+}

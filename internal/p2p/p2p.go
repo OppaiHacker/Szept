@@ -381,7 +381,7 @@ func (m *Manager) Connect(pub []byte) error {
 	}
 	payload := sigPayload{
 		Kind: "offer", SDP: pc.LocalDescription().SDP,
-		From: m.pub, To: pub, TS: time.Now().Unix(), ConnID: connID, Obf: obfKey,
+		From: m.pub, To: pub, TS: connector.Now().Unix(), ConnID: connID, Obf: obfKey,
 	}
 	if m.Ticket != nil {
 		payload.Inv = m.Ticket(pub)
@@ -435,7 +435,7 @@ func (m *Manager) onSignal(from []byte, blob []byte) {
 		!ed25519.Verify(ed25519.PublicKey(p.From), env.Payload, env.Sig) {
 		return
 	}
-	if d := time.Since(time.Unix(p.TS, 0)); d > 2*time.Minute || d < -2*time.Minute {
+	if d := connector.Now().Sub(time.Unix(p.TS, 0)); d > 2*time.Minute || d < -2*time.Minute {
 		return
 	}
 	if m.Accept == nil || !m.Accept(p.From, p.Inv) {
@@ -508,7 +508,7 @@ func (m *Manager) handleOffer(p sigPayload) {
 	}
 	resp := sigPayload{
 		Kind: "answer", SDP: pc.LocalDescription().SDP,
-		From: m.pub, To: p.From, TS: time.Now().Unix(), ConnID: p.ConnID,
+		From: m.pub, To: p.From, TS: connector.Now().Unix(), ConnID: p.ConnID,
 	}
 	blob, err := m.sign(resp)
 	if err == nil {
