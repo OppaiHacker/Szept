@@ -55,6 +55,7 @@ type blobWant struct {
 	mime   string
 	size   int64
 	author []byte // sender — queried first
+	peer   []byte // the one peer last asked; parts are taken only from them
 	asked  time.Time
 }
 
@@ -206,7 +207,7 @@ func (c *Core) ClearAvatar() error { return c.announceAvatar(nil, "") }
 
 func (c *Core) announceAvatar(hash []byte, mime string) error {
 	card, _ := c.St.Profile(c.ID.Pub)
-	card.Blob, card.Mime = hash, mime
+	card.Blob, card.Mime, card.AvatarTS = hash, mime, nextNS(card.AvatarTS)
 	if err := c.St.PutProfile(c.ID.Pub, card); err != nil {
 		return err
 	}
@@ -220,7 +221,7 @@ func (c *Core) announceAvatar(hash []byte, mime string) error {
 			continue
 		}
 		if _, err := c.appendEvent(chat, event.KindAvatar,
-			event.Body{Blob: hash, Mime: mime, TS: time.Now().Unix()}); err != nil {
+			event.Body{Blob: hash, Mime: mime, TS: time.Now().Unix(), NS: card.AvatarTS}); err != nil {
 			lastErr = err
 		}
 	}
@@ -268,6 +269,18 @@ func (c *Core) SetBio(text string) error {
 	return c.editCard(func(p *store.ProfileMeta) { p.Bio = text })
 }
 
+// SetStyle sets the profile effects (see event.SafeStyle; "" clears them).
+func (c *Core) SetStyle(s string) error {
+	s = event.SafeStyle(s)
+	return c.editCard(func(p *store.ProfileMeta) { p.Style = s })
+}
+
+// StyleOf returns someone's profile effects ("" when unknown or none).
+func (c *Core) StyleOf(pub []byte) string {
+	card, _ := c.St.Profile(pub)
+	return card.Style
+}
+
 // SetBanner normalizes the wide image, stores it and announces it. crop is the
 // region the user framed; the zero value takes the center of the image.
 func (c *Core) SetBanner(data []byte, crop image.Rectangle) error {
@@ -293,6 +306,7 @@ func (c *Core) ClearBanner() error {
 func (c *Core) editCard(f func(*store.ProfileMeta)) error {
 	card, _ := c.St.Profile(c.ID.Pub)
 	f(&card)
+	card.CardTS = nextNS(card.CardTS)
 	if err := c.St.PutProfile(c.ID.Pub, card); err != nil {
 		return err
 	}
@@ -310,9 +324,28 @@ func (c *Core) editCard(f func(*store.ProfileMeta)) error {
 	return lastErr
 }
 
+// cardBody carries the card's own stamp, so re-announcing an unchanged card
+// (announceProfile) never makes it look newer than it is.
 func cardBody(card store.ProfileMeta) event.Body {
-	return event.Body{Text: card.Status, Bio: card.Bio,
-		Blob: card.Banner, Mime: card.BannerMime, TS: time.Now().Unix()}
+	return event.Body{Text: card.Status, Bio: card.Bio, Style: card.Style,
+		Blob: card.Banner, Mime: card.BannerMime, TS: time.Now().Unix(), NS: card.CardTS}
+}
+
+// nextNS: stamp for our own next profile change. Always above the previous
+// one, so a clock that went backwards cannot make a new change lose to an old.
+func nextNS(prev int64) int64 { return max(time.Now().UnixNano(), prev+1) }
+
+// maxSkew: how far ahead of our clock a peer's profile stamp may be. Without
+// a cap one event dated years ahead would freeze that profile for good.
+const maxSkew = time.Hour
+
+// profileNS: when the author made this avatar or card event; events from
+// before the NS field carry seconds only.
+func profileNS(b event.Body) int64 {
+	if b.NS != 0 {
+		return b.NS
+	}
+	return b.TS * int64(time.Second)
 }
 
 // StatusOf returns someone's status line and description (empty when unknown).
@@ -338,11 +371,62 @@ func (c *Core) BannerOf(pub []byte) (data []byte, mime string, hash []byte) {
 	return data, card.BannerMime, card.Banner
 }
 
+// ---- server look: icon, banner, decoration ----
+
+// SetServerImage sets a group's icon (banner false) or banner from raw image
+// bytes; nil data clears it. Owner only, like the name.
+func (c *Core) SetServerImage(chat, data []byte, crop image.Rectangle, banner bool) error {
+	var hash []byte
+	var mime string
+	if data != nil {
+		norm := attach.Avatar
+		if banner {
+			norm = attach.Banner
+		}
+		out, m, err := norm(data, crop)
+		if err != nil {
+			return err
+		}
+		if hash, err = c.St.PutBlob(out); err != nil {
+			return err
+		}
+		mime = m
+	}
+	return c.editServer(chat, func(b *event.Body) {
+		if banner {
+			b.Prev, b.PrevMime = hash, mime
+		} else {
+			b.Blob, b.Mime = hash, mime
+		}
+	})
+}
+
+// SetServerStyle sets a group's decoration (see event.SafeStyle).
+func (c *Core) SetServerStyle(chat []byte, s string) error {
+	return c.editServer(chat, func(b *event.Body) { b.Style = event.SafeStyle(s) })
+}
+
+// editServer re-announces the whole look with one part changed.
+func (c *Core) editServer(chat []byte, f func(*event.Body)) error {
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(st.Owner, c.ID.Pub) {
+		return errors.New("tylko właściciel może zmienić wygląd serwera")
+	}
+	b := event.Body{Blob: st.Icon, Mime: st.IconMime, Prev: st.Banner, PrevMime: st.BannerMime,
+		Style: st.Style, TS: time.Now().Unix()}
+	f(&b)
+	_, err = c.appendEvent(chat, event.KindServer, b)
+	return err
+}
+
 // ---- want registry ----
 
 // blobKind: event kinds whose body points at bytes we may need to fetch.
 func blobKind(kind string) bool {
-	return kind == event.KindFile || kind == event.KindAvatar || kind == event.KindProfile
+	return kind == event.KindFile || kind == event.KindAvatar || kind == event.KindProfile || kind == event.KindServer
 }
 
 // noteAttachment: after ingesting attachment event we decrypt it to
@@ -360,24 +444,48 @@ func (c *Core) noteAttachment(chat []byte, e *event.Event) {
 	if err != nil {
 		return
 	}
-	// remember which chat announced these bytes — serveBlob checks it before
-	// handing anything over
-	for _, h := range [][]byte{b.Blob, b.Prev} {
-		if len(h) == sha256.Size {
-			c.St.NoteBlobChat(chat, h)
+	// remember which chat we hold these bytes through — serveBlob checks it
+	// before handing anything over. Only our own sends here; downloads are noted
+	// in handleBlobPart. Indexing someone else's announce let any member of a
+	// shared chat re-announce a hash we hold from another chat and pull it.
+	if bytes.Equal(e.Author, c.ID.Pub) {
+		for _, h := range [][]byte{b.Blob, b.Prev} {
+			if len(h) == sha256.Size {
+				c.St.NoteBlobChat(chat, h)
+			}
 		}
 	}
 	// profile index: friend list and member column do not need to traverse DAG.
 	// Text arrives from the network, so it is cleansed here, once, before storage.
 	if e.Kind == event.KindAvatar || e.Kind == event.KindProfile {
+		// The same profile is announced into every chat, and chats are scanned
+		// in map order, so only a newer event may replace the indexed one.
 		card, _ := c.St.Profile(e.Author)
-		if e.Kind == event.KindAvatar {
-			card.Blob, card.Mime = b.Blob, b.Mime
-		} else {
-			card.Status, card.Bio = safeName(b.Text), safeBio(b.Bio)
-			card.Banner, card.BannerMime = b.Blob, b.Mime
+		ns := profileNS(b)
+		// a stamp from the future is ignored until our clock gets there (next rescan)
+		future := ns > time.Now().Add(maxSkew).UnixNano() && !bytes.Equal(e.Author, c.ID.Pub)
+		switch {
+		case future:
+		case e.Kind == event.KindAvatar && ns >= card.AvatarTS:
+			card.Blob, card.Mime, card.AvatarTS = b.Blob, b.Mime, ns
+			c.St.PutProfile(e.Author, card)
+		case e.Kind == event.KindProfile && ns >= card.CardTS:
+			card.Status, card.Bio, card.Style = safeName(b.Text), safeBio(b.Bio), event.SafeStyle(b.Style)
+			card.Banner, card.BannerMime, card.CardTS = b.Blob, b.Mime, ns
+			c.St.PutProfile(e.Author, card)
 		}
-		c.St.PutProfile(e.Author, card)
+	}
+	// server look: icon and banner, both small; only the owner's count
+	if e.Kind == event.KindServer {
+		if st, err := c.ChatState(chat); err == nil && bytes.Equal(e.Author, st.Owner) {
+			if len(b.Blob) == sha256.Size {
+				c.wantBlob(chat, b.Blob, b.Mime, 0, e.Author)
+			}
+			if len(b.Prev) == sha256.Size {
+				c.wantBlob(chat, b.Prev, b.PrevMime, 0, e.Author)
+			}
+		}
+		return
 	}
 	// large file: download thumbnail only, full bytes on explicit request
 	if len(b.Prev) == sha256.Size {
@@ -479,6 +587,9 @@ func (c *Core) askBlob(hash []byte) {
 		}
 	}
 	if target != nil {
+		c.mu.Lock()
+		w.peer = bytes.Clone(target.Pub)
+		c.mu.Unlock()
 		target.SendCtrl(Ctrl{T: "blobreq", Chat: chat, Blob: hash, Need: need})
 	}
 }
@@ -635,7 +746,9 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 	key := string(m.Blob)
 	c.mu.Lock()
 	w := c.wants[key]
-	if w == nil || !bytes.Equal(w.chat, m.Chat) {
+	// only from the peer we asked: anyone else could fill the buffer with
+	// junk chunks and keep it alive, so the real transfer never completed
+	if w == nil || !bytes.Equal(w.chat, m.Chat) || !bytes.Equal(w.peer, p.Pub) {
 		c.mu.Unlock()
 		return // unrequested
 	}
@@ -664,11 +777,12 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 		c.mu.Unlock()
 		return
 	}
-	a.last = time.Now()
+	// duplicates do not count as progress, or a resend loop keeps it alive
 	if a.parts[m.Idx] == nil {
 		a.parts[m.Idx] = bytes.Clone(m.Part)
 		a.got++
 		a.bytes += len(m.Part)
+		a.last = time.Now()
 	}
 	over := a.bytes > attach.MaxFileBytes
 	done := a.got == m.Total
@@ -684,16 +798,19 @@ func (c *Core) handleBlobPart(p *p2p.Peer, m Ctrl) {
 	if data == nil {
 		return
 	}
-	// content must strictly match what signed event promised
-	if sum := sha256.Sum256(data); !bytes.Equal(sum[:], m.Blob) {
-		return
-	}
-	if err := attach.Verify(data, mime); err != nil {
+	// content must strictly match what signed event promised; on a mismatch
+	// try another holder right away instead of waiting for wantRetry
+	sum := sha256.Sum256(data)
+	if !bytes.Equal(sum[:], m.Blob) || attach.Verify(data, mime) != nil {
+		c.mu.Lock()
+		w.asked = time.Time{}
+		c.mu.Unlock()
 		return
 	}
 	if _, err := c.St.PutBlob(data); err != nil {
 		return
 	}
+	c.St.NoteBlobChat(m.Chat, m.Blob)
 	c.mu.Lock()
 	delete(c.wants, key)
 	c.mu.Unlock()

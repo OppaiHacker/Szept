@@ -348,16 +348,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			meshPeer = true
-			// candidate only: it becomes a neighbour once it answers our dial
+			// candidate only: it becomes a neighbour once it answers our dial.
+			// Its hidden flag is taken from that answer, never from here: any
+			// hello naming its URL could set or clear it.
 			if len(m.From) > 0 {
 				if n := s.mesh.addNeighbor(string(m.From)); n != nil {
-					s.mesh.mu.Lock()
-					n.hidden = m.Hidden
-					s.mesh.mu.Unlock()
 					s.mesh.start()
 				}
 			}
-			c.send(Msg{Op: "ok"})
+			s.mesh.mu.Lock()
+			private := s.mesh.private
+			s.mesh.mu.Unlock()
+			c.send(Msg{Op: "ok", Hidden: private})
 		case "ndp_gossip", "mesh_signal", "mesh_lookup":
 			// meshPeer stays false for every ordinary client socket, which
 			// keeps these off the client plane
@@ -440,7 +442,7 @@ func (s *Server) meshFrame(c *client, m Msg, ip string) {
 	case "ndp_gossip":
 		c.send(Msg{Op: "ndp_gossip", Nodes: s.mesh.gossipFor(ip)})
 	case "mesh_signal":
-		if s.mesh.markTraceSeen(m.TraceID, c) {
+		if s.mesh.markTraceSeen(m.TraceID, c, m.To) {
 			return
 		}
 		if dst := s.hosts(m.To); dst != nil {
@@ -454,7 +456,7 @@ func (s *Server) meshFrame(c *client, m Msg, ip string) {
 		}
 		s.mesh.relay(m, m.To)
 	case "mesh_lookup":
-		if s.mesh.markTraceSeen(m.TraceID, c) {
+		if s.mesh.markTraceSeen(m.TraceID, c, m.Pub) {
 			return
 		}
 		if s.hosts(m.Pub) != nil {
@@ -593,6 +595,9 @@ func (c *Client) session() error {
 			conn, dialErr = dialFallbackDNS(u)
 		}
 		if dialErr == nil {
+			// same cap as the server side: a hostile or redirect-supplied
+			// connector must not push unbounded frames into the client
+			conn.SetReadLimit(256 << 10)
 			// Send registration as first frame (per szept protocol specification)
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteJSON(regMsg); err != nil {

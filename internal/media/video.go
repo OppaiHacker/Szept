@@ -8,6 +8,8 @@ import (
 	"image"
 	"image/jpeg"
 	"io"
+	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -35,6 +37,13 @@ func encodeJPEG(img image.Image, maxW int, quality int) []byte {
 // StartScreen captures the primary display as JPEG frames.
 // X11/Windows OK; Wayland needs XWayland (portal capture is the upgrade path).
 func StartScreen(fps int, cb func(jpegFrame []byte)) (stop func(), err error) {
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		stop, err := startScreenCast(fps, cb)
+		if err == nil || errors.Is(err, errCancelled) {
+			return stop, err
+		}
+		log.Printf("screen: portal screencast: %v; falling back to screenshots", err)
+	}
 	if screenshot.NumActiveDisplays() == 0 {
 		return nil, errors.New("no displays detected (Wayland without XWayland?)")
 	}

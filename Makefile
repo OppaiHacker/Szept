@@ -22,8 +22,11 @@ WINCC            ?= x86_64-w64-mingw32-gcc
 # in the module fails at pkg-config — hence the probe rather than a fixed value.
 #   Arch:   sudo pacman -S webkit2gtk-4.1     (GTK3)  |  webkitgtk-6.0 (GTK4)
 #   Debian: libwebkit2gtk-4.1-dev             (GTK3)  |  libwebkitgtk-6.0-dev
+comma := ,
 WAILS_TAGS ?= $(shell pkg-config --exists webkitgtk-6.0 2>/dev/null || echo gtk3)
-GOTAGS     := $(if $(WAILS_TAGS),-tags $(WAILS_TAGS),)
+# production: Wails' debug mode would force the webview inspector on; with the
+# tag it opens only in developer mode (settings) or with -devtools.
+GOTAGS     := -tags $(subst $(eval) ,$(comma),$(strip production $(WAILS_TAGS)))
 
 # Binary name -> package. Every build rule below derives the package from the
 # target it is building, so a new client costs one line here and one in BINS.

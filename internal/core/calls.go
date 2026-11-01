@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"log"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"szept/internal/attach"
@@ -26,6 +29,14 @@ type Call struct {
 	Members map[string]bool // remote pubs who announced "join"
 }
 
+// CallKey: a call in an added voice channel is keyed by chat ID + channel ID;
+// the default "Rozmowa" keeps the bare chat ID. Every chat argument in this
+// file is such a key.
+func CallKey(chat, ch []byte) []byte { return append(slices.Clip(chat), ch...) }
+
+// chatOf: the chat a call key belongs to.
+func chatOf(key []byte) []byte { return key[:min(len(key), 32)] }
+
 func chatLabel(kind string, chat []byte) string {
 	return kind + ":" + base64.RawURLEncoding.EncodeToString(chat)
 }
@@ -36,10 +47,22 @@ func parseLabel(label string) (kind string, chat []byte, ok bool) {
 		return "", nil, false
 	}
 	chat, err := base64.RawURLEncoding.DecodeString(label[i+1:])
-	if err != nil || len(chat) != 32 {
+	if err != nil || len(chat) < 32 || len(chat) > 48 {
 		return "", nil, false
 	}
 	return label[:i], chat, true
+}
+
+// JoinedCall: key of the call you are in, nil when none.
+func (c *Core) JoinedCall() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, call := range c.calls {
+		if call.Joined {
+			return call.Chat
+		}
+	}
+	return nil
 }
 
 func (c *Core) CallState(chat []byte) *Call {
@@ -49,8 +72,15 @@ func (c *Core) CallState(chat []byte) *Call {
 }
 
 func (c *Core) handleCallCtrl(p *p2p.Peer, m Ctrl) {
-	st, err := c.ChatState(m.Chat)
+	st, err := c.ChatState(chatOf(m.Chat))
 	if err != nil || !st.IsMember(p.Pub) {
+		return
+	}
+	// the owner disconnects us from the call; we may join again
+	if m.Action == "kick" {
+		if bytes.Equal(p.Pub, st.Owner) && bytes.Equal(c.JoinedCall(), m.Chat) {
+			c.LeaveCall(m.Chat)
+		}
 		return
 	}
 	c.mu.Lock()
@@ -72,9 +102,27 @@ func (c *Core) handleCallCtrl(p *p2p.Peer, m Ctrl) {
 	c.Notify()
 }
 
+// KickFromCall disconnects pub from the call key. Owner only; it is sent to
+// that one peer, who honors it only from the owner.
+func (c *Core) KickFromCall(key, pub []byte) error {
+	st, err := c.ChatState(chatOf(key))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(st.Owner, c.ID.Pub) {
+		return errors.New("tylko właściciel może rozłączać z kanału")
+	}
+	p := c.P2P.Peer(pub)
+	if p == nil {
+		return errors.New("ta osoba jest offline")
+	}
+	p.SendCtrl(Ctrl{T: "call", Chat: key, Action: "kick"})
+	return nil
+}
+
 // broadcast a call control action to online chat members.
 func (c *Core) callBroadcast(chat []byte, action string) {
-	st, err := c.ChatState(chat)
+	st, err := c.ChatState(chatOf(chat))
 	if err != nil {
 		return
 	}
@@ -99,8 +147,18 @@ func (c *Core) mediaTargets(chat []byte) []*p2p.Peer {
 		}
 	}
 	c.mu.Unlock()
+	// a kicked member stays in call.Members until they say "leave"; while they
+	// are still a friend or co-member the connection survives the kick, so
+	// check membership here, per frame (ChatState is cached)
+	st, err := c.ChatState(chatOf(chat))
+	if err != nil {
+		return nil
+	}
 	var out []*p2p.Peer
 	for _, pub := range pubs {
+		if !st.IsMember([]byte(pub)) {
+			continue
+		}
 		if p := c.P2P.Peer([]byte(pub)); p != nil {
 			out = append(out, p)
 		}
@@ -138,8 +196,13 @@ func (c *Core) JoinCall(chat []byte) error {
 	call.Mic = true
 	c.mu.Unlock()
 
-	player, err := media.StartPlayer()
-	if err != nil {
+	var player *media.Player
+	var err error
+	if c.VoiceOut != nil {
+		c.mu.Lock()
+		c.voiceOut = c.VoiceOut
+		c.mu.Unlock()
+	} else if player, err = media.StartPlayer(c.Cfg.SpeakerDevice); err != nil {
 		log.Printf("call: player: %v", err)
 	} else {
 		if v := c.Cfg.OutputVol; v > 0 {
@@ -152,13 +215,27 @@ func (c *Core) JoinCall(chat []byte) error {
 	}
 	var seq uint32
 	lbl := chatLabel("v", chat) // once per call, not base64 per 20 ms frame
-	stopMic, err := media.StartVoice(func(pcm []byte) {
+	startMic := func(cb func([]byte)) (func(), error) { return media.StartVoice(c.Cfg.MicDevice, cb) }
+	if c.VoiceIn != nil {
+		startMic = c.VoiceIn
+	}
+	stopMic, err := startMic(func(pcm []byte) {
 		c.mu.Lock()
 		muted := !call.Mic
 		c.mu.Unlock()
 		if muted {
 			return
 		}
+		if g := float32(c.Cfg.MicGain); g > 0 && g != 1 {
+			media.ApplyGain(pcm, g)
+		}
+		samps := make([]int16, len(pcm)/2)
+		for i := range samps {
+			samps[i] = int16(uint16(pcm[2*i]) | uint16(pcm[2*i+1])<<8)
+		}
+		c.mu.Lock()
+		c.micPeak, c.micAt = media.Peak(samps), time.Now()
+		c.mu.Unlock()
 		seq++
 		frame := make([]byte, 4+len(pcm))
 		binary.BigEndian.PutUint32(frame, seq)
@@ -260,6 +337,56 @@ func (c *Core) ToggleDeafen(chat []byte) {
 	c.Notify()
 }
 
+// VoiceLevels: how loud each call participant is right now (pubkey -> 0..1),
+// including you while your mic sends. Only sources heard in the last 300 ms.
+func (c *Core) VoiceLevels() map[string]float32 {
+	c.mu.Lock()
+	p, peak, at := c.player, c.micPeak, c.micAt
+	c.mu.Unlock()
+	out := map[string]float32{}
+	if p != nil {
+		out = p.Levels()
+	}
+	if time.Since(at) < 300*time.Millisecond {
+		out[string(c.ID.Pub)] = peak
+	}
+	return out
+}
+
+// MicTest opens the microphone outside a call so the settings can show its
+// level (VoiceLevels, under your own key). Nothing is sent anywhere.
+func (c *Core) MicTest(on bool) error {
+	c.mu.Lock()
+	stop := c.stopTest
+	c.stopTest = nil
+	c.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if !on {
+		return nil
+	}
+	stop, err := media.StartVoice(c.Cfg.MicDevice, func(pcm []byte) {
+		if g := float32(c.Cfg.MicGain); g > 0 && g != 1 {
+			media.ApplyGain(pcm, g)
+		}
+		samps := make([]int16, len(pcm)/2)
+		for i := range samps {
+			samps[i] = int16(uint16(pcm[2*i]) | uint16(pcm[2*i+1])<<8)
+		}
+		c.mu.Lock()
+		c.micPeak, c.micAt = media.Peak(samps), time.Now()
+		c.mu.Unlock()
+	})
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.stopTest = stop
+	c.mu.Unlock()
+	return nil
+}
+
 // SetVoiceLevel: przestrzenne ustawienie jednego rozmówcy (scena 3D w GUI).
 func (c *Core) SetVoiceLevel(pub []byte, gain, pan float32) {
 	c.mu.Lock()
@@ -294,18 +421,58 @@ func (c *Core) SetOutputVolume(vol float64) {
 
 // startVideoSource wires a JPEG-producing source into the mesh.
 func (c *Core) startVideoSource(chat []byte, kind string, start func(onJPEG func([]byte)) (func(), error)) error {
-	var frameID uint32
-	stop, err := start(func(jpeg []byte) {
+	var (
+		mu      sync.Mutex
+		frameID uint32
+		last    []byte
+		lastAt  time.Time
+	)
+	emit := func(jpeg []byte) {
+		mu.Lock()
 		frameID++
-		c.sendVideoFrame(chat, kind, frameID, jpeg)
+		id := frameID
+		last, lastAt = jpeg, time.Now()
+		mu.Unlock()
+		c.sendVideoFrame(chat, kind, id, jpeg)
 		// local echo so the sender sees own picture
 		if cb := c.OnVideoFrame; cb != nil {
 			cb(chat, c.ID.Pub, kind, jpeg)
 		}
-	})
+	}
+	stopSrc, err := start(emit)
 	if err != nil {
+		c.mu.Lock()
+		if call := c.calls[string(chat)]; call != nil { // the button goes back off
+			if kind == "c" {
+				call.Cam = false
+			} else {
+				call.Screen = false
+			}
+		}
+		c.mu.Unlock()
 		return err
 	}
+	// A still screen gives no new frames, and viewers drop a tile that has
+	// been quiet for 4 s: repeat the last picture once a second meanwhile.
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				mu.Lock()
+				jpeg, quiet := last, time.Since(lastAt) > time.Second
+				mu.Unlock()
+				if quiet && jpeg != nil {
+					emit(jpeg)
+				}
+			}
+		}
+	}()
+	stop := func() { close(done); stopSrc() }
 	c.mu.Lock()
 	if kind == "c" {
 		c.stopCam = stop
@@ -338,7 +505,7 @@ func (c *Core) ToggleCam(chat []byte, device string) error {
 		return nil
 	}
 	return c.startVideoSource(chat, "c", func(cb func([]byte)) (func(), error) {
-		return media.StartCamera(device, 12, cb)
+		return media.StartCamera(device, 24, cb)
 	})
 }
 
@@ -364,7 +531,7 @@ func (c *Core) ToggleScreen(chat []byte) error {
 		return nil
 	}
 	return c.startVideoSource(chat, "s", func(cb func([]byte)) (func(), error) {
-		return media.StartScreen(8, cb)
+		return media.StartScreen(15, cb)
 	})
 }
 
@@ -372,13 +539,21 @@ func (c *Core) ToggleScreen(chat []byte) error {
 
 const chunkSize = 12 * 1024
 
+// maxVideoBacklog: about two frames still waiting for the link.
+const maxVideoBacklog = 256 * 1024
+
 func (c *Core) sendVideoFrame(chat []byte, kind string, frameID uint32, jpeg []byte) {
 	total := (len(jpeg) + chunkSize - 1) / chunkSize
 	if total > 255 {
 		return // absurdly large frame, drop
 	}
 	lbl := chatLabel(kind, chat)
-	targets := c.mediaTargets(chat)
+	var targets []*p2p.Peer
+	for _, p := range c.mediaTargets(chat) {
+		if p.MediaBacklog(lbl) < maxVideoBacklog {
+			targets = append(targets, p)
+		}
+	}
 	for idx := 0; idx < total; idx++ {
 		end := (idx + 1) * chunkSize
 		if end > len(jpeg) {
@@ -414,7 +589,7 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 	}
 	// sender must be an active chat member *and* must have announced the call:
 	// without this, a non-participant chat member can inject audio into speaker and video on screen
-	st, err := c.ChatState(chat)
+	st, err := c.ChatState(chatOf(chat))
 	if err != nil || !st.IsMember(p.Pub) {
 		return
 	}

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -182,6 +183,9 @@ func UsesKey(path string, key []byte) bool {
 
 // Rekey re-encrypts every value with key in one transaction and switches to
 // it. Either all of the database moves to the new key or none of it does.
+// The file is then compacted into a fresh one: bbolt only frees the old
+// pages, so the old-key ciphertext would otherwise stay readable on disk with
+// the old identity file and password.
 func (s *Store) Rekey(key []byte) error {
 	s.kmu.Lock()
 	defer s.kmu.Unlock()
@@ -190,10 +194,44 @@ func (s *Store) Rekey(key []byte) error {
 			return rekeyBucket(b, [][]byte{name}, s.key, key)
 		})
 	})
-	if err == nil {
-		s.key = key
+	if err != nil {
+		return err
 	}
-	return err
+	s.key = key
+	return s.compact()
+}
+
+// compact rewrites the open database into a new file and swaps it in. The
+// rename is atomic, so a crash leaves either file, both under the same key.
+func (s *Store) compact() error {
+	path := s.db.Path()
+	tmp := path + ".compact"
+	os.Remove(tmp)
+	dst, err := bolt.Open(tmp, 0o600, &bolt.Options{Timeout: 3 * time.Second})
+	if err != nil {
+		return err
+	}
+	if err := bolt.Compact(dst, s.db, 0); err != nil {
+		dst.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := s.db.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+	}
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 3 * time.Second})
+	if err != nil {
+		return err
+	}
+	s.db = db
+	return nil
 }
 
 func rekeyBucket(b *bolt.Bucket, path [][]byte, old, key []byte) error {
@@ -248,7 +286,11 @@ func (s *Store) update(fn func(*bolt.Tx) error) error {
 	return s.db.Update(fn)
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.kmu.Lock()
+	defer s.kmu.Unlock()
+	return s.db.Close()
+}
 
 // Snapshot writes a consistent copy of the open database (a bbolt read
 // transaction) — the basis of a working backup without closing the app.
@@ -838,10 +880,17 @@ type ProfileMeta struct {
 	Bio        string `json:"bio,omitempty"`
 	Banner     []byte `json:"banner,omitempty"`
 	BannerMime string `json:"bmime,omitempty"`
+	Style      string `json:"style,omitempty"`
+	// author's clock (ns) of the avatar and card events behind this entry;
+	// an older event (another chat, late sync) must not overwrite a newer one
+	AvatarTS int64 `json:"ats,omitempty"`
+	CardTS   int64 `json:"pts,omitempty"`
 }
 
 func (p ProfileMeta) empty() bool {
-	return len(p.Blob) == 0 && len(p.Banner) == 0 && p.Status == "" && p.Bio == ""
+	// a cleared card keeps its timestamps, or an older event would bring it back
+	return len(p.Blob) == 0 && len(p.Banner) == 0 && p.Status == "" && p.Bio == "" && p.Style == "" &&
+		p.AvatarTS == 0 && p.CardTS == 0
 }
 
 // PutProfile stores the profile card for given public key. Real source

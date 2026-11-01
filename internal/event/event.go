@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -33,10 +34,19 @@ const (
 	KindNick   = "nick"   // {Name} author renames themselves in this chat
 	KindReact  = "react"  // {Target, Text=emoji} reaction to an event
 	KindDelete = "delete" // {Target} deletes/revokes an event
+	KindPin    = "pin"    // {Target, Arch=unpin} pins a message for everyone
 	// KindProfile: {Text=status, Bio, Blob/Mime=banner} author's own profile card.
 	// Empty field clears it; all three travel together, so one event carries
 	// the whole card.
 	KindProfile = "profile"
+	// KindChannel: {Target=channel ID, Name, Text=text|voice|cat, Ch=parent
+	// category, Arch=archived}. Owner only; an empty Name deletes the channel
+	// for good. An empty Target names the default channel of that kind.
+	KindChannel = "channel"
+	// KindServer: {Blob/Mime=icon, Prev/PrevMime=banner, Style=decoration}
+	// the group's look. Owner only; the whole look travels in one event, an
+	// empty field clears that part.
+	KindServer = "server"
 )
 
 // MembershipKind: events that decide who belongs to the chat. The fold can only
@@ -52,7 +62,7 @@ func MembershipKind(kind string) bool {
 // can fold membership from genesis, and content keys only from their join on.
 func MetaKind(kind string) bool {
 	switch kind {
-	case KindCreate, KindAdd, KindRemove, KindRekey, KindRename, KindNick, KindAvatar, KindProfile:
+	case KindCreate, KindAdd, KindRemove, KindRekey, KindRename, KindNick, KindAvatar, KindProfile, KindChannel, KindServer:
 		return true
 	}
 	return false
@@ -66,7 +76,7 @@ func MemberKey(contentKey []byte) []byte { return crypt.Derive(contentKey, "szep
 // we don't render them as separate lines and they don't increment unread badges.
 func QuietKind(kind string) bool {
 	return kind == KindAvatar || kind == KindNick || kind == KindReact ||
-		kind == KindDelete || kind == KindProfile
+		kind == KindDelete || kind == KindProfile || kind == KindChannel || kind == KindPin || kind == KindServer
 }
 
 type Event struct {
@@ -85,8 +95,10 @@ type Body struct {
 	Name   string `json:"name,omitempty"`
 	Pub    []byte `json:"pub,omitempty"`
 	TS     int64  `json:"ts,omitempty"`     // author's clock, display only (inside AEAD)
-	Target []byte `json:"target,omitempty"` // ID of target event (KindReact / KindDelete)
+	NS     int64  `json:"ns,omitempty"`     // KindAvatar / KindProfile: author's clock in ns, newest card wins
+	Target []byte `json:"target,omitempty"` // ID of target event (KindReact / KindDelete / KindPin; KindMsg: the message replied to)
 	Bio    string `json:"bio,omitempty"`    // KindProfile: description under the name
+	Style  string `json:"style,omitempty"`  // KindProfile: name, avatar and card effects (see SafeStyle)
 
 	// attachments (KindFile / KindAvatar): only the sha256 of the content
 	// travels in the DAG; the bytes are fetched on demand from peers.
@@ -108,6 +120,11 @@ type Body struct {
 	// NoHist (KindCreate): members added later get no content keys from
 	// before they joined.
 	NoHist bool `json:"nohist,omitempty"`
+	// Ch: the channel a KindMsg / KindFile belongs to (empty = the default
+	// one), or the parent category of a KindChannel.
+	Ch []byte `json:"ch,omitempty"`
+	// Arch (KindChannel): the channel sits in the owner's archive.
+	Arch bool `json:"arch,omitempty"`
 }
 
 // signable: deterministic length-prefixed concat of all fields except Sig.
@@ -261,6 +278,22 @@ func SafeBio(s string) string {
 	return s
 }
 
+// SafeStyle: the profile-effects string is a short list of preset names and
+// palette indices ("font.effect.hue.hue.deco.frame.fx"). Anything outside
+// [a-z0-9.] is dropped; clients render only names they know.
+func SafeStyle(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' {
+			return r
+		}
+		return -1
+	}, s)
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
 // ---- membership fold ----
 
 type Member struct {
@@ -272,11 +305,13 @@ type Member struct {
 	AvatarMime string
 	Status     string // short "what am I up to" line
 	Bio        string // longer description shown on the profile
+	Style      string // profile effects, already passed through SafeStyle
 	Banner     []byte // sha256 of the profile banner blob
 	BannerMime string
 	// JoinEpoch: first epoch whose content key this member gets. 1 unless the
 	// chat has NoHistory, where it is the epoch after the one they were added in.
 	JoinEpoch uint32
+	addID     []byte // NoHistory: the add that set JoinEpoch, until a rekey that saw it opens that epoch
 }
 
 type State struct {
@@ -286,6 +321,7 @@ type State struct {
 	Members   map[string]*Member           // key: hex-free string(pub)
 	Reactions map[string]map[string]string // key: string(targetID) -> pub -> emoji
 	Deleted   map[string]bool              // key: string(targetID) -> true
+	Pinned    map[string]bool              // key: string(targetID) -> true
 
 	// KeyHash: epoch -> sha256 of the key that epoch is *supposed* to use, as
 	// announced by the signed KindCreate / KindRekey event. Lets the key handler
@@ -303,6 +339,25 @@ type State struct {
 	// key must degrade the view of the chat, never destroy the chat. A missing
 	// content key alone does not count: membership is still complete.
 	MissingKey map[uint32]bool
+
+	// Channels: text/voice channels and categories, in order of creation.
+	// Genesis seeds the defaults "czat" and "Rozmowa" with an empty ID: their
+	// messages carry no Ch and their call key is the bare chat ID.
+	Channels []Channel
+
+	// the group's look (KindServer): sha256 of icon and banner blobs, and
+	// the decoration string, already passed through SafeStyle
+	Icon, Banner         []byte
+	IconMime, BannerMime string
+	Style                string
+}
+
+type Channel struct {
+	ID   []byte
+	Name string
+	Kind string // text | voice | cat
+	Cat  []byte // parent category, nil = default
+	Arch bool   // archived: hidden from members, the owner can restore it
 }
 
 // Clone copies the maps a later Apply could change. Byte slices are never
@@ -319,9 +374,11 @@ func (s *State) Clone() *State {
 		c.Reactions[k] = maps.Clone(r)
 	}
 	c.Deleted = maps.Clone(s.Deleted)
+	c.Pinned = maps.Clone(s.Pinned)
 	c.KeyHash = maps.Clone(s.KeyHash)
 	c.MKeyHash = maps.Clone(s.MKeyHash)
 	c.MissingKey = maps.Clone(s.MissingKey)
+	c.Channels = slices.Clone(s.Channels)
 	return &c
 }
 
@@ -386,7 +443,8 @@ type Folder struct {
 	verify bool
 	// parent Lamport: apply order derives from DAG, not internal counter
 	seen    map[string]uint64
-	authors map[string][]byte // event id -> author, for KindDelete
+	authors map[string][]byte   // event id -> author, for KindDelete
+	parents map[string][][]byte // NoHistory only: event id -> parents, for descends
 	last    *Event
 }
 
@@ -396,12 +454,13 @@ func NewFolder(chatID []byte, keys, mkeys map[uint32][]byte, verify bool) *Folde
 			Members:    map[string]*Member{},
 			Reactions:  map[string]map[string]string{},
 			Deleted:    map[string]bool{},
+			Pinned:     map[string]bool{},
 			KeyHash:    map[uint32][]byte{},
 			MKeyHash:   map[uint32][]byte{},
 			MissingKey: map[uint32]bool{},
 		},
 		chatID: chatID, keys: keys, mkeys: mkeys, verify: verify,
-		seen: map[string]uint64{}, authors: map[string][]byte{},
+		seen: map[string]uint64{}, authors: map[string][]byte{}, parents: map[string][][]byte{},
 	}
 }
 
@@ -458,6 +517,7 @@ func (f *Folder) Apply(e *Event) error {
 		f.last = prev
 		delete(f.seen, string(e.ID()))
 		delete(f.authors, string(e.ID()))
+		delete(f.parents, string(e.ID()))
 		return err
 	}
 	return nil
@@ -486,19 +546,24 @@ func (f *Folder) apply(e *Event) error {
 	}
 	seen[string(e.ID())] = e.Lamport
 	authors[string(e.ID())] = e.Author
+	if st.NoHistory {
+		f.parents[string(e.ID())] = e.Parents
+	}
 	// a bad epoch key (e.g. spoofed by a peer) counts as a missing one
 	body, ok := e.Open(f.keys, f.mkeys)
 	if !ok {
 		// Can't decrypt. Genesis is fatal — without it there is no chat at all.
-		// A membership or profile event is skipped and its epoch flagged: a
-		// single bad or not-yet-delivered epoch key used to abort the whole fold,
-		// which made key poisoning a permanent chat lockout instead of a gap in
-		// the view. A content event only needs its author checked, which works
-		// without the body.
+		// A membership event is skipped and its epoch flagged: a single bad or
+		// not-yet-delivered epoch key used to abort the whole fold, which made
+		// key poisoning a permanent chat lockout instead of a gap in the view.
+		// Anything else only needs its author checked, which works without the
+		// body. Only membership kinds flag the epoch: a member's unreadable
+		// profile or nick used to mark it degraded and so park every later
+		// owner kick in that epoch.
 		if isGenesis {
 			return fmt.Errorf("missing key for epoch %d (kind %s)", e.Epoch, e.Kind)
 		}
-		if MetaKind(e.Kind) {
+		if MembershipKind(e.Kind) {
 			st.MissingKey[e.Epoch] = true
 		} else if !st.IsMember(e.Author) && !st.Degraded() {
 			return fmt.Errorf("%s by non-member", e.Kind)
@@ -518,6 +583,7 @@ func (f *Folder) apply(e *Event) error {
 		st.Epoch = 1
 		st.NoHistory = body.NoHist
 		st.Members[string(e.Author)] = &Member{Pub: e.Author, Name: SafeName(body.Text), JoinEpoch: 1}
+		st.Channels = []Channel{{Name: "czat", Kind: "text"}, {Name: "Rozmowa", Kind: "voice"}}
 		if len(body.Blob) == sha256.Size {
 			st.KeyHash[1] = body.Blob
 		}
@@ -549,10 +615,17 @@ func (f *Folder) apply(e *Event) error {
 			if prev.Removed && bytes.Equal(e.Author, st.Owner) {
 				prev.Removed, prev.AddedBy = false, nil
 				prev.JoinEpoch = max(prev.JoinEpoch, join)
+				if st.NoHistory {
+					prev.addID = e.ID()
+				}
 			}
 			break
 		}
-		st.Members[string(body.Pub)] = &Member{Pub: body.Pub, Name: SafeName(body.Name), AddedBy: e.Author, JoinEpoch: join}
+		m := &Member{Pub: body.Pub, Name: SafeName(body.Name), AddedBy: e.Author, JoinEpoch: join}
+		if st.NoHistory {
+			m.addID = e.ID()
+		}
+		st.Members[string(body.Pub)] = m
 	case KindRemove:
 		if !bytes.Equal(e.Author, st.Owner) {
 			return errors.New("remove by non-owner")
@@ -564,6 +637,20 @@ func (f *Folder) apply(e *Event) error {
 		}
 		if e.Epoch+1 > st.Epoch {
 			st.Epoch = e.Epoch + 1
+		}
+		// A rekey that opens a newcomer's JoinEpoch without having seen their
+		// add raced it: the owner may already have written in that epoch for
+		// people who did not know about them. Push the join one epoch on, so
+		// they start at the rotation made after the add (core.autoRekey).
+		for _, m := range st.Members {
+			if m.addID == nil || m.Removed || m.JoinEpoch != e.Epoch+1 {
+				continue
+			}
+			if f.descends(e, m.addID) {
+				m.addID = nil
+			} else {
+				m.JoinEpoch++
+			}
 		}
 		// binds the next epoch's key to signed history (see State.KeyHash)
 		if len(body.Blob) == sha256.Size {
@@ -585,6 +672,33 @@ func (f *Folder) apply(e *Event) error {
 			}
 			return errors.New("msg by non-member")
 		}
+	case KindChannel:
+		// owner only, ignored otherwise like a member's rename
+		k := body.Text
+		if !bytes.Equal(e.Author, st.Owner) || len(body.Target) > 16 ||
+			(k != "text" && k != "voice" && k != "cat") || (len(body.Target) == 0 && k == "cat") {
+			break
+		}
+		// both defaults have an empty ID: the kind tells them apart
+		i := slices.IndexFunc(st.Channels, func(c Channel) bool {
+			return bytes.Equal(c.ID, body.Target) && (len(body.Target) > 0 || c.Kind == k)
+		})
+		switch {
+		case body.Name == "" && i >= 0:
+			st.Channels = slices.Delete(st.Channels, i, i+1)
+		case body.Name == "":
+		case i >= 0:
+			st.Channels[i].Name, st.Channels[i].Cat, st.Channels[i].Arch = SafeName(body.Name), body.Ch, body.Arch
+		default:
+			st.Channels = append(st.Channels, Channel{ID: body.Target, Name: SafeName(body.Name), Kind: k, Cat: body.Ch, Arch: body.Arch})
+		}
+	case KindServer:
+		// owner only, ignored otherwise like a member's rename
+		if bytes.Equal(e.Author, st.Owner) {
+			st.Icon, st.IconMime = body.Blob, body.Mime
+			st.Banner, st.BannerMime = body.Prev, body.PrevMime
+			st.Style = SafeStyle(body.Style)
+		}
 	case KindAvatar:
 		// only your own avatar, and only while you are a member
 		if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
@@ -595,7 +709,7 @@ func (f *Folder) apply(e *Event) error {
 		// Text arrives from the network: cleanse and cap it here too, so the
 		// folded state is as safe to render as the profile index.
 		if m, ok := st.Members[string(e.Author)]; ok && !m.Removed {
-			m.Status, m.Bio = SafeName(body.Text), SafeBio(body.Bio)
+			m.Status, m.Bio, m.Style = SafeName(body.Text), SafeBio(body.Bio), SafeStyle(body.Style)
 			m.Banner, m.BannerMime = body.Blob, body.Mime
 		}
 	case KindNick:
@@ -638,8 +752,46 @@ func (f *Folder) apply(e *Event) error {
 		if a, ok := authors[string(body.Target)]; ok && (bytes.Equal(a, e.Author) || bytes.Equal(e.Author, st.Owner)) {
 			st.Deleted[string(body.Target)] = true
 		}
+	case KindPin:
+		if !st.IsMember(e.Author) {
+			if st.Degraded() {
+				return nil
+			}
+			return errors.New("pin by non-member")
+		}
+		// any member pins or unpins; the last event in canonical order wins
+		if _, ok := authors[string(body.Target)]; ok {
+			if body.Arch {
+				delete(st.Pinned, string(body.Target))
+			} else {
+				st.Pinned[string(body.Target)] = true
+			}
+		}
 	}
 	return nil
+}
+
+// descends reports whether e has the applied event anc among its ancestors.
+// Only events with a Lamport above anc's can lead to it.
+func (f *Folder) descends(e *Event, anc []byte) bool {
+	floor, ok := f.seen[string(anc)]
+	if !ok {
+		return false
+	}
+	queue, done := slices.Clone(e.Parents), map[string]bool{}
+	for len(queue) > 0 {
+		id := string(queue[len(queue)-1])
+		queue = queue[:len(queue)-1]
+		if id == string(anc) {
+			return true
+		}
+		if done[id] || f.seen[id] <= floor {
+			continue
+		}
+		done[id] = true
+		queue = append(queue, f.parents[id]...)
+	}
+	return false
 }
 
 // checkLamport enforces Lamport = max(parents)+1 and presence of parents before

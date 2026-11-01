@@ -129,6 +129,14 @@ func bannerURL(c *core.Core, pub []byte) string {
 	return "/banner/" + hexs(pub) + "?v=" + hexs(card.Banner)[:16]
 }
 
+// blobURL: a content-addressed picture we already hold, "" otherwise.
+func blobURL(c *core.Core, hash []byte) string {
+	if len(hash) == 0 || !c.St.HasBlob(hash) {
+		return ""
+	}
+	return "/blob/" + hexs(hash)
+}
+
 // ---- live call frames ----
 
 type frame struct {

@@ -84,6 +84,19 @@ func (p *Peer) BufferedCtrl() uint64 {
 // SendMedia sends a frame over an unreliable, unordered channel with the
 // given label, creating it on first use. Frames sent before the channel
 // opens are dropped (fine for audio/video).
+// MediaBacklog: bytes queued on a media channel and not yet sent. Video
+// skips whole frames while it is high, so a slow link shows fewer pictures
+// instead of ever older ones.
+func (p *Peer) MediaBacklog(label string) uint64 {
+	p.mu.Lock()
+	dc := p.media[label]
+	p.mu.Unlock()
+	if dc == nil {
+		return 0
+	}
+	return dc.BufferedAmount()
+}
+
 func (p *Peer) SendMedia(label string, frame []byte) {
 	p.mu.Lock()
 	dc, ok := p.media[label]

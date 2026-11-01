@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -409,26 +410,46 @@ func TestPrivateMeshRequiresAuth(t *testing.T) {
 // flood must evict old ids, never stop accepting new ones (that froze the mesh).
 func TestSeenTracesBounded(t *testing.T) {
 	m := newMeshManager(nil, "ws://me", nil)
-	if !m.markTraceSeen("", nil) {
+	if !m.markTraceSeen("", nil, nil) {
 		t.Fatal("pusty TraceID ma być odrzucony")
 	}
-	if !m.markTraceSeen(strings.Repeat("x", maxTraceIDLen+1), nil) {
+	if !m.markTraceSeen(strings.Repeat("x", maxTraceIDLen+1), nil, nil) {
 		t.Fatal("przerośnięty TraceID ma być odrzucony")
 	}
-	if m.markTraceSeen("abc", nil) || !m.markTraceSeen("abc", nil) {
+	if m.markTraceSeen("abc", nil, nil) || !m.markTraceSeen("abc", nil, nil) {
 		t.Fatal("pierwszy raz nowy, drugi raz widziany")
 	}
 	for i := 0; i < maxSeenTraces; i++ {
-		m.markTraceSeen(strconv.Itoa(i), nil)
+		m.markTraceSeen(strconv.Itoa(i), nil, nil)
 	}
-	if m.markTraceSeen("po-przepelnieniu", nil) {
+	if m.markTraceSeen("po-przepelnieniu", nil, nil) {
 		t.Fatal("po zalewie nowy ślad ma przejść")
 	}
 	if len(m.traces) > maxSeenTraces || len(m.traceLog) > maxSeenTraces {
 		t.Fatalf("ślady urosły ponad limit: %d", len(m.traces))
 	}
-	if m.markTraceSeen("abc", nil) {
+	if m.markTraceSeen("abc", nil, nil) {
 		t.Fatal("najstarszy ślad miał wypaść")
+	}
+}
+
+// mesh_found counts only for the key the trace asked about, and only once.
+func TestMeshFoundBoundToKey(t *testing.T) {
+	m := newMeshManager(nil, "ws://me", nil)
+	n := &neighborNode{url: "ws://sasiad"}
+	m.markTraceSeen("t1", nil, []byte("ofiara"))
+	m.found(n, Msg{Op: "mesh_found", TraceID: "t1", Pub: []byte("inny")})
+	if _, ok := m.routes["inny"]; ok {
+		t.Fatal("odpowiedź o cudzy klucz ustawiła trasę")
+	}
+	m.found(n, Msg{Op: "mesh_found", TraceID: "t1", Pub: []byte("ofiara")})
+	if _, ok := m.routes["ofiara"]; !ok {
+		t.Fatal("prawdziwa odpowiedź nie ustawiła trasy")
+	}
+	delete(m.routes, "ofiara")
+	m.found(n, Msg{Op: "mesh_found", TraceID: "t1", Pub: []byte("ofiara")})
+	if _, ok := m.routes["ofiara"]; ok {
+		t.Fatal("ślad dało się użyć drugi raz")
 	}
 }
 
@@ -628,7 +649,9 @@ func TestPrivateGossip(t *testing.T) {
 	m := s.mesh
 	m.addNeighbor("ws://203.0.113.9:7777").lastSeen = time.Now()
 	hid := m.addNeighbor("ws://203.0.113.10:7777")
-	hid.lastSeen, hid.hidden = time.Now(), true
+	hid.lastSeen = time.Now()
+	// the flag comes from the neighbour's own answer to our dial
+	m.fromNeighbor(hid, Msg{Op: "ok", Hidden: true})
 	if got := m.gossipFor("10.0.0.1"); len(got) != 1 || got[0] != "ws://203.0.113.9:7777" {
 		t.Fatalf("hidden neighbour leaked or visible one missing: %v", got)
 	}
@@ -645,5 +668,35 @@ func TestPrivateGossip(t *testing.T) {
 	}
 	if len(m.shareable("10.0.0.1", redirectShare, false)) != 0 {
 		t.Fatal("client redirect from a private node")
+	}
+}
+
+func TestPublicIPSpecialRanges(t *testing.T) {
+	for _, s := range []string{"100.64.0.1", "198.18.0.1", "240.0.0.1", "0.1.2.3", "64:ff9b::a00:1", "10.0.0.1", "::1"} {
+		if publicIP(net.ParseIP(s)) {
+			t.Errorf("%s uznany za publiczny", s)
+		}
+	}
+	for _, s := range []string{"1.1.1.1", "2606:4700::1111"} {
+		if !publicIP(net.ParseIP(s)) {
+			t.Errorf("%s uznany za niepubliczny", s)
+		}
+	}
+}
+
+// Walking the mesh from every allowed block still reveals only maxGossipURLs.
+func TestGossipURLBudget(t *testing.T) {
+	m := NewServer().mesh
+	for i := range MaxNeighbors {
+		m.addNeighbor(fmt.Sprintf("ws://203.0.113.%d:7777", i+1)).lastSeen = time.Now()
+	}
+	learned := map[string]bool{}
+	for b := range maxGossipBlocks {
+		for _, u := range m.gossipFor(fmt.Sprintf("198.51.%d.1", b)) {
+			learned[u] = true
+		}
+	}
+	if len(learned) > maxGossipURLs {
+		t.Fatalf("spis mesha: %d adresów, limit %d", len(learned), maxGossipURLs)
 	}
 }

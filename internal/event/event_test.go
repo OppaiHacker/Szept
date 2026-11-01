@@ -381,3 +381,79 @@ func TestFolderIncremental(t *testing.T) {
 		t.Fatal("Clone differs")
 	}
 }
+
+// A member's unreadable profile event must not degrade the epoch: that used to
+// park every later owner kick in it, so a kicked member stayed in.
+func TestUnreadableProfileDoesNotDegrade(t *testing.T) {
+	ownerPub, owner, _ := ed25519.GenerateKey(nil)
+	malPub, mal, _ := ed25519.GenerateKey(nil)
+	key1 := crypt.NewKey()
+	gen, _ := New(owner, make([]byte, 32), KindCreate, Body{Name: "grupa", Text: "szef"}, 1, nil, 1, key1)
+	chatID := gen.ID()
+	addMal, _ := New(owner, chatID, KindAdd, Body{Pub: malPub, Name: "mal"}, 2, [][]byte{chatID}, 1, key1)
+	junk, _ := New(mal, chatID, KindProfile, Body{Text: "x"}, 3, [][]byte{addMal.ID()}, 1, crypt.NewKey())
+	kick, _ := New(owner, chatID, KindRemove, Body{Pub: malPub}, 4, [][]byte{junk.ID()}, 1, key1)
+	st, err := Fold([]*Event{gen, addMal, junk, kick}, chatID, map[uint32][]byte{1: key1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Degraded() || st.IsMember(malPub) || !st.IsMember(ownerPub) {
+		t.Fatal("nieczytelny profil zablokował wyrzucenie")
+	}
+}
+
+// A NoHistory add racing an owner rekey must not hand the newcomer the epoch
+// that rekey opened: the owner wrote in it without knowing about them.
+func TestJoinEpochRacingRekey(t *testing.T) {
+	for range 16 { // both canonical orders of the two concurrent events
+		_, owner, _ := ed25519.GenerateKey(nil)
+		alicePub, alice, _ := ed25519.GenerateKey(nil)
+		xPub, _, _ := ed25519.GenerateKey(nil)
+		k := map[uint32][]byte{1: crypt.NewKey(), 2: crypt.NewKey(), 3: crypt.NewKey(), 4: crypt.NewKey()}
+		gen, _ := New(owner, make([]byte, 32), KindCreate, Body{Name: "g", Text: "szef", NoHist: true}, 1, nil, 1, k[1])
+		chat := gen.ID()
+		addA, _ := New(owner, chat, KindAdd, Body{Pub: alicePub, Name: "a"}, 2, [][]byte{chat}, 1, k[1])
+		rk1, _ := New(owner, chat, KindRekey, Body{}, 3, [][]byte{addA.ID()}, 1, k[1])
+		addX, _ := New(alice, chat, KindAdd, Body{Pub: xPub, Name: "x"}, 4, [][]byte{rk1.ID()}, 2, k[2])
+		rk2, _ := New(owner, chat, KindRekey, Body{}, 4, [][]byte{rk1.ID()}, 2, k[2])
+		st, err := Fold([]*Event{gen, addA, rk1, addX, rk2}, chat, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Members[string(alicePub)].JoinEpoch != 2 {
+			t.Fatalf("zwykłe dołączenie: JoinEpoch %d", st.Members[string(alicePub)].JoinEpoch)
+		}
+		if j := st.Members[string(xPub)].JoinEpoch; j != 4 {
+			t.Fatalf("nowy dostał epokę %d otwartą bez wiedzy o nim", j)
+		}
+		// the rotation made after the add opens it, and the join stays there
+		rk3, _ := New(owner, chat, KindRekey, Body{}, 5, [][]byte{addX.ID(), rk2.ID()}, 3, k[3])
+		st, err = Fold([]*Event{gen, addA, rk1, addX, rk2, rk3}, chat, k)
+		if err != nil || st.Members[string(xPub)].JoinEpoch != 4 || st.Epoch != 4 {
+			t.Fatalf("rotacja po dodaniu: %v %d", err, st.Members[string(xPub)].JoinEpoch)
+		}
+	}
+}
+
+// The group's look belongs to the owner: a member's server event is ignored.
+func TestServerLookOwnerOnly(t *testing.T) {
+	_, owner, _ := ed25519.GenerateKey(nil)
+	bobPub, bob, _ := ed25519.GenerateKey(nil)
+	key := crypt.NewKey()
+	keys := map[uint32][]byte{1: key}
+	icon, banner := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+
+	gen := mustNew(t, owner, make([]byte, 32), KindCreate, Body{Name: "grupa", Text: "szef"}, 1, nil, key)
+	chatID := gen.ID()
+	add := mustNew(t, owner, chatID, KindAdd, Body{Pub: bobPub, Name: "bob"}, 2, [][]byte{chatID}, key)
+	look := mustNew(t, owner, chatID, KindServer, Body{Blob: icon, Mime: "image/png", Prev: banner, PrevMime: "image/png", Style: "0.0.3.5.2.0.0<x>"}, 3, [][]byte{add.ID()}, key)
+	hijack := mustNew(t, bob, chatID, KindServer, Body{Style: "0.0.0.0.9.0.0"}, 4, [][]byte{look.ID()}, key)
+
+	st, err := Fold([]*Event{gen, add, look, hijack}, chatID, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(st.Icon, icon) || !bytes.Equal(st.Banner, banner) || st.Style != "0.0.3.5.2.0.0x" {
+		t.Fatalf("wygląd serwera: icon %x banner %x style %q", st.Icon, st.Banner, st.Style)
+	}
+}

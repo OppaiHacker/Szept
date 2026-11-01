@@ -195,3 +195,26 @@ func TestAtRestOpaque(t *testing.T) {
 		t.Fatal("untouched blob failed to read")
 	}
 }
+
+// After a password change no old-key ciphertext may stay in the file.
+func TestRekeyLeavesNoOldBoxes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	s, err := Open(path, crypt.NewKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var old []byte
+	s.db.View(func(tx *bolt.Tx) error { old = bytes.Clone(tx.Bucket(bMeta).Get(kCheck)); return nil })
+	key := crypt.NewKey()
+	if err := s.Rekey(key); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if bytes.Contains(raw, old) {
+		t.Fatal("stary szyfrogram został w pliku bazy")
+	}
+	if s.PutChat([]byte("c"), ChatMeta{Name: "x"}) != nil {
+		t.Fatal("baza po zmianie klucza nie działa")
+	}
+}

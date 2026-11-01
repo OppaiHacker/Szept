@@ -15,7 +15,7 @@
   <header class="titlebar" style="--wails-draggable:drag">
     <div class="tb-brand">
       <svg class="tb-mark" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 3c-4.7 0-8.5 3.2-8.5 7.2 0 2.3 1.3 4.4 3.3 5.7l-.7 3.6a.5.5 0 0 0 .74.53l3.9-2.3c.4.05.8.07 1.26.07 4.7 0 8.5-3.2 8.5-7.6S16.7 3 12 3Z"/>
+        <rect x="7" y="9.4" width="1.9" height="5.2" rx=".95"/><rect x="11.05" y="7" width="1.9" height="10" rx=".95"/><rect x="15.1" y="9.4" width="1.9" height="5.2" rx=".95"/>
       </svg>
       <span class="tb-name">szept</span>
       <span class="tb-sub" id="tb-sub"></span>
@@ -38,9 +38,11 @@
 
   <main id="view" class="view"></main>
 
+  <div id="set-root"></div>
   <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
   <div id="modal-root"></div>
 
+  <script src="/fx/tsparticles.bundle.min.js"></script>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

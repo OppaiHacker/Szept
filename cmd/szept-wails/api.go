@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"szept/internal/boot"
 	"szept/internal/core"
 	"szept/internal/identity"
+	"szept/internal/media"
 )
 
 type App struct {
@@ -41,8 +43,10 @@ type App struct {
 	baseDir string
 	pinned  bool // -data given: profiles are off, one fixed directory
 
-	sel    string         // hex id of the open chat ("" = none)
-	seen   map[string]int // chat hex -> event count already shown
+	sel    string                    // hex id of the open chat ("" = none)
+	selCh  map[string]string         // chat hex -> open text channel hex ("" = default)
+	seenCh map[string]map[string]int // chat hex -> channel hex -> messages from others seen
+	seen   map[string]int            // chat hex -> event count already shown
 	booted bool
 	prev   map[string]prevEntry // chat hex -> sidebar preview, see preview()
 
@@ -54,6 +58,8 @@ func newApp(cfg *core.Config, cfgFile, baseDir string, pinned bool) *App {
 	return &App{
 		cfg: cfg, cfgFile: cfgFile, baseDir: baseDir, pinned: pinned,
 		seen:   map[string]int{},
+		selCh:  map[string]string{},
+		seenCh: map[string]map[string]int{},
 		frames: map[string]*frame{},
 	}
 }
@@ -256,6 +262,7 @@ type Me struct {
 	Code      string `json:"code"`
 	Status    string `json:"status"`
 	Bio       string `json:"bio"`
+	Style     string `json:"style"`
 	Avatar    string `json:"avatar"`
 	Banner    string `json:"banner"`
 	Profile   string `json:"profile"`
@@ -265,20 +272,37 @@ type Me struct {
 	ConnRelay bool   `json:"connRelay"`
 	Lang      string `json:"lang"`
 	Accent    string `json:"accent"`
+	Dev       bool   `json:"dev"`
 }
 
 type Chat struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Avatar    string   `json:"avatar"` // "" or a /avatar URL
-	Peer      string   `json:"peer"`   // direct chat: the other side's pubkey
-	Direct    bool     `json:"direct"`
-	Members   int      `json:"members"`
-	Online    int      `json:"online"`
-	InCall    []string `json:"inCall"`
-	Unread    int      `json:"unread"`
-	Preview   string   `json:"preview"`
-	PreviewTS int64    `json:"previewTS"`
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Avatar     string              `json:"avatar"` // "" or a /avatar URL; group: its icon
+	Banner     string              `json:"banner"` // group banner, "" = none
+	Style      string              `json:"style"`  // group decoration
+	Peer       string              `json:"peer"`   // direct chat: the other side's pubkey
+	Direct     bool                `json:"direct"`
+	Members    int                 `json:"members"`
+	Online     int                 `json:"online"`
+	InCall     []string            `json:"inCall"`
+	Call       *CallInfo           `json:"call,omitempty"` // set only while you are in this chat's call
+	IsOwner    bool                `json:"isOwner"`
+	CallKey    string              `json:"callKey"` // the call above: chat ID + voice channel ID
+	Channels   []ChanInfo          `json:"channels"`
+	Voice      map[string][]string `json:"voice"`      // voice channel ID ("" = default) -> names in its call
+	ChanUnread map[string]int      `json:"chanUnread"` // text channel ID -> new messages
+	Unread     int                 `json:"unread"`
+	Preview    string              `json:"preview"`
+	PreviewTS  int64               `json:"previewTS"`
+}
+
+type ChanInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind"` // text | voice | cat
+	Cat  string `json:"cat"`
+	Arch bool   `json:"arch"`
 }
 
 type Friend struct {
@@ -291,6 +315,7 @@ type Friend struct {
 	Relay  string `json:"relay"` // TURN relay the link goes through, "" = direct
 	Avatar string `json:"avatar"`
 	Status string `json:"status"`
+	Style  string `json:"style"`
 	Chat   string `json:"chat"` // existing direct chat, if any
 }
 
@@ -313,10 +338,10 @@ func (a *App) Snapshot() (Snapshot, error) {
 	card, _ := c.St.Profile(c.ID.Pub)
 	s := Snapshot{Me: Me{
 		Pub: hexs(c.ID.Pub), Name: c.ID.Name, Code: c.FriendCode(),
-		Status: card.Status, Bio: card.Bio,
+		Status: card.Status, Bio: card.Bio, Style: card.Style,
 		Avatar: avatarURL(c, c.ID.Pub), Banner: bannerURL(c, c.ID.Pub),
 		Profile: a.cfg.Profile, Connector: c.Cfg.Connector,
-		ConnUp: c.ConnUp(), ConnErr: c.ConnErr(), ConnRelay: c.ConnRelay(), Lang: c.Lang(), Accent: a.cfg.Accent,
+		ConnUp: c.ConnUp(), ConnErr: c.ConnErr(), ConnRelay: c.ConnRelay(), Lang: c.Lang(), Accent: a.cfg.Accent, Dev: a.cfg.DevMode,
 	}, Chats: []Chat{}, Friends: []Friend{}}
 
 	direct := map[string]string{} // peer hex -> chat hex
@@ -333,7 +358,22 @@ func (a *App) Snapshot() (Snapshot, error) {
 		if ch.InCall == nil {
 			ch.InCall = []string{}
 		}
-		if len(ci.Members) == 2 {
+		if key := c.JoinedCall(); len(key) >= 32 && equalBytes(key[:32], ci.ID) {
+			if call := c.CallState(key); call != nil {
+				ch.Call = &CallInfo{Joined: true, Mic: call.Mic, Deaf: call.Deaf, Cam: call.Cam, Screen: call.Screen}
+				ch.CallKey = hexs(key)
+			}
+		}
+		ch.IsOwner = equalBytes(ci.Owner, c.ID.Pub)
+		ch.Avatar, ch.Banner, ch.Style = blobURL(c, ci.Icon), blobURL(c, ci.Banner), ci.Style
+		ch.Channels, ch.Voice = []ChanInfo{}, map[string][]string{}
+		for _, x := range ci.Channels {
+			ch.Channels = append(ch.Channels, ChanInfo{ID: hexs(x.ID), Name: x.Name, Kind: x.Kind, Cat: hexs(x.Cat), Arch: x.Arch})
+		}
+		for k, names := range ci.Voice {
+			ch.Voice[hexs([]byte(k))] = names
+		}
+		if ci.Direct { // a named group of two is still a group
 			for _, m := range ci.Members {
 				if !equalBytes(m.Pub, c.ID.Pub) {
 					ch.Direct, ch.Peer = true, hexs(m.Pub)
@@ -347,7 +387,21 @@ func (a *App) Snapshot() (Snapshot, error) {
 		} else {
 			a.seen[id] = n
 		}
-		ch.Preview, ch.PreviewTS = a.preview(c, ci)
+		p := a.preview(c, ci)
+		ch.Preview, ch.PreviewTS = p.text, p.ts
+		// channels with news: what others wrote since you last had it open
+		if a.seenCh[id] == nil {
+			a.seenCh[id] = map[string]int{}
+		}
+		ch.ChanUnread = map[string]int{}
+		for k, n := range p.inCh {
+			open := id == a.sel && k == a.selCh[id]
+			if !a.booted || open || n < a.seenCh[id][k] {
+				a.seenCh[id][k] = n
+			} else if n > a.seenCh[id][k] {
+				ch.ChanUnread[k] = n - a.seenCh[id][k]
+			}
+		}
 		s.Chats = append(s.Chats, ch)
 		s.Unread += ch.Unread
 	}
@@ -360,7 +414,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 		st, _ := c.StatusOf(f.Pub)
 		s.Friends = append(s.Friends, Friend{
 			Pub: hexs(f.Pub), Name: f.Display(), Alias: f.Alias(), Online: c.Online(f.Pub), Relay: c.Relay(f.Pub),
-			Avatar: avatarURL(c, f.Pub), Status: st, Chat: direct[hexs(f.Pub)],
+			Avatar: avatarURL(c, f.Pub), Status: st, Style: c.StyleOf(f.Pub), Chat: direct[hexs(f.Pub)],
 		})
 	}
 	sort.Slice(s.Friends, func(i, j int) bool {
@@ -378,23 +432,30 @@ type prevEntry struct {
 	rev  uint64
 	text string
 	ts   int64
+	inCh map[string]int // channel hex -> messages from others in it
 }
 
 // preview caches the sidebar line under the chat's store revision, so a
 // refresh does not decrypt every chat's whole history again. Caller holds a.mu.
-func (a *App) preview(c *core.Core, ci core.ChatInfo) (string, int64) {
+func (a *App) preview(c *core.Core, ci core.ChatInfo) prevEntry {
 	key, rev := hexs(ci.ID), c.St.Rev(ci.ID)
 	if p, ok := a.prev[key]; ok && p.rev == rev {
-		return p.text, p.ts
+		return p
 	}
-	text, ts := preview(c, ci)
-	a.prev[key] = prevEntry{rev, text, ts}
-	return text, ts
+	msgs := c.Messages(ci.ID)
+	p := prevEntry{rev: rev, inCh: map[string]int{}}
+	p.text, p.ts = preview(c, ci, msgs)
+	for _, m := range msgs {
+		if m.Kind != "info" && !equalBytes(m.Author, c.ID.Pub) {
+			p.inCh[hexs(m.Ch)]++
+		}
+	}
+	a.prev[key] = p
+	return p
 }
 
 // preview: last real message in a chat, formatted for the sidebar.
-func preview(c *core.Core, ci core.ChatInfo) (string, int64) {
-	msgs := c.Messages(ci.ID)
+func preview(c *core.Core, ci core.ChatInfo, msgs []core.Msg) (string, int64) {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
 		if m.Kind == "info" {
@@ -431,6 +492,10 @@ type Msg struct {
 	Info      string            `json:"info,omitempty"`
 	Mine      bool              `json:"mine"`
 	Deleted   bool              `json:"deleted,omitempty"`
+	Pinned    bool              `json:"pinned,omitempty"`
+	Reply     string            `json:"reply,omitempty"`
+	ReplyName string            `json:"replyName,omitempty"` // author and text of the answered message,
+	ReplyText string            `json:"replyText,omitempty"` // even when it is outside the loaded page
 	Reactions map[string]string `json:"reactions,omitempty"`
 	ACK       string            `json:"ack,omitempty"`
 	Avatar    string            `json:"avatar,omitempty"`
@@ -454,6 +519,7 @@ type Member struct {
 	Name   string `json:"name"`
 	Avatar string `json:"avatar"`
 	Status string `json:"status"`
+	Style  string `json:"style"`
 	Online bool   `json:"online"`
 	Owner  bool   `json:"owner"`
 	Me     bool   `json:"me"`
@@ -481,10 +547,43 @@ type Conversation struct {
 	Epoch   uint32   `json:"epoch"`
 	Members []Member `json:"members"`
 	Msgs    []Msg    `json:"msgs"`
+	Pinned  []Msg    `json:"pinned"`
 	Typing  []string `json:"typing"`
 	Hidden  int      `json:"hidden"`
 	Call    CallInfo `json:"call"`
 	Online  int      `json:"online"`
+	CallKey string   `json:"callKey"`
+}
+
+// OpenChannel picks the text channel of a group that Conversation shows and
+// new messages go to.
+func (a *App) OpenChannel(chat, ch string) {
+	a.mu.Lock()
+	a.selCh[chat] = ch
+	a.mu.Unlock()
+	if c, err := a.live(); err == nil {
+		c.SetChannel(unhex(chat), unhex(ch))
+	}
+}
+
+// AddChannel creates a channel or category of a group.
+func (a *App) AddChannel(chat, kind, name, cat string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	_, err = c.AddChannel(unhex(chat), kind, name, unhex(cat))
+	return err
+}
+
+// PutChannel renames, moves, archives or restores a channel or category of a
+// group (id "" = the default of that kind), or with an empty name deletes it.
+func (a *App) PutChannel(chat, id, kind, name, cat string, arch bool) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.PutChannel(unhex(chat), unhex(id), kind, name, unhex(cat), arch)
 }
 
 // Open selects a chat and clears its unread badge.
@@ -533,8 +632,16 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 	if conv.Typing == nil {
 		conv.Typing = []string{}
 	}
+	a.mu.Lock()
+	selCh := a.selCh[chat]
+	a.mu.Unlock()
+	key := id // the call shown: the one you are in, else the default channel's
+	if k := c.JoinedCall(); len(k) >= 32 && equalBytes(k[:32], id) {
+		key = k
+	}
+	conv.CallKey = hexs(key)
 	inCall := map[string]bool{}
-	if call := c.CallState(id); call != nil {
+	if call := c.CallState(key); call != nil {
 		conv.Call = CallInfo{
 			Joined: call.Joined, Mic: call.Mic, Deaf: call.Deaf,
 			Cam: call.Cam, Screen: call.Screen, Members: []string{},
@@ -552,11 +659,11 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 		status, _ := c.StatusOf(m.Pub)
 		conv.Members = append(conv.Members, Member{
 			Pub: hexs(m.Pub), Name: m.Name, Avatar: avatarURL(c, m.Pub),
-			Status: status, Online: mine || c.Online(m.Pub),
+			Status: status, Style: c.StyleOf(m.Pub), Online: mine || c.Online(m.Pub),
 			Owner: equalBytes(m.Pub, ci.Owner), Me: mine,
 			InCall: inCall[hexs(m.Pub)], Relay: c.Relay(m.Pub),
 		})
-		if len(ci.Members) == 2 && !mine {
+		if ci.Direct && !mine {
 			conv.Direct, conv.Peer, conv.Avatar = true, hexs(m.Pub), avatarURL(c, m.Pub)
 		}
 	}
@@ -567,15 +674,29 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 		return strings.ToLower(conv.Members[i].Name) < strings.ToLower(conv.Members[j].Name)
 	})
 
-	msgs := c.Messages(id)
+	msgs := slices.DeleteFunc(c.Messages(id), func(m core.Msg) bool { return hexs(m.Ch) != selCh })
 	if limit <= 0 {
 		limit = 60
+	}
+	byID := map[string]core.Msg{}
+	for _, m := range msgs {
+		byID[string(m.ID)] = m
+		if m.Pinned && !m.Deleted {
+			conv.Pinned = append(conv.Pinned, toMsg(c, m))
+		}
 	}
 	if len(msgs) > limit {
 		msgs = msgs[len(msgs)-limit:]
 	}
 	for _, m := range msgs {
-		conv.Msgs = append(conv.Msgs, toMsg(c, m))
+		out := toMsg(c, m)
+		if r, ok := byID[string(m.Reply)]; ok {
+			out.ReplyName, out.ReplyText = r.Name, r.Text
+			if r.Kind == "file" && r.Text == "" {
+				out.ReplyText = r.File
+			}
+		}
+		conv.Msgs = append(conv.Msgs, out)
 	}
 	return conv, nil
 }
@@ -583,7 +704,7 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 func toMsg(c *core.Core, m core.Msg) Msg {
 	out := Msg{
 		ID: hexs(m.ID), Author: hexs(m.Author), Name: m.Name, Text: m.Text,
-		TS: m.TS.Unix(), Kind: m.Kind, Info: m.Info, Deleted: m.Deleted,
+		TS: m.TS.Unix(), Kind: m.Kind, Info: m.Info, Deleted: m.Deleted, Pinned: m.Pinned, Reply: hexs(m.Reply),
 		ACK: m.ACK, Mine: equalBytes(m.Author, c.ID.Pub),
 		Avatar: avatarURL(c, m.Author),
 	}
@@ -616,6 +737,22 @@ func (a *App) Send(chat, text string) error {
 		return err
 	}
 	return c.Send(unhex(chat), text)
+}
+
+func (a *App) SendReply(chat, text, reply string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.SendReply(unhex(chat), text, unhex(reply))
+}
+
+func (a *App) Pin(chat, msg string, unpin bool) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.PinMsg(unhex(chat), unhex(msg), unpin)
 }
 
 func (a *App) Typing(chat string, on bool) {
@@ -761,6 +898,32 @@ func (a *App) AddFriend(code string) (string, error) {
 	return f.Display(), nil
 }
 
+// Befriend adds a member of chat as a friend.
+func (a *App) Befriend(chat, pub string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	st, err := c.ChatState(unhex(chat))
+	if err != nil {
+		return err
+	}
+	m := st.Members[string(unhex(pub))]
+	if m == nil || m.Removed {
+		return errors.New("tej osoby nie ma w czacie")
+	}
+	return c.Befriend(m.Pub, m.Name)
+}
+
+// KickFromCall disconnects a member from the call key (owner only).
+func (a *App) KickFromCall(key, pub string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.KickFromCall(unhex(key), unhex(pub))
+}
+
 func (a *App) DelFriend(pub string) error {
 	c, err := a.live()
 	if err != nil {
@@ -790,6 +953,7 @@ type ProfileCard struct {
 	Name     string      `json:"name"`
 	Status   string      `json:"status"`
 	Bio      string      `json:"bio"`
+	Style    string      `json:"style"`
 	Avatar   string      `json:"avatar"`
 	Banner   string      `json:"banner"`
 	Online   bool        `json:"online"`
@@ -807,7 +971,7 @@ func (a *App) ProfileOf(pub string) (ProfileCard, error) {
 	p := unhex(pub)
 	status, bio := c.StatusOf(p)
 	card := ProfileCard{
-		Pub: pub, Status: status, Bio: bio,
+		Pub: pub, Status: status, Bio: bio, Style: c.StyleOf(p),
 		Avatar: avatarURL(c, p), Banner: bannerURL(c, p),
 		Online: c.Online(p), IsFriend: c.St.IsFriend(p),
 		IsMe: equalBytes(p, c.ID.Pub), History: []NickEntry{},
@@ -821,7 +985,7 @@ func (a *App) ProfileOf(pub string) (ProfileCard, error) {
 				card.Name = m.Name
 			}
 		}
-		if len(ci.Members) == 2 {
+		if ci.Direct {
 			for _, m := range ci.Members {
 				if equalBytes(m.Pub, p) {
 					card.Chat = hexs(ci.ID)
@@ -849,6 +1013,14 @@ func (a *App) SetStatus(text string) error {
 		return err
 	}
 	return c.SetStatus(text)
+}
+
+func (a *App) SetStyle(s string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.SetStyle(s)
 }
 
 func (a *App) SetBio(text string) error {
@@ -911,6 +1083,30 @@ func (a *App) ClearBanner() error {
 		return err
 	}
 	return c.ClearBanner()
+}
+
+// SetServerImage sets a group's icon or banner ("banner") from a data: URL;
+// an empty URL clears it.
+func (a *App) SetServerImage(chat, which, dataURL string, crop Crop) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	var raw []byte
+	if dataURL != "" {
+		if raw, err = decodeDataURL(dataURL, attach.MaxAvatarBytes); err != nil {
+			return err
+		}
+	}
+	return c.SetServerImage(unhex(chat), raw, crop.rect(), which == "banner")
+}
+
+func (a *App) SetServerStyle(chat, s string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.SetServerStyle(unhex(chat), s)
 }
 
 // ---- attachments ----
@@ -1030,6 +1226,29 @@ func (a *App) SetOutputVolume(v float64) {
 	}
 }
 
+// Tones plays a UI cue ([Hz, start s] notes) on the chosen speaker.
+func (a *App) Tones(notes [][2]float64) error {
+	return media.Tones(a.cfg.SpeakerDevice, notes)
+}
+
+// SetMicGain: microphone volume 0..2, live in a call and in the mic test.
+func (a *App) SetMicGain(v float64) {
+	if c, err := a.live(); err == nil {
+		c.Cfg.MicGain = v
+		a.cfg.MicGain = v
+		a.saveCfg()
+	}
+}
+
+// MicTest shows your microphone level in the settings; see core.MicTest.
+func (a *App) MicTest(on bool) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.MicTest(on)
+}
+
 func (a *App) MutePeer(pub string, mute bool) {
 	if c, err := a.live(); err == nil {
 		c.MuteVoicePeer(unhex(pub), mute)
@@ -1041,6 +1260,17 @@ func (a *App) SetVoice(pub string, gain, pan float64) {
 	if c, err := a.live(); err == nil {
 		c.SetVoiceLevel(unhex(pub), float32(gain), float32(pan))
 	}
+}
+
+// VoiceLevels: pubkey (hex) -> 0..1 for everyone audible in your call right now.
+func (a *App) VoiceLevels() map[string]float32 {
+	out := map[string]float32{}
+	if c, err := a.live(); err == nil {
+		for pub, v := range c.VoiceLevels() {
+			out[hexs([]byte(pub))] = v
+		}
+	}
+	return out
 }
 
 // ---- settings ----
@@ -1064,6 +1294,15 @@ type Settings struct {
 	WebhookPort    int      `json:"webhookPort"`
 	WebhookToken   string   `json:"webhookToken"`
 	DataDir        string   `json:"dataDir"`
+	DevMode        bool     `json:"devMode"`
+	MicDevice      string   `json:"micDevice"`
+	SpeakerDevice  string   `json:"speakerDevice"`
+	MicGain        float64  `json:"micGain"`
+}
+
+// AudioDevices: microphones and speakers for the voice settings.
+func (a *App) AudioDevices() map[string][]media.Device {
+	return map[string][]media.Device{"mics": media.Devices(true), "speakers": media.Devices(false)}
 }
 
 func (a *App) Settings() Settings {
@@ -1073,7 +1312,8 @@ func (a *App) Settings() Settings {
 		Accent: a.cfg.Accent, OutputVol: a.cfg.OutputVol, CamDevice: a.cfg.CamDevice,
 		NoNotify: a.cfg.NoNotify, RelayOnly: a.cfg.RelayOnly, QuietLookup: a.cfg.QuietLookup, Profile: a.cfg.Profile, Pinned: a.pinned,
 		WebhookOn: a.cfg.WebhookOn, WebhookPort: a.cfg.WebhookPort,
-		DataDir:  a.cfg.DataDir,
+		DataDir: a.cfg.DataDir, DevMode: a.cfg.DevMode,
+		MicDevice: a.cfg.MicDevice, SpeakerDevice: a.cfg.SpeakerDevice, MicGain: a.cfg.MicGain,
 		Profiles: []string{},
 	}
 	if s.Connectors == nil {
@@ -1101,9 +1341,12 @@ func (a *App) SaveSettings(s Settings) error {
 	a.cfg.OutputVol = s.OutputVol
 	a.cfg.RelayOnly = s.RelayOnly
 	a.cfg.QuietLookup = s.QuietLookup
+	a.cfg.DevMode = s.DevMode
+	a.cfg.MicDevice, a.cfg.SpeakerDevice = s.MicDevice, s.SpeakerDevice
 
 	c, _ := a.live()
 	if c != nil {
+		c.Cfg.MicDevice, c.Cfg.SpeakerDevice = s.MicDevice, s.SpeakerDevice // next call
 		c.SetRelayOnly(s.RelayOnly)
 		c.SetQuietLookup(s.QuietLookup)
 		if s.Connector != "" && core.NormalizeWS(s.Connector) != a.cfg.Connector {

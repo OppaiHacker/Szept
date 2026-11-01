@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"szept/internal/crypt"
 	"szept/internal/event"
 	"szept/internal/identity"
@@ -46,7 +48,7 @@ func (c *Core) onPeerUp(p *p2p.Peer) {
 	}
 	// announce active calls to the newcomer
 	for _, chat := range inCall {
-		if st, err := c.ChatState(chat); err == nil && st.IsMember(p.Pub) {
+		if st, err := c.ChatState(chatOf(chat)); err == nil && st.IsMember(p.Pub) {
 			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "join"})
 		}
 	}
@@ -241,11 +243,16 @@ func (c *Core) handleEvents(p *p2p.Peer, m Ctrl) {
 	if len(m.Events) > maxEventsPerFrame {
 		m.Events = m.Events[:maxEventsPerFrame] // symmetric with handleWant
 	}
+	// canonical order: parents before children and as few back-dated events
+	// (full replays) as the frame allows
+	evs := make([]*event.Event, 0, len(m.Events))
 	for _, w := range m.Events {
-		e, err := event.Unmarshal(w)
-		if err != nil {
-			continue
+		if e, err := event.Unmarshal(w); err == nil {
+			evs = append(evs, e)
 		}
+	}
+	event.SortCanonical(evs)
+	for _, e := range evs {
 		if c.ingest(m.Chat, e, p) {
 			fresh++
 		}
@@ -302,7 +309,7 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 		}
 	}
 	if len(missing) > 0 {
-		c.park(chat, e)
+		c.park(chat, e, from)
 		if from != nil {
 			from.SendCtrl(Ctrl{T: "want", Chat: chat, IDs: missing})
 		}
@@ -312,6 +319,13 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	// above, the rest is already in the database
 	keys, mkeys, _ := c.chatKeys(chat)
 	f, gen := c.checkout(chat)
+	// an event that does not sort after the cached fold replays the whole
+	// history; back-dated events from one peer get a budget, or a member could
+	// make every event cost a full replay. Dropped ones come back on next sync.
+	if from != nil && f != nil && !f.After(e) && !c.refoldOK(from.Pub) {
+		c.putBack(chat, gen, f)
+		return false
+	}
 	f, err := c.foldWith(chat, f, gen, e, keys, mkeys)
 	if err != nil {
 		if bytes.Equal(e.ID(), chat) {
@@ -329,9 +343,11 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	// A membership event we cannot decrypt would be applied blind, so park it and
 	// ask for the epoch key instead. Content events are stored either way — they
 	// simply stay unreadable until the key shows up.
-	if f.St.MissingKey[e.Epoch] && event.MembershipKind(e.Kind) {
+	// Judge e itself: an epoch flagged by someone else's unreadable event must
+	// not hold back a readable owner kick.
+	if _, ok := e.Open(keys, mkeys); !ok && event.MembershipKind(e.Kind) {
 		c.invalidate(chat)
-		c.park(chat, e)
+		c.park(chat, e, from)
 		if from != nil {
 			from.SendCtrl(Ctrl{T: "keyreq", Chat: chat})
 		}
@@ -438,35 +454,90 @@ func (c *Core) handleAck(p *p2p.Peer, m Ctrl) {
 	c.Notify()
 }
 
-// maxOrphans: ceiling on orphans IN TOTAL, not per chat — friend can create
-// arbitrarily many chats (bootstrap in handleSync), so limit per chat is no limit.
-const maxOrphans = 5000
+// Orphan buffer limits. The global ones hold because a friend can create
+// arbitrarily many chats (bootstrap in handleSync), so a per-chat limit is no
+// limit. The per-sender ones keep one peer from filling the global cap and
+// starving out-of-order sync everywhere else; orphanTTL clears what never
+// resolves (a parent nobody has).
+const (
+	maxOrphans       = 5000
+	maxOrphanBytes   = 64 << 20
+	maxSenderOrphans = 1000
+	maxSenderBytes   = 16 << 20
+	orphanTTL        = 10 * time.Minute
+)
 
-func (c *Core) park(chat []byte, e *event.Event) {
+type orphan struct {
+	e    *event.Event
+	from string // peer that delivered it
+	size int
+	at   time.Time
+}
+
+// refoldOK spends one full replay from pub's budget.
+func (c *Core) refoldOK(pub []byte) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	total := 0
-	for _, m := range c.orphans {
-		total += len(m)
+	l := c.refolds[string(pub)]
+	if l == nil {
+		if len(c.refolds) > 1024 {
+			clear(c.refolds)
+		}
+		l = rate.NewLimiter(20, 200)
+		c.refolds[string(pub)] = l
 	}
-	if total >= maxOrphans {
+	return l.Allow()
+}
+
+func (c *Core) park(chat []byte, e *event.Event, from *p2p.Peer) {
+	var sender string
+	if from != nil {
+		sender = string(from.Pub)
+	}
+	size := len(event.Marshal(e))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key, id := string(chat), string(e.ID())
+	if o := c.orphans[key][id]; o != nil {
+		return // already parked (drainOrphans retries go through here)
+	}
+	total, held, mine, mineBytes := 0, 0, 0, 0
+	for ck, m := range c.orphans {
+		for oid, o := range m {
+			if time.Since(o.at) > orphanTTL {
+				delete(m, oid)
+				continue
+			}
+			total++
+			held += o.size
+			if o.from == sender {
+				mine++
+				mineBytes += o.size
+			}
+		}
+		if len(m) == 0 {
+			delete(c.orphans, ck)
+		}
+	}
+	if total >= maxOrphans || held+size > maxOrphanBytes ||
+		mine >= maxSenderOrphans || mineBytes+size > maxSenderBytes {
 		return
 	}
-	key := string(chat)
 	if c.orphans[key] == nil {
-		c.orphans[key] = map[string]*event.Event{}
+		c.orphans[key] = map[string]*orphan{}
 	}
-	c.orphans[key][string(e.ID())] = e
+	c.orphans[key][id] = &orphan{e: e, from: sender, size: size, at: time.Now()}
 }
 
 func (c *Core) drainOrphans(chat []byte, from *p2p.Peer) {
 	for {
 		c.mu.Lock()
 		var batch []*event.Event
-		for _, e := range c.orphans[string(chat)] {
-			batch = append(batch, e)
+		for _, o := range c.orphans[string(chat)] {
+			batch = append(batch, o.e)
 		}
 		c.mu.Unlock()
+		event.SortCanonical(batch)
 		if len(batch) == 0 {
 			return
 		}
@@ -739,6 +810,20 @@ func (c *Core) FriendCode() string {
 		"p": []byte(c.ID.Pub), "u": c.connURL(),
 	})
 	return friendPrefix + base64.RawURLEncoding.EncodeToString(blob)
+}
+
+// Befriend adds a chat member as a friend, the same one-sided step a friend
+// code is. The member reached us through our connector, so it goes on file.
+func (c *Core) Befriend(pub []byte, name string) error {
+	if len(pub) != ed25519.PublicKeySize || bytes.Equal(pub, c.ID.Pub) {
+		return errors.New("nie można dodać tej osoby")
+	}
+	if err := c.St.PutFriend(store.Friend{Pub: pub, PeerName: safeName(name), Connector: c.connURL()}); err != nil {
+		return err
+	}
+	go c.ensurePeer(pub)
+	c.Notify()
+	return nil
 }
 
 func (c *Core) AddFriend(code string) (store.Friend, error) {

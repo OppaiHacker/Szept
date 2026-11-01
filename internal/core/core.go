@@ -5,6 +5,7 @@ package core
 
 import (
 	"bytes"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -13,10 +14,13 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	"szept/internal/attach"
 	"szept/internal/connector"
@@ -52,10 +56,14 @@ type Config struct {
 	// linię) — „Odśwież” w ustawieniach dopisuje wpisy do Connectors.
 	ConnectorLists []string `json:"connector_lists,omitempty"`
 
-	Accent    string  `json:"accent,omitempty"`     // kolor akcentu, hex RRGGBB
-	OutputVol float64 `json:"output_vol,omitempty"` // głośność rozmów 0..2, 0 = domyślna 1
-	CamDevice string  `json:"cam_device,omitempty"` // np. /dev/video1
-	NoNotify  bool    `json:"no_notify,omitempty"`  // wycisz powiadomienia systemowe
+	Accent        string  `json:"accent,omitempty"`         // kolor akcentu, hex RRGGBB
+	OutputVol     float64 `json:"output_vol,omitempty"`     // głośność rozmów 0..2, 0 = domyślna 1
+	CamDevice     string  `json:"cam_device,omitempty"`     // np. /dev/video1
+	MicDevice     string  `json:"mic_device,omitempty"`     // malgo device ID, "" = domyślny
+	SpeakerDevice string  `json:"speaker_device,omitempty"` // malgo device ID, "" = domyślny
+	MicGain       float64 `json:"mic_gain,omitempty"`       // wzmocnienie mikrofonu 0..2, 0 = 1
+	NoNotify      bool    `json:"no_notify,omitempty"`      // wycisz powiadomienia systemowe
+	DevMode       bool    `json:"dev_mode,omitempty"`       // menu kontekstowe i inspektor webview
 
 	Profile string `json:"profile,omitempty"` // aktywne konto (profil), "" = domyślne
 
@@ -104,14 +112,24 @@ type Core struct {
 	P2P  *p2p.Manager
 	Cfg  Config
 
+	// VoiceIn and VoiceOut, when set before a call, stand in for the
+	// microphone and the speaker: a headless client (a bot) talks and listens
+	// through them. VoiceIn gets 20 ms 16 kHz s16le frames pushed by the
+	// caller's cb; VoiceOut receives each heard peer's frames by pubkey.
+	VoiceIn  func(cb func(pcm []byte)) (stop func(), err error)
+	VoiceOut func(src string, pcm []byte)
+
 	mu         sync.Mutex
-	orphans    map[string]map[string]*event.Event // chatKey -> eventID -> event
-	genesis    map[string]*event.Event            // chatKey -> genesis we could not decrypt yet
-	states     map[string]*foldedState            // chatKey -> cached fold (see ChatState)
-	folders    map[string]*event.Folder           // chatKey -> fold behind states (see checkout)
+	orphans    map[string]map[string]*orphan // chatKey -> eventID -> parked event
+	refolds    map[string]*rate.Limiter      // peer -> budget of full history replays (ingest)
+	genesis    map[string]*event.Event       // chatKey -> genesis we could not decrypt yet
+	states     map[string]*foldedState       // chatKey -> cached fold (see ChatState)
+	folders    map[string]*event.Folder      // chatKey -> fold behind states (see checkout)
 	foldGen    map[string]uint64
 	redeem     *pendingRedeem
 	calls      map[string]*Call
+	chanSel    map[string][]byte // chat -> channel picked with SetChannel
+	stopTest   func()            // microphone test in the settings
 	listeners  []chan struct{}
 	wants      map[string]*blobWant            // blob hash -> attachment we still need
 	incoming   map[string]*blobAsm             // blob hash -> chunks arriving now
@@ -125,6 +143,8 @@ type Core struct {
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
 	voiceOut     func(src string, pcm []byte) // speaker mixer sink, set when call active
 	player       *media.Player                // żyje razem z rozmową (JoinCall/LeaveCall)
+	micPeak      float32                      // own mic level, for the speaking ring
+	micAt        time.Time
 	stopVoice    func()
 	stopCam      func()
 	stopScreen   func()
@@ -147,12 +167,14 @@ func Open(cfg Config, id *identity.Identity) (*Core, error) {
 	conn := connector.NewClient(cfg.Connector, id.Priv)
 	c := &Core{
 		ID: id, St: st, Conn: conn, Cfg: cfg,
-		orphans:    map[string]map[string]*event.Event{},
+		orphans:    map[string]map[string]*orphan{},
+		refolds:    map[string]*rate.Limiter{},
 		genesis:    map[string]*event.Event{},
 		states:     map[string]*foldedState{},
 		folders:    map[string]*event.Folder{},
 		foldGen:    map[string]uint64{},
 		calls:      map[string]*Call{},
+		chanSel:    map[string][]byte{},
 		wants:      map[string]*blobWant{},
 		incoming:   map[string]*blobAsm{},
 		serving:    map[string]int{},
@@ -454,13 +476,75 @@ func (c *Core) chatKeys(chat []byte) (keys, mkeys map[uint32][]byte, err error) 
 }
 
 type ChatInfo struct {
-	ID      []byte
-	Name    string
-	Members []event.Member
-	Owner   []byte
-	Epoch   uint32
-	Online  int
-	InCall  []string // member names currently in call
+	ID       []byte
+	Name     string
+	Members  []event.Member
+	Owner    []byte
+	Epoch    uint32
+	Online   int
+	InCall   []string            // member names currently in any of the chat's calls
+	Voice    map[string][]string // channel ID ("" = default) -> member names in its call
+	Direct   bool                // 1:1 chat: unnamed with two members (see CreateDirect)
+	Channels []event.Channel
+	// group look (event.KindServer)
+	Icon, Banner []byte
+	Style        string
+}
+
+// directPeer: the other person of a 1:1 chat (unnamed, two members), else nil.
+func (c *Core) directPeer(st *event.State) []byte {
+	if st.Name != "" {
+		return nil
+	}
+	var other []byte
+	n := 0
+	for _, m := range st.Members {
+		if !m.Removed {
+			n++
+			if !bytes.Equal(m.Pub, c.ID.Pub) {
+				other = m.Pub
+			}
+		}
+	}
+	if n != 2 {
+		return nil
+	}
+	return other
+}
+
+// directTwins: every 1:1 chat with the same person as chat, lowest ID first,
+// or just chat when it is not a 1:1. Two people who open a DM at the same
+// moment each create one; both sides then treat the lowest ID as the DM and
+// show the others' messages inside it.
+// Scans every chat per call, an index by peer if chat counts grow.
+func (c *Core) directTwins(chat []byte) [][]byte {
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return [][]byte{chat}
+	}
+	peer := c.directPeer(st)
+	if peer == nil {
+		return [][]byte{chat}
+	}
+	var out [][]byte
+	for idStr := range c.chatIDs() {
+		if s, err := c.ChatState([]byte(idStr)); err == nil && bytes.Equal(c.directPeer(s), peer) {
+			out = append(out, []byte(idStr))
+		}
+	}
+	slices.SortFunc(out, bytes.Compare)
+	return out
+}
+
+// holding: the twin of chat whose DAG has event id (a message shown in a
+// merged DM may live in another twin).
+func (c *Core) holding(chat, id []byte) []byte {
+	for _, t := range c.directTwins(chat) {
+		if c.St.HasEvent(t, id) {
+			return t
+		}
+	}
+	return chat
 }
 
 func (c *Core) Chats() []ChatInfo {
@@ -471,7 +555,11 @@ func (c *Core) Chats() []ChatInfo {
 		if err != nil {
 			continue
 		}
-		ci := ChatInfo{ID: id, Name: c.displayName(st), Owner: st.Owner, Epoch: st.Epoch}
+		if c.directPeer(st) != nil && !bytes.Equal(c.directTwins(id)[0], id) {
+			continue // a duplicate DM: its messages show in the first one
+		}
+		ci := ChatInfo{ID: id, Name: c.displayName(st), Owner: st.Owner, Epoch: st.Epoch, Channels: st.Channels,
+			Icon: st.Icon, Banner: st.Banner, Style: st.Style}
 		for _, m := range st.Members {
 			if m.Removed {
 				continue
@@ -483,11 +571,20 @@ func (c *Core) Chats() []ChatInfo {
 				ci.Online++
 			}
 		}
+		ci.Direct = c.directPeer(st) != nil
 		sort.Slice(ci.Members, func(i, j int) bool { return ci.Members[i].Name < ci.Members[j].Name })
 		c.mu.Lock()
-		if call := c.calls[idStr]; call != nil {
+		for key, call := range c.calls {
+			if !strings.HasPrefix(key, idStr) {
+				continue
+			}
 			for pub := range call.Members {
-				ci.InCall = append(ci.InCall, c.memberName(st, []byte(pub)))
+				n := c.memberName(st, []byte(pub))
+				ci.InCall = append(ci.InCall, n)
+				if ci.Voice == nil {
+					ci.Voice = map[string][]string{}
+				}
+				ci.Voice[key[len(idStr):]] = append(ci.Voice[key[len(idStr):]], n)
 			}
 		}
 		c.mu.Unlock()
@@ -611,8 +708,11 @@ type Msg struct {
 	Kind      string            // msg | info | file
 	Info      string            // for Kind == "info": event.Kind* — client selects icon and color
 	Deleted   bool              // deleted for everyone in DAG
+	Pinned    bool              // pinned for everyone in DAG
+	Reply     []byte            // ID of the message this one answers
 	Reactions map[string]string // pubKeyStr -> emoji
 	ACK       string            // "" | "delivered" | "read"
+	Ch        []byte            // channel, nil = the default one
 
 	// for Kind == "file" only
 	Blob []byte // sha256 content hash
@@ -629,7 +729,21 @@ type Msg struct {
 	Getting  bool // full bytes currently in queue
 }
 
+// Messages of chat; a DM also gathers its twins' (see directTwins).
 func (c *Core) Messages(chat []byte) []Msg {
+	twins := c.directTwins(chat)
+	if len(twins) < 2 {
+		return c.messages(chat)
+	}
+	var out []Msg
+	for _, t := range twins {
+		out = append(out, c.messages(t)...)
+	}
+	slices.SortStableFunc(out, func(a, b Msg) int { return a.TS.Compare(b.TS) })
+	return out
+}
+
+func (c *Core) messages(chat []byte) []Msg {
 	evs, err := c.St.Events(chat)
 	if err != nil {
 		return nil
@@ -637,7 +751,7 @@ func (c *Core) Messages(chat []byte) []Msg {
 	keys, mkeys, _ := c.chatKeys(chat)
 	st, errFold := c.ChatState(chat)
 	if errFold != nil {
-		st = &event.State{Members: map[string]*event.Member{}, Reactions: map[string]map[string]string{}, Deleted: map[string]bool{}}
+		st = &event.State{Members: map[string]*event.Member{}, Reactions: map[string]map[string]string{}, Deleted: map[string]bool{}, Pinned: map[string]bool{}}
 	}
 	event.SortCanonical(evs)
 	hidden := c.St.Hidden(chat)
@@ -653,10 +767,10 @@ func (c *Core) Messages(chat []byte) []Msg {
 			continue
 		}
 		name := c.memberName(st, e.Author)
-		m := Msg{ID: id, Author: e.Author, Name: name, TS: time.Unix(b.TS, 0)}
+		m := Msg{ID: id, Author: e.Author, Name: name, TS: time.Unix(b.TS, 0), Ch: b.Ch}
 		switch e.Kind {
 		case event.KindMsg:
-			m.Kind, m.Text = "msg", safeText(b.Text)
+			m.Kind, m.Text, m.Reply = "msg", safeText(b.Text), b.Target
 		case event.KindFile:
 			m.Kind, m.Text = "file", safeText(b.Text)
 			m.Blob, m.Mime, m.File, m.Size, m.W, m.H = b.Blob, b.Mime, attach.SafeName(b.Name, b.Mime), b.Size, b.W, b.H
@@ -679,6 +793,7 @@ func (c *Core) Messages(chat []byte) []Msg {
 			m.Deleted = true
 			m.Text = "[Wiadomość usunięta]"
 		}
+		m.Pinned = st.Pinned[string(id)]
 		if st.Reactions != nil && st.Reactions[string(id)] != nil {
 			m.Reactions = st.Reactions[string(id)]
 		}
@@ -768,23 +883,27 @@ func (c *Core) AckStatus(eventID []byte) string {
 
 func (c *Core) MarkChatRead(chat []byte) {
 	c.markActive(chat)
-	evs, err := c.St.Events(chat)
-	if err != nil {
-		return
-	}
-	for _, e := range evs {
-		if !bytes.Equal(e.Author, c.ID.Pub) {
-			c.SendAck(chat, e.ID(), "read")
+	for _, t := range c.directTwins(chat) {
+		evs, err := c.St.Events(t)
+		if err != nil {
+			continue
+		}
+		for _, e := range evs {
+			if !bytes.Equal(e.Author, c.ID.Pub) {
+				c.SendAck(t, e.ID(), "read")
+			}
 		}
 	}
 }
 
 func (c *Core) ReactMsg(chat []byte, targetID []byte, emoji string) error {
+	chat = c.holding(chat, targetID)
 	_, err := c.appendEvent(chat, event.KindReact, event.Body{Target: targetID, Text: emoji, TS: time.Now().Unix()})
 	return err
 }
 
 func (c *Core) DeleteMsg(chat []byte, targetID []byte) error {
+	chat = c.holding(chat, targetID)
 	st, err := c.ChatState(chat)
 	if err != nil {
 		return err
@@ -818,6 +937,7 @@ func (c *Core) SearchChat(chat []byte, query string) ([]Msg, error) {
 // remembers locally what not to render — on this device only.
 
 func (c *Core) HideMsg(chat, id []byte) error {
+	chat = c.holding(chat, id)
 	if err := c.St.HideEvent(chat, id); err != nil {
 		return err
 	}
@@ -895,9 +1015,9 @@ func (c *Core) announceProfile() {
 		}
 		if haveAv && len(av.Blob) > 0 && !bytes.Equal(me.Avatar, av.Blob) {
 			c.appendEvent(chat, event.KindAvatar,
-				event.Body{Blob: av.Blob, Mime: av.Mime, TS: time.Now().Unix()})
+				event.Body{Blob: av.Blob, Mime: av.Mime, TS: time.Now().Unix(), NS: av.AvatarTS})
 		}
-		if me.Status != av.Status || me.Bio != av.Bio || !bytes.Equal(me.Banner, av.Banner) {
+		if me.Status != av.Status || me.Bio != av.Bio || me.Style != av.Style || !bytes.Equal(me.Banner, av.Banner) {
 			c.appendEvent(chat, event.KindProfile, cardBody(av))
 		}
 		if nick != "" && me.Name != nick {
@@ -927,6 +1047,11 @@ func (c *Core) appendEvent(chat []byte, kind string, body event.Body) (*event.Ev
 	}
 	// heads and lamport from single read: Fold requires Lamport = max(parents)+1,
 	// so these two values must come from the same snapshot
+	if kind == event.KindMsg || kind == event.KindFile {
+		c.mu.Lock()
+		body.Ch = c.chanSel[string(chat)]
+		c.mu.Unlock()
+	}
 	heads := c.St.Heads(chat)
 	e, err := event.New(c.ID.Priv, chat, kind, body, c.St.LamportAfter(chat, heads), heads, st.Epoch, key)
 	if err != nil {
@@ -983,15 +1108,16 @@ func (c *Core) CreateChat(name string, noHistory bool) ([]byte, error) {
 
 // CreateDirect: unnamed chat + immediate member add; friend gets it on next sync.
 func (c *Core) CreateDirect(friend store.Friend) ([]byte, error) {
-	// reuse existing 1:1 with this friend if present
+	// reuse the existing 1:1 with this friend, the lowest ID if there are twins
+	var found []byte
 	for idStr := range c.chatIDs() {
 		st, err := c.ChatState([]byte(idStr))
-		if err != nil || st.Name != "" {
-			continue
+		if err == nil && bytes.Equal(c.directPeer(st), friend.Pub) && (found == nil || idStr < string(found)) {
+			found = []byte(idStr)
 		}
-		if len(st.Members) == 2 && st.IsMember(friend.Pub) {
-			return []byte(idStr), nil
-		}
+	}
+	if found != nil {
+		return found, nil
 	}
 	chat, err := c.CreateChat("", false)
 	if err != nil {
@@ -1004,9 +1130,48 @@ func (c *Core) CreateDirect(friend store.Friend) ([]byte, error) {
 	return chat, nil
 }
 
-func (c *Core) Send(chat []byte, text string) error {
+func (c *Core) Send(chat []byte, text string) error { return c.SendReply(chat, text, nil) }
+
+// SendReply sends text as an answer to message reply (nil = a plain message).
+func (c *Core) SendReply(chat []byte, text string, reply []byte) error {
 	c.markActive(chat)
-	_, err := c.appendEvent(chat, event.KindMsg, event.Body{Text: text, TS: time.Now().Unix()})
+	_, err := c.appendEvent(chat, event.KindMsg, event.Body{Text: text, Target: reply, TS: time.Now().Unix()})
+	return err
+}
+
+// PinMsg pins (or with unpin, unpins) a message for every member.
+func (c *Core) PinMsg(chat, targetID []byte, unpin bool) error {
+	chat = c.holding(chat, targetID)
+	_, err := c.appendEvent(chat, event.KindPin, event.Body{Target: targetID, Arch: unpin, TS: time.Now().Unix()})
+	return err
+}
+
+// SetChannel picks the channel new messages and files in chat go to.
+func (c *Core) SetChannel(chat, ch []byte) {
+	c.mu.Lock()
+	c.chanSel[string(chat)] = ch
+	c.mu.Unlock()
+}
+
+// AddChannel creates a channel or category and returns its ID. Owner only.
+func (c *Core) AddChannel(chat []byte, kind, name string, cat []byte) ([]byte, error) {
+	id := make([]byte, 8)
+	crand.Read(id)
+	return id, c.PutChannel(chat, id, kind, name, cat, false)
+}
+
+// PutChannel renames, moves, archives or restores a channel or category, or
+// with an empty name deletes it for good. An empty id is the default channel
+// of that kind. Owner only.
+func (c *Core) PutChannel(chat, id []byte, kind, name string, cat []byte, arch bool) error {
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(st.Owner, c.ID.Pub) {
+		return errors.New("tylko właściciel może zmieniać kanały")
+	}
+	_, err = c.appendEvent(chat, event.KindChannel, event.Body{Target: id, Name: name, Text: kind, Ch: cat, Arch: arch, TS: time.Now().Unix()})
 	return err
 }
 

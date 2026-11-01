@@ -56,8 +56,14 @@ func (s *Server) StartTURN(addr string, relayIP net.IP, hostPort string, rateByt
 	secret := make([]byte, 32)
 	rand.Read(secret)
 	t := &turnRelay{url: hostPort, secret: hex.EncodeToString(secret), allocs: map[string]int{}}
+	// the realm goes out in the 401 to any unauthenticated probe: name the
+	// host the prober already dialed, never the software
+	realm, _, err := net.SplitHostPort(hostPort)
+	if err != nil || realm == "" {
+		realm = hostPort
+	}
 	t.srv, err = turn.NewServer(turn.ServerConfig{
-		Realm:       "szept",
+		Realm:       realm,
 		AuthHandler: turn.LongTermTURNRESTAuthHandler(t.secret, nil),
 		QuotaHandler: func(username, _ string, _ net.Addr) bool {
 			t.mu.Lock()
@@ -79,8 +85,12 @@ func (s *Server) StartTURN(addr string, relayIP net.IP, hostPort string, rateByt
 			},
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{{
-			PacketConn:            pc,
-			RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{RelayAddress: relayIP, Address: "0.0.0.0"},
+			PacketConn: pc,
+			RelayAddressGenerator: &cappedRelay{
+				RelayAddressGeneratorStatic: &turn.RelayAddressGeneratorStatic{RelayAddress: relayIP, Address: "0.0.0.0"},
+				in:                          newCap(rateBytes),
+				out:                         newCap(rateBytes),
+			},
 			// the relay must not become a door into the connector's own network
 			PermissionHandler: func(_ net.Addr, peer net.IP) bool { return publicIP(peer) },
 		}},

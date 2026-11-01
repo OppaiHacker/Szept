@@ -17,6 +17,7 @@ import (
 	"szept/internal/attach"
 	"szept/internal/connector"
 	"szept/internal/crypt"
+	"szept/internal/event"
 	"szept/internal/identity"
 	"szept/internal/p2p"
 	"szept/internal/store"
@@ -536,6 +537,14 @@ func TestServeBlobCrossChat(t *testing.T) {
 	if c.St.BlobInChat(shared, hash) {
 		t.Fatal("hash z tajnego czatu wygląda na ogłoszony we wspólnym — IDOR nadal otwarty")
 	}
+	// a member of the shared chat re-announces the hash: still not servable there
+	keys, _ := c.St.ChatKeys(shared)
+	mal := identity.Create()
+	fake, _ := event.New(mal.Priv, shared, event.KindFile, event.Body{Blob: hash, Mime: "image/png"}, 9, [][]byte{shared}, 1, keys[1])
+	c.noteAttachment(shared, fake)
+	if c.St.BlobInChat(shared, hash) {
+		t.Fatal("cudze ogłoszenie hasha wpisało go do indeksu wspólnego czatu")
+	}
 	// deleting the chat takes its blobs with it
 	if err := c.St.DeleteChat(secret); err != nil {
 		t.Fatal(err)
@@ -565,7 +574,7 @@ func TestBlobPartFromNonMember(t *testing.T) {
 		t.Fatalf("obrazek testowy mieści się w jednej części (%d B)", len(data))
 	}
 	c.mu.Lock()
-	c.wants[string(hash[:])] = &blobWant{chat: bytes.Clone(chat), mime: "image/png", size: int64(len(data))}
+	c.wants[string(hash[:])] = &blobWant{chat: bytes.Clone(chat), mime: "image/png", size: int64(len(data)), peer: c.ID.Pub}
 	c.mu.Unlock()
 
 	part := func(idx, tot int) Ctrl {
@@ -609,7 +618,7 @@ func TestBlobSenderBudget(t *testing.T) {
 	hash := sha256.Sum256(data)
 	me := &p2p.Peer{Pub: c.ID.Pub}
 	c.mu.Lock()
-	c.wants[string(hash[:])] = &blobWant{chat: bytes.Clone(chat), mime: "image/png"}
+	c.wants[string(hash[:])] = &blobWant{chat: bytes.Clone(chat), mime: "image/png", peer: c.ID.Pub}
 	c.incoming["stalled"] = &blobAsm{from: string(me.Pub), bytes: senderBudget, last: time.Now()}
 	c.mu.Unlock()
 	c.handleBlobPart(me, Ctrl{T: "blobpart", Chat: chat, Blob: hash[:], Idx: 0, Total: 2, Part: data[:blobChunk]})
@@ -759,5 +768,243 @@ func TestNoHistoryForNewMembers(t *testing.T) {
 	}
 	if keys, _ := b.St.ChatKeys(chat); keys[1] != nil {
 		t.Fatal("newcomer holds the epoch-1 content key")
+	}
+}
+
+func TestChannels(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	a := newCore(t, "ala", "ws"+strings.TrimPrefix(srv.URL, "http"))
+	chat, err := a.CreateChat("grupa", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, _ := a.AddChannel(chat, "cat", "Gry", nil)
+	ch, err := a.AddChannel(chat, "text", "memy", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetChannel(chat, ch)
+	a.Send(chat, "w kanale")
+	a.SetChannel(chat, nil)
+	a.Send(chat, "w czacie")
+	a.PutChannel(chat, ch, "text", "memy2", cat, false)
+	a.PutChannel(chat, cat, "cat", "", nil, false)
+	// the defaults rename, move and archive like any other channel
+	a.PutChannel(chat, nil, "voice", "Głośno", nil, true)
+	st, _ := a.ChatState(chat)
+	if len(st.Channels) != 3 || st.Channels[0].Name != "czat" || st.Channels[1].Name != "Głośno" ||
+		!st.Channels[1].Arch || st.Channels[2].Name != "memy2" {
+		t.Fatalf("channels: %+v", st.Channels)
+	}
+	a.PutChannel(chat, nil, "voice", "", nil, false)
+	if st, _ = a.ChatState(chat); len(st.Channels) != 2 || st.Channels[1].Name != "memy2" {
+		t.Fatalf("after purge: %+v", st.Channels)
+	}
+	var in, def int
+	for _, m := range a.Messages(chat) {
+		if m.Kind == "msg" && bytes.Equal(m.Ch, ch) {
+			in++
+		} else if m.Kind == "msg" && m.Ch == nil {
+			def++
+		}
+	}
+	if in != 1 || def != 1 {
+		t.Fatalf("in=%d def=%d", in, def)
+	}
+}
+
+// Two people opening a DM at the same moment create two chats. Both sides must
+// settle on the same one and show every message in it.
+func TestDirectTwinsMerge(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	a := newCore(t, "ala", url)
+	b := newCore(t, "bartek", url)
+	a.AddFriend(b.FriendCode())
+	b.AddFriend(a.FriendCode())
+	fa, _ := a.St.Friends()
+	fb, _ := b.St.Friends()
+	ca, _ := a.CreateDirect(fa[0])
+	cb, _ := b.CreateDirect(fb[0])
+	if bytes.Equal(ca, cb) {
+		t.Fatal("test needs two separate DMs")
+	}
+	a.Send(ca, "od ali")
+	b.Send(cb, "od bartka")
+	for _, c := range []*Core{a, b} {
+		waitFor(t, "one merged DM", 20*time.Second, func() bool {
+			var direct []ChatInfo
+			for _, x := range c.Chats() {
+				if x.Direct {
+					direct = append(direct, x)
+				}
+			}
+			if len(direct) != 1 {
+				return false
+			}
+			n := 0
+			for _, m := range c.Messages(direct[0].ID) {
+				if m.Text == "od ali" || m.Text == "od bartka" {
+					n++
+				}
+			}
+			return n == 2
+		})
+	}
+	da, _ := a.CreateDirect(fa[0])
+	db, _ := b.CreateDirect(fb[0])
+	if !bytes.Equal(da, db) {
+		t.Fatalf("sides picked different DMs: %x vs %x", da[:4], db[:4])
+	}
+}
+
+func TestReplyAndPin(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	a := newCore(t, "ala", "ws"+strings.TrimPrefix(srv.URL, "http"))
+	chat, err := a.CreateChat("grupa", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Send(chat, "pytanie")
+	q := a.Messages(chat)
+	first := q[len(q)-1].ID
+	if err := a.SendReply(chat, "odpowiedź", first); err != nil {
+		t.Fatal(err)
+	}
+	a.PinMsg(chat, first, false)
+	ms := a.Messages(chat)
+	if !bytes.Equal(ms[len(ms)-1].Reply, first) || !ms[len(ms)-2].Pinned {
+		t.Fatalf("reply/pin: %+v", ms)
+	}
+	a.PinMsg(chat, first, true)
+	ms = a.Messages(chat)
+	if ms[len(ms)-2].Pinned {
+		t.Fatal("unpin ignored")
+	}
+}
+
+// A stale avatar event (late sync, or another chat scanned last on startup)
+// must not replace a newer avatar in the profile index.
+func TestStaleAvatarDoesNotWin(t *testing.T) {
+	a := newCore(t, "ala", "ws://127.0.0.1:1")
+	c1, err := a.CreateChat("one", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CreateChat("two", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetAvatar(testImageGIF(t), image.Rectangle{}); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := a.St.Profile(a.ID.Pub)
+	stale := bytes.Repeat([]byte{7}, 32)
+	if _, err := a.appendEvent(c1, event.KindAvatar,
+		event.Body{Blob: stale, Mime: "image/png", TS: time.Now().Unix() - 100}); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		a.rescanAttachments()
+		if got, _ := a.St.Profile(a.ID.Pub); !bytes.Equal(got.Blob, want.Blob) {
+			t.Fatalf("stale avatar won: %x", got.Blob)
+		}
+	}
+	// two changes within one second: the later one wins (ns, not seconds)
+	if err := a.SetAvatar(testImagePNG(t), image.Rectangle{}); err != nil {
+		t.Fatal(err)
+	}
+	png, _ := a.St.Profile(a.ID.Pub)
+	if err := a.SetAvatar(testImageGIF(t), image.Rectangle{}); err != nil {
+		t.Fatal(err)
+	}
+	a.rescanAttachments()
+	if got, _ := a.St.Profile(a.ID.Pub); bytes.Equal(got.Blob, png.Blob) || !bytes.Equal(got.Blob, want.Blob) {
+		t.Fatalf("same-second change lost: %x", got.Blob)
+	}
+	// a cleared avatar stays cleared
+	if err := a.ClearAvatar(); err != nil {
+		t.Fatal(err)
+	}
+	a.rescanAttachments()
+	if got, _ := a.St.Profile(a.ID.Pub); len(got.Blob) != 0 {
+		t.Fatalf("cleared avatar came back: %x", got.Blob)
+	}
+}
+
+// A peer's profile stamp far in the future is ignored (it would freeze that
+// profile for good), and our own change after a clock rollback still wins.
+func TestProfileClockSkew(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	a := newCore(t, "ala", url)
+	b := newCore(t, "bartek", url)
+	if _, err := a.AddFriend(b.FriendCode()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.AddFriend(a.FriendCode()); err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := a.St.Friends()
+	chat, err := a.CreateDirect(fs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "b joins the chat", 25*time.Second, func() bool {
+		st, err := b.ChatState(chat)
+		return err == nil && st.IsMember(b.ID.Pub)
+	})
+	future := time.Now().Add(24 * time.Hour)
+	ev, err := b.appendEvent(chat, event.KindAvatar, event.Body{Blob: bytes.Repeat([]byte{9}, 32),
+		Mime: "image/png", TS: future.Unix(), NS: future.UnixNano()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "a receives the event", 25*time.Second, func() bool { return a.St.HasEvent(chat, ev.ID()) })
+	if got, _ := a.St.Profile(b.ID.Pub); bytes.Equal(got.Blob, bytes.Repeat([]byte{9}, 32)) {
+		t.Fatal("future-dated avatar accepted")
+	}
+
+	// our clock jumped ahead once, then came back: the next change must still win
+	card, _ := a.St.Profile(a.ID.Pub)
+	card.AvatarTS = future.UnixNano()
+	a.St.PutProfile(a.ID.Pub, card)
+	if err := a.SetAvatar(testImageGIF(t), image.Rectangle{}); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := a.St.Profile(a.ID.Pub)
+	if want.AvatarTS <= future.UnixNano() {
+		t.Fatalf("stamp went backwards: %d", want.AvatarTS)
+	}
+	a.rescanAttachments()
+	if got, _ := a.St.Profile(a.ID.Pub); !bytes.Equal(got.Blob, want.Blob) {
+		t.Fatalf("new avatar lost after rollback: %x", got.Blob)
+	}
+}
+
+// One peer cannot take the whole orphan buffer: past its share, its events are
+// dropped and another peer's still park.
+func TestOrphanSenderCap(t *testing.T) {
+	c := newCore(t, "ala", "ws://127.0.0.1:1")
+	chat, _ := c.CreateChat("grupa", false)
+	mal := identity.Create()
+	a, b := &p2p.Peer{Pub: mal.Pub}, &p2p.Peer{Pub: identity.Create().Pub}
+	ev := func(i int) *event.Event {
+		e, _ := event.New(mal.Priv, chat, event.KindMsg, event.Body{}, uint64(i+2), [][]byte{{byte(i), byte(i >> 8)}}, 1, crypt.NewKey())
+		return e
+	}
+	for i := range maxSenderOrphans + 10 {
+		c.park(chat, ev(i), a)
+	}
+	c.park(chat, ev(maxSenderOrphans+20), b)
+	c.mu.Lock()
+	n := len(c.orphans[string(chat)])
+	c.mu.Unlock()
+	if n != maxSenderOrphans+1 {
+		t.Fatalf("w buforze %d sierot, chciałem %d", n, maxSenderOrphans+1)
 	}
 }

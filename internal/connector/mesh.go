@@ -60,6 +60,10 @@ const (
 	// slot; a censor walking the mesh from many blocks runs out of slots.
 	maxGossipBlocks = 32
 	gossipBlockTTL  = time.Hour
+	// maxGossipURLs: distinct neighbour URLs gossip reveals within
+	// gossipBlockTTL, all askers together. Without it 32 blocks x gossipShare
+	// covers the whole neighbour table.
+	maxGossipURLs = 16
 	// maxMeshFramesPerMinute throttles one mesh socket.
 	maxMeshFramesPerMinute = 1200
 	// neighborQueue: frames waiting for one neighbour; a full queue drops,
@@ -90,10 +94,32 @@ func publicIP(ip net.IP) bool {
 	if allowPrivateMeshHosts.Load() {
 		return true
 	}
-	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
-		ip.IsUnspecified() || ip.IsMulticast())
+		ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	for _, n := range specialNets {
+		if n.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
+
+// specialNets: non-global ranges the net.IP helpers miss. CGNAT and the
+// benchmark range reach the operator's ISP or lab network; NAT64 prefixes can
+// wrap a private IPv4 address.
+var specialNets = func() (out []*net.IPNet) {
+	for _, c := range []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4",
+		"64:ff9b::/96", "64:ff9b:1::/48",
+	} {
+		_, n, _ := net.ParseCIDR(c)
+		out = append(out, n)
+	}
+	return
+}()
 
 // safeDial refuses to connect to non-public addresses. String checks on the URL
 // are not enough: evil.example.com can resolve to 127.0.0.1, so the guard sits
@@ -213,11 +239,13 @@ type meshManager struct {
 	neighbors map[string]*neighborNode // url -> node
 
 	traces   map[string]*client // trace id -> socket it came in on (nil = ours)
+	asked    map[string]string  // trace id -> key it asks about, until answered
 	traceLog []string           // ring over traces, oldest evicted
 	traceAt  int
 	waits    map[string]chan struct{} // our own lookups waiting for mesh_found
 	routes   map[string]route         // pubkey -> neighbour that answered for it
 	gossiped map[string]time.Time     // network block -> last gossip answer (maxGossipBlocks)
+	revealed map[string]time.Time     // neighbour URL -> first told via gossip (maxGossipURLs)
 	started  bool
 }
 
@@ -228,9 +256,11 @@ func newMeshManager(s *Server, publicURL string, seeds []string) *meshManager {
 		seeds:     seeds,
 		neighbors: map[string]*neighborNode{},
 		traces:    map[string]*client{},
+		asked:     map[string]string{},
 		waits:     map[string]chan struct{}{},
 		routes:    map[string]route{},
 		gossiped:  map[string]time.Time{},
+		revealed:  map[string]time.Time{},
 	}
 }
 
@@ -349,8 +379,9 @@ func (m *meshManager) drop(u string) {
 }
 
 // markTraceSeen reports whether a frame already passed through us, and
-// remembers which socket it came from so mesh_found can walk back.
-func (m *meshManager) markTraceSeen(id string, from *client) bool {
+// remembers which socket it came from and which key it asks about, so
+// mesh_found can walk back — once, and only for that key.
+func (m *meshManager) markTraceSeen(id string, from *client, key []byte) bool {
 	if id == "" || len(id) > maxTraceIDLen {
 		return true
 	}
@@ -363,10 +394,12 @@ func (m *meshManager) markTraceSeen(id string, from *client) bool {
 		m.traceLog = append(m.traceLog, id)
 	} else {
 		delete(m.traces, m.traceLog[m.traceAt])
+		delete(m.asked, m.traceLog[m.traceAt])
 		m.traceLog[m.traceAt] = id
 		m.traceAt = (m.traceAt + 1) % maxSeenTraces
 	}
 	m.traces[id] = from
+	m.asked[id] = string(key)
 	return false
 }
 
@@ -478,6 +511,11 @@ func (m *meshManager) fromNeighbor(n *neighborNode, msg Msg) {
 		}
 	case "mesh_found":
 		m.found(n, msg)
+	case "ok":
+		// answer to our hello on the socket we dialed: only n.url speaks here
+		m.mu.Lock()
+		n.hidden = msg.Hidden
+		m.mu.Unlock()
 	}
 }
 
@@ -485,9 +523,16 @@ func (m *meshManager) fromNeighbor(n *neighborNode, msg Msg) {
 // went through us — an unsolicited answer could steer routes to a blackhole.
 func (m *meshManager) found(n *neighborNode, msg Msg) {
 	m.mu.Lock()
-	origin, ok := m.traces[msg.TraceID]
+	origin := m.traces[msg.TraceID]
+	// a neighbour that saw the trace could otherwise answer for any key, or
+	// answer twice, and steer routes and receipts wherever it likes
+	key, ok := m.asked[msg.TraceID]
+	ok = ok && len(msg.Pub) > 0 && key == string(msg.Pub)
+	if ok {
+		delete(m.asked, msg.TraceID)
+	}
 	w := m.waits[msg.TraceID]
-	if ok && len(msg.Pub) > 0 {
+	if ok {
 		if len(m.routes) >= maxRoutes {
 			clear(m.routes)
 		}
@@ -524,7 +569,28 @@ func (m *meshManager) gossipFor(ip string) []string {
 	}
 	m.gossiped[b] = now
 	m.mu.Unlock()
-	return m.shareable(ip, gossipShare, true)
+	urls := m.shareable(ip, MaxNeighbors, true)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, t := range m.revealed {
+		if now.Sub(t) > gossipBlockTTL {
+			delete(m.revealed, k)
+		}
+	}
+	// in this asker's rank order; a URL not revealed yet only while the
+	// budget lasts
+	var out []string
+	for _, u := range urls {
+		if len(out) >= gossipShare {
+			break
+		}
+		if _, seen := m.revealed[u]; !seen && len(m.revealed) >= maxGossipURLs {
+			continue
+		}
+		m.revealed[u] = now
+		out = append(out, u)
+	}
+	return out
 }
 
 // lookup asks the mesh whether some other connector hosts pub.
@@ -561,7 +627,7 @@ func (m *meshManager) ask(msg Msg, key []byte, fanout int) bool {
 		delete(m.waits, id)
 		m.mu.Unlock()
 	}()
-	if m.markTraceSeen(id, nil) {
+	if m.markTraceSeen(id, nil, key) {
 		return false
 	}
 	msg.TraceID, msg.TTL = id, meshTTL

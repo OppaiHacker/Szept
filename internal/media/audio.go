@@ -4,7 +4,10 @@
 package media
 
 import (
+	"math"
 	"sync"
+	"time"
+	"unsafe"
 
 	"github.com/gen2brain/malgo"
 )
@@ -27,20 +30,92 @@ func audioCtx() (*malgo.AllocatedContext, error) {
 	return actx, ctxErr
 }
 
-// StartVoice captures the default microphone; cb receives 20 ms PCM frames.
-func StartVoice(cb func(pcm []byte)) (stop func(), err error) {
+// Tones plays a short cue on speaker dev ("" = default): one sine blip per
+// [Hz, start s] note, 12 ms attack and an exponential fade, as the old
+// WebAudio cues did. Going through miniaudio puts it on the chosen speaker.
+func Tones(dev string, notes [][2]float64) error {
+	n := SampleRate * 2 / 5 // 400 ms, the player's per-source cap
+	mix := make([]float64, n)
+	for _, nt := range notes {
+		start := int(nt[1] * SampleRate)
+		for i := 0; i < SampleRate/5 && start+i < n; i++ { // 200 ms
+			t := float64(i) / SampleRate
+			env := math.Min(t/0.012, 1) * math.Pow(0.001/0.16, math.Max(0, t-0.012)/0.168)
+			mix[start+i] += 0.16 * env * math.Sin(2*math.Pi*nt[0]*t)
+		}
+	}
+	pcm := make([]byte, 2*n)
+	for i, v := range mix {
+		s := clamp16(float32(v * 32767))
+		pcm[2*i], pcm[2*i+1] = byte(s), byte(uint16(s)>>8)
+	}
+	p, err := StartPlayer(dev)
+	if err != nil {
+		return err
+	}
+	p.Push("cue", pcm)
+	time.AfterFunc(500*time.Millisecond, p.Close)
+	return nil
+}
+
+// Device: a microphone or speaker the system offers. ID is what StartVoice
+// and StartPlayer take; "" there means the system default.
+type Device struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Devices lists the microphones (capture) or speakers (!capture).
+func Devices(capture bool) []Device {
+	ctx, err := audioCtx()
+	if err != nil {
+		return nil
+	}
+	kind := malgo.Playback
+	if capture {
+		kind = malgo.Capture
+	}
+	infos, _ := ctx.Devices(kind)
+	out := []Device{}
+	for _, d := range infos {
+		out = append(out, Device{ID: d.ID.String(), Name: d.Name()})
+	}
+	return out
+}
+
+// deviceID finds a device by its ID string; nil (the default) when it is
+// gone, e.g. a headset that was unplugged.
+func deviceID(ctx *malgo.AllocatedContext, kind malgo.DeviceType, id string) unsafe.Pointer {
+	if id == "" {
+		return nil
+	}
+	infos, _ := ctx.Devices(kind)
+	for _, d := range infos {
+		if d.ID.String() == id {
+			// C copy leaks 256 B per call start; free it if calls
+			// ever start in a loop
+			return d.ID.Pointer()
+		}
+	}
+	return nil
+}
+
+// StartVoice captures the microphone dev ("" = default); cb receives 20 ms
+// PCM frames.
+func StartVoice(dev string, cb func(pcm []byte)) (stop func(), err error) {
 	ctx, err := audioCtx()
 	if err != nil {
 		return nil, err
 	}
 	cfg := malgo.DefaultDeviceConfig(malgo.Capture)
+	cfg.Capture.DeviceID = deviceID(ctx, malgo.Capture, dev)
 	cfg.Capture.Format = malgo.FormatS16
 	cfg.Capture.Channels = 1
 	cfg.SampleRate = SampleRate
 	cfg.PeriodSizeInFrames = FrameSamps
 
 	var buf []byte
-	dev, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{
+	d, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{
 		Data: func(_, in []byte, _ uint32) {
 			buf = append(buf, in...)
 			off := 0
@@ -57,11 +132,11 @@ func StartVoice(cb func(pcm []byte)) (stop func(), err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := dev.Start(); err != nil {
-		dev.Uninit()
+	if err := d.Start(); err != nil {
+		d.Uninit()
 		return nil, err
 	}
-	return func() { dev.Uninit() }, nil
+	return func() { d.Uninit() }, nil
 }
 
 // voiceSrc: one remote speaker in the mix. Gain/pan survive an empty buffer,
@@ -71,6 +146,8 @@ type voiceSrc struct {
 	gain float32 // 0..2, default 1
 	pan  float32 // -1 (left) .. +1 (right)
 	mute bool
+	peak float32   // 0..1, loudest sample of the last frame
+	at   time.Time // when that frame arrived
 }
 
 // Player mixes named PCM streams into the default stereo output device.
@@ -84,19 +161,20 @@ type Player struct {
 	deaf   bool
 }
 
-func StartPlayer() (*Player, error) {
+func StartPlayer(dev string) (*Player, error) {
 	ctx, err := audioCtx()
 	if err != nil {
 		return nil, err
 	}
 	p := &Player{srcs: map[string]*voiceSrc{}, master: 1}
 	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
+	cfg.Playback.DeviceID = deviceID(ctx, malgo.Playback, dev)
 	cfg.Playback.Format = malgo.FormatS16
 	cfg.Playback.Channels = 2
 	cfg.SampleRate = SampleRate
 	cfg.PeriodSizeInFrames = FrameSamps
 
-	dev, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{
+	d, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{
 		Data: func(out, _ []byte, frames uint32) {
 			p.mix(out, int(frames))
 		},
@@ -104,11 +182,11 @@ func StartPlayer() (*Player, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := dev.Start(); err != nil {
-		dev.Uninit()
+	if err := d.Start(); err != nil {
+		d.Uninit()
 		return nil, err
 	}
-	p.dev = dev
+	p.dev = d
 	return p, nil
 }
 
@@ -183,11 +261,46 @@ func (p *Player) Push(src string, pcm []byte) {
 	}
 	p.mu.Lock()
 	s := p.src(src)
+	s.peak, s.at = Peak(samps), time.Now()
 	s.buf = append(s.buf, samps...)
 	if max := SampleRate * 2 / 5; len(s.buf) > max { // 400 ms
 		s.buf = s.buf[:copy(s.buf, s.buf[len(s.buf)-max:])]
 	}
 	p.mu.Unlock()
+}
+
+// ApplyGain scales s16le PCM in place, clipping at full scale.
+func ApplyGain(pcm []byte, g float32) {
+	for i := 0; i+1 < len(pcm); i += 2 {
+		v := clamp16(float32(int16(uint16(pcm[i])|uint16(pcm[i+1])<<8)) * g)
+		pcm[i], pcm[i+1] = byte(v), byte(uint16(v)>>8)
+	}
+}
+
+// Peak: loudest sample of a frame, 0..1. Drives the "speaking" ring in the UI.
+func Peak(samps []int16) float32 {
+	var m int32
+	for _, v := range samps {
+		a := int32(v)
+		if a < 0 {
+			a = -a
+		}
+		m = max(m, a)
+	}
+	return float32(m) / 32768
+}
+
+// Levels: current peak per source that sent audio in the last 300 ms.
+func (p *Player) Levels() map[string]float32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[string]float32{}
+	for name, s := range p.srcs {
+		if time.Since(s.at) < 300*time.Millisecond && !s.mute && !p.deaf {
+			out[name] = s.peak
+		}
+	}
+	return out
 }
 
 // SetSource: spatial mix for one speaker. gain 0..2, pan -1..1.

@@ -7,11 +7,12 @@
 package main
 
 import (
-	_ "embed"
 	"embed"
+	_ "embed"
 	"flag"
 	"log"
 	"log/slog"
+	"os"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -32,6 +33,14 @@ func main() {
 	connFlag := flag.String("connector", "", "connector address")
 	devtools := flag.Bool("devtools", false, "open the webview inspector")
 	flag.Parse()
+
+	// Wails' init() sets this to "1" on every NVIDIA GPU (old drivers showed
+	// blank windows). Without DMA-BUF WebKit copies each frame through the CPU
+	// and all scrolling lags; current drivers handle it. To opt out, set any
+	// other non-"0" value, e.g. WEBKIT_DISABLE_DMABUF_RENDERER=yes.
+	if os.Getenv("WEBKIT_DISABLE_DMABUF_RENDERER") == "1" {
+		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "0")
+	}
 
 	cfgFile, dataDir := boot.Dirs()
 	if *dataFlag != "" {
@@ -74,12 +83,14 @@ func main() {
 		Title:            "szept",
 		Width:            1180,
 		Height:           760,
-		MinWidth:         420,
+		MinWidth:         360,
 		MinHeight:        520,
 		Frameless:        true,
 		URL:              "/",
 		BackgroundColour: application.NewRGB(15, 16, 20),
-		DevToolsEnabled:  *devtools,
+		// the inspector is reachable only through the native context menu,
+		// which the frontend suppresses unless developer mode is on
+		DevToolsEnabled: *devtools || cfg.DevMode,
 		Linux: application.LinuxWindow{
 			Icon:             iconPNG,
 			WebviewGpuPolicy: application.WebviewGpuPolicyOnDemand,

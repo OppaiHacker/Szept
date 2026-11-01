@@ -29,3 +29,7 @@ bin/
 # connector state (secret path, Let's Encrypt cache)
 connector.path
 autocert/
+
+# local test bot (not part of the project)
+cmd/szept-bot/
+cmd/szept-wails/szept-wails
