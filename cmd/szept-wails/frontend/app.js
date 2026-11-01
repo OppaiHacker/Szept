@@ -2639,6 +2639,13 @@ function renderSettings() {
       S.dirty = e.target.closest(".block");
       $("#unsaved").classList.add("show");
     });
+    // the block's own save button counts as saving, same as the bar's
+    $("#set-wrap", root).addEventListener("click", (e) => {
+      const b = e.target.closest(".btn.primary");
+      if (!b || !S.dirty?.contains(b)) return;
+      S.dirty = null;
+      $("#unsaved").classList.remove("show", "shake");
+    });
     const q$ = $("#set-q", root);
     q$.addEventListener("input", () => { S.setQ = q$.value; $("#set-rows").innerHTML = setNav(); });
   }

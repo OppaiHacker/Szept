@@ -774,6 +774,8 @@ button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg)
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   flex: 0 1 auto;
 }
+/* the channel name keeps its width, the subtitle gives way first */
+.conv-head b.t { flex: none; max-width: 40%; }
 .h-div { flex: none; width: 1px; height: 24px; margin: 0 4px; background: var(--line-2); }
 .conv-head .s {
   min-width: 0; flex: 0 1 auto;

@@ -50,7 +50,7 @@ func buildSeed(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { c.Close() }()
 
 	bob := newPerson("bob")
 	kasia := newPerson("kasia-z-drugiej-klatki")
@@ -76,6 +76,13 @@ func buildSeed(t *testing.T, dir string) {
 		{nil, "tak", 69 * time.Minute},
 		{&bob, "👍", 5 * time.Minute},
 	})
+
+	// putEvent pisze prosto do store, z pominięciem pamięci podręcznej foldów
+	// w core — świeży core, zanim SetStatus dopisze się do starego folda
+	c.Close()
+	if c, err = core.Open(core.Config{DataDir: dir, Connector: "ws://127.0.0.1:9/"}, id); err != nil {
+		t.Fatal(err)
+	}
 
 	// karta profilu: status, opis i baner — żeby zrzuty pokazywały je wypełnione
 	if err := c.SetStatus("gram, wrócę wieczorem"); err != nil {
@@ -112,7 +119,7 @@ func seedBanner(t *testing.T) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 720, 240))
 	for y := 0; y < 240; y++ {
 		for x := 0; x < 720; x++ {
-			img.Set(x, y, color.RGBA{uint8(60 + x/8), uint8(40 + y/3), 0xb0, 0xff})
+			img.Set(x, y, color.RGBA{uint8(24 + y/12), uint8(58 + x/9), uint8(75 + x/14), 0xff})
 		}
 	}
 	var buf bytes.Buffer
