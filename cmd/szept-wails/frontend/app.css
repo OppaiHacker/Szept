@@ -225,6 +225,7 @@ a { color: var(--accent-ink); text-underline-offset: 2px; }
   fill: var(--accent);
 }
 .tb-name { flex: 0 0 auto; font-weight: 600; font-size: var(--t-sm); color: var(--fg-strong); }
+.tb-ver { font-family: var(--mono); font-size: var(--t-s); color: var(--faint); }
 .tb-sub { max-width: 20ch; color: var(--faint); font-size: var(--t-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .tb-status {
@@ -898,17 +899,19 @@ button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg)
 /* sent but nobody has it yet */
 .msg.pending .meta { opacity: .6; }
 
-/* speaking: a 2px accent ring whose opacity follows the voice level (app.js
-   sets --lvl). No glow, no pulse: it is only as bright as the voice is loud. */
+/* speaking: a solid green ring while the voice gate is open (app.js sets
+   .talking). On at once, off with a short fade so word gaps do not flicker. */
 .spk { position: relative; display: inline-grid; flex: none; border-radius: 50%; }
 .spk::after {
-  content: ""; position: absolute; inset: -3px;
+  content: ""; position: absolute; inset: -2px;
   border-radius: 50%;
-  box-shadow: 0 0 0 2px var(--accent);
-  opacity: var(--lvl, 0);
-  transition: opacity var(--d-fast) linear;
+  box-shadow: 0 0 0 3px var(--green); /* 2px gap, then 3px ring */
+  opacity: 0;
+  transition: opacity 200ms linear;
   pointer-events: none;
 }
+.spk.talking::after { opacity: 1; transition: none; }
+@media (prefers-reduced-motion: reduce) { .spk::after { transition: none; } }
 .msg .gutter > button { border-radius: 50%; display: block; transition: scale 100ms var(--ease-out); }
 .msg .gutter > button:active { scale: .97; }
 .msg-who button.n { padding: 0; cursor: pointer; }
@@ -982,6 +985,40 @@ button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg)
 }
 .attach img:active { scale: .99; }
 .attach.pending img { opacity: .6; }
+.attach { position: relative; }
+/* .bubble keeps text whitespace (pre-wrap); template indentation must not show */
+.bubble > .attach, .bubble > .file, .bubble > .video { white-space: normal; }
+.file.audio { flex-direction: column; align-items: stretch; gap: 4px; padding: 12px 12px 6px; }
+.file.audio:hover { background: var(--layer-1); }
+.video {
+  width: fit-content; max-width: min(550px, 100%); margin: 4px 0;
+  border-radius: var(--r-m); overflow: hidden;
+  background: var(--layer-1); border: 1px solid var(--line);
+}
+.video video { display: block; max-width: 100%; max-height: 350px; min-width: 320px; background: var(--video-bg); cursor: pointer; }
+.video:fullscreen { display: flex; flex-direction: column; max-width: none; border: 0; border-radius: 0; background: #000; }
+.video:fullscreen video { flex: 1; min-height: 0; width: 100%; max-height: none; }
+.mbar { display: flex; align-items: center; gap: 8px; padding: 4px 6px; color: var(--muted); font: var(--t-xs) var(--mono); }
+.file.audio .mbar { padding: 0; margin-left: -6px; }
+.mbar button { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: var(--r-s); color: var(--fg-2); transition: background var(--fast), color var(--fast); }
+.mbar button:hover { background: var(--hover); color: var(--fg-strong); }
+.mbar svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.mbar .mb-play svg { fill: currentColor; }
+.mbar .mb-seek { flex: 1; min-width: 60px; }
+/* the volume slides out from the speaker on hover or keyboard focus */
+.mb-v { display: flex; align-items: center; }
+.mbar .mb-vol { width: 0; flex: none; opacity: 0; transition: width var(--fast), opacity var(--fast), margin var(--fast); }
+.mb-v:hover .mb-vol, .mb-v:focus-within .mb-vol { width: 72px; opacity: 1; margin: 0 4px; }
+@media (prefers-reduced-motion: reduce) { .mbar .mb-vol { transition: none; } }
+.gif-star {
+  position: absolute; top: 6px; right: 6px;
+  width: 30px; height: 30px; display: grid; place-items: center;
+  border-radius: var(--r-s); background: rgb(0 0 0 / .6); color: #fff;
+  opacity: 0; transition: opacity var(--fast);
+}
+.attach:hover .gif-star, .gif-star:focus-visible { opacity: 1; }
+.gif-star svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linejoin: round; }
+.gif-star.on svg { fill: currentColor; }
 
 .file {
   display: flex; align-items: center; gap: 12px;
@@ -1165,6 +1202,8 @@ button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg)
   z-index: 8;
   animation: fade 140ms var(--ease);
 }
+/* the Wails runtime sets this class on the drop target while a file hovers */
+.conv-body:not(.file-drop-target-active) .drop-hint { display: none; }
 
 /* ---------------------------- call ---------------------------- */
 
@@ -1300,6 +1339,7 @@ button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg)
 .kind small { color: var(--muted); font-size: var(--t-xs); }
 
 .mic-test { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
+.cam-prev { display: block; width: calc(100% - 32px); max-height: 360px; margin: 0 16px 16px; object-fit: contain; background: #000; border-radius: 6px; transform: scaleX(-1); /* mirror, like looking in a mirror */ }
 .meter { flex: 1; height: 8px; border-radius: 4px; background: var(--sunk); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
 /* the fill only scales, so a 12 Hz level feed costs no layout */
 .meter i { display: block; height: 100%; background: var(--green); transform-origin: left; transform: scaleX(var(--lvl, 0)); transition: transform 80ms linear; }
@@ -2009,6 +2049,24 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 .replying b { color: var(--fg-strong); font-weight: 600; }
 .replying .icon-btn { width: 24px; height: 24px; }
 .replying:not([hidden]) + .composer { border-top-left-radius: 0; border-top-right-radius: 0; }
+
+.staged {
+  display: flex; gap: 8px; overflow-x: auto;
+  padding: 8px; border-radius: var(--r-m) var(--r-m) 0 0;
+  background: var(--layer-3); box-shadow: inset 0 -1px 0 var(--line-2);
+}
+.staged[hidden] { display: none; }
+.pend {
+  position: relative; flex: none; display: flex; flex-direction: column; gap: 4px;
+  width: 112px; padding: 6px; border-radius: var(--r-s);
+  background: var(--hover); font-size: var(--t-s); color: var(--muted);
+}
+.pend img, .pend > svg { width: 100%; height: 72px; border-radius: var(--r-s); object-fit: cover; }
+.pend > svg { padding: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.pend span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pend .icon-btn { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; background: var(--layer-3); }
+.staged:not([hidden]) + .replying { border-radius: 0; }
+.staged:not([hidden]) + .composer { border-top-left-radius: 0; border-top-right-radius: 0; }
 
 .menu-reacts { display: flex; gap: 4px; padding: 2px 0 6px; }
 .menu-reacts button {

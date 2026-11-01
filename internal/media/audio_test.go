@@ -24,7 +24,12 @@ func frame(p *Player) (l, r int16) {
 func TestMix(t *testing.T) {
 	p := &Player{srcs: map[string]*voiceSrc{}, master: 1}
 
+	// jitter buffer: a lone frame waits until prebuf is queued
 	p.Push("a", pcm(1000, 8))
+	if l, _ := frame(p); l != 0 {
+		t.Fatalf("played before prebuf: %d", l)
+	}
+	p.Push("a", pcm(1000, prebuf))
 	if l, r := frame(p); l != 1000 || r != 1000 {
 		t.Fatalf("center: %d/%d", l, r)
 	}
@@ -59,7 +64,7 @@ func TestMix(t *testing.T) {
 	// mute zjada próbkę z bufora — po odciszeniu nie gra zaległości
 	p.SetDeafen(false)
 	p.MuteSource("a", true)
-	for i := 0; i < 4; i++ {
+	for i := 0; i < prebuf+8; i++ {
 		frame(p)
 	}
 	p.MuteSource("a", false)

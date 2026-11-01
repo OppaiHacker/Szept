@@ -7,11 +7,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,11 +27,11 @@ func (a *App) routes(next http.Handler) http.Handler {
 		p := r.URL.Path
 		switch {
 		case strings.HasPrefix(p, "/blob/"):
-			a.serveBlob(w, strings.TrimPrefix(p, "/blob/"))
+			a.serveBlob(w, r, strings.TrimPrefix(p, "/blob/"))
 		case strings.HasPrefix(p, "/avatar/"):
-			a.serveCard(w, strings.TrimPrefix(p, "/avatar/"), false)
+			a.serveCard(w, r, strings.TrimPrefix(p, "/avatar/"), false)
 		case strings.HasPrefix(p, "/banner/"):
-			a.serveCard(w, strings.TrimPrefix(p, "/banner/"), true)
+			a.serveCard(w, r, strings.TrimPrefix(p, "/banner/"), true)
 		case strings.HasPrefix(p, "/frame/"):
 			a.serveFrame(w, strings.TrimPrefix(p, "/frame/"))
 		default:
@@ -47,20 +47,25 @@ func (a *App) routes(next http.Handler) http.Handler {
 // this list is served as an opaque download instead.
 var safeMimes = map[string]bool{
 	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true,
+	// played by <video>/<audio>, which never run script from the bytes
+	"video/mp4": true, "video/webm": true, "video/avi": true,
+	"audio/mpeg": true, "audio/wave": true, "audio/aiff": true, "audio/flac": true,
+	"application/ogg": true,
 }
 
 // writeMedia sets a content type the webview cannot be talked into executing.
-func writeMedia(w http.ResponseWriter, mime string, data []byte) {
+// ServeContent answers Range requests, which the media player needs to seek.
+func writeMedia(w http.ResponseWriter, r *http.Request, mime string, data []byte) {
 	if !safeMimes[mime] {
 		mime = "application/octet-stream"
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", "inline")
 	w.Header().Set("Content-Type", mime)
-	w.Write(data)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
 }
 
-func (a *App) serveBlob(w http.ResponseWriter, name string) {
+func (a *App) serveBlob(w http.ResponseWriter, r *http.Request, name string) {
 	c, err := a.live()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -77,10 +82,14 @@ func (a *App) serveBlob(w http.ResponseWriter, name string) {
 	}
 	// Content hashes are immutable, so this can be cached forever.
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	writeMedia(w, http.DetectContentType(data), data)
+	mime := http.DetectContentType(data)
+	if bytes.HasPrefix(data, []byte("fLaC")) { // the stdlib sniffer does not know FLAC
+		mime = "audio/flac"
+	}
+	writeMedia(w, r, mime, data)
 }
 
-func (a *App) serveCard(w http.ResponseWriter, pub string, banner bool) {
+func (a *App) serveCard(w http.ResponseWriter, r *http.Request, pub string, banner bool) {
 	c, err := a.live()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -102,7 +111,7 @@ func (a *App) serveCard(w http.ResponseWriter, pub string, banner bool) {
 		mime = http.DetectContentType(data)
 	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	writeMedia(w, mime, data)
+	writeMedia(w, r, mime, data)
 }
 
 // nil2req: http.NotFound needs a request it never reads. Keeps the callers tidy.
@@ -247,18 +256,4 @@ func humanBytes(n int64) string {
 		return strconv.FormatInt(n>>10, 10) + " kB"
 	}
 	return strconv.FormatInt(n, 10) + " B"
-}
-
-func version() string {
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range bi.Settings {
-			if s.Key == "vcs.revision" && len(s.Value) >= 7 {
-				return s.Value[:7]
-			}
-		}
-		if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-			return bi.Main.Version
-		}
-	}
-	return "dev"
 }

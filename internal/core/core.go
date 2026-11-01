@@ -65,7 +65,9 @@ type Config struct {
 	MicDevice     string          `json:"mic_device,omitempty"`     // malgo device ID, "" = domyślny
 	SpeakerDevice string          `json:"speaker_device,omitempty"` // malgo device ID, "" = domyślny
 	MicGain       float64         `json:"mic_gain,omitempty"`       // wzmocnienie mikrofonu 0..2, 0 = 1
+	Voice         media.VoiceOpts `json:"voice"`                    // odszumianie, AGC, bramka, bitrate
 	NoNotify      bool            `json:"no_notify,omitempty"`      // wycisz powiadomienia systemowe
+	NoUpdate      bool            `json:"no_update,omitempty"`      // nie sprawdzaj i nie instaluj nowych wersji
 	DevMode       bool            `json:"dev_mode,omitempty"`       // menu kontekstowe i inspektor webview
 
 	Profile string `json:"profile,omitempty"` // aktywne konto (profil), "" = domyślne
@@ -92,6 +94,7 @@ type Ctrl struct {
 	Typing  bool              `json:"typing,omitempty"`
 	EventID []byte            `json:"event_id,omitempty"`
 	Status  string            `json:"status,omitempty"`
+	Ver     string            `json:"ver,omitempty"` // hello: sender's version
 
 	// blobreq/blobpart: attachment content, chunked (see blob.go)
 	Blob  []byte `json:"blob,omitempty"` // sha256 of the content
@@ -117,7 +120,7 @@ type Core struct {
 
 	// VoiceIn and VoiceOut, when set before a call, stand in for the
 	// microphone and the speaker: a headless client (a bot) talks and listens
-	// through them. VoiceIn gets 20 ms 16 kHz s16le frames pushed by the
+	// through them. VoiceIn gets 20 ms 48 kHz s16le frames pushed by the
 	// caller's cb; VoiceOut receives each heard peer's frames by pubkey.
 	VoiceIn  func(cb func(pcm []byte)) (stop func(), err error)
 	VoiceOut func(src string, pcm []byte)
@@ -146,6 +149,7 @@ type Core struct {
 	// OnVideoFrame gets each video frame; a nil jpeg means that stream ended.
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
 	voiceOut     func(src string, pcm []byte) // speaker mixer sink, set when call active
+	voiceRx      *media.Receiver              // Opus decoders for voiceOut, per call
 	player       *media.Player                // żyje razem z rozmową (JoinCall/LeaveCall)
 	micPeak      float32                      // own mic level, for the speaking ring
 	micAt        time.Time
@@ -227,6 +231,19 @@ func (c *Core) SetRelayOnly(on bool) {
 
 // ConnRelay reports whether the current connector offers a TURN relay.
 func (c *Core) ConnRelay() bool { return c.conn().ICE() != nil }
+
+// ConnVersion: the connector's version ("" = it doesn't say).
+func (c *Core) ConnVersion() string { return c.conn().ServerVersion() }
+
+// peerVer: pubkey -> version the peer last said in "hello". Memory only.
+var peerVer sync.Map
+
+// PeerVersion: what pub runs, as it told us when last connected ("" = unknown).
+func (c *Core) PeerVersion(pub []byte) string {
+	v, _ := peerVer.Load(string(pub))
+	s, _ := v.(string)
+	return s
+}
 
 func (c *Core) SetConnector(url string) {
 	old := c.conn()

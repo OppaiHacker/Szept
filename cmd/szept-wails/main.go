@@ -41,6 +41,12 @@ func main() {
 	if os.Getenv("WEBKIT_DISABLE_DMABUF_RENDERER") == "1" {
 		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "0")
 	}
+	// WebKit's GL video sink draws every frame solid green on NVIDIA
+	// (checked on an RTX 5080, Wayland); the plain sink draws it right.
+	// Opt back in with WEBKIT_GST_DISABLE_GL_SINK=0.
+	if os.Getenv("WEBKIT_GST_DISABLE_GL_SINK") == "" {
+		os.Setenv("WEBKIT_GST_DISABLE_GL_SINK", "1")
+	}
 
 	cfgFile, dataDir := boot.Dirs()
 	if *dataFlag != "" {
@@ -91,6 +97,9 @@ func main() {
 		// the inspector is reachable only through the native context menu,
 		// which the frontend suppresses unless developer mode is on
 		DevToolsEnabled: *devtools || cfg.DevMode,
+		// GTK grabs file drags before the page sees them; Wails hands us the
+		// paths instead (see filesDropped)
+		EnableFileDrop: true,
 		Linux: application.LinuxWindow{
 			Icon:             iconPNG,
 			WebviewGpuPolicy: application.WebviewGpuPolicyOnDemand,
@@ -101,6 +110,11 @@ func main() {
 	// The frontend asks for its first snapshot once the DOM is up; nothing to
 	// do here beyond making sure a late-arriving core still repaints.
 	win.RegisterHook(events.Common.WindowDidResize, func(*application.WindowEvent) {})
+	win.OnWindowEvent(events.Common.WindowFilesDropped, func(e *application.WindowEvent) {
+		api.filesDropped(e.Context().DroppedFiles())
+	})
+
+	go api.updates()
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)

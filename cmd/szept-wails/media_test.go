@@ -56,7 +56,7 @@ func TestCardMimeWhitelist(t *testing.T) {
 		"":                         "application/octet-stream",
 	} {
 		w := httptest.NewRecorder()
-		writeMedia(w, mime, []byte("bajty"))
+		writeMedia(w, httptest.NewRequest("GET", "/", nil), mime, []byte("bajty"))
 		if got := w.Header().Get("Content-Type"); got != want {
 			t.Errorf("mime %q podany jako %q, chciano %q", mime, got, want)
 		}

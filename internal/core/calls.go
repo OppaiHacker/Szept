@@ -13,6 +13,7 @@ import (
 
 	"szept/internal/attach"
 	"szept/internal/media"
+	"szept/internal/media/opus"
 	"szept/internal/p2p"
 )
 
@@ -247,6 +248,9 @@ func (c *Core) JoinCall(chat []byte) error {
 
 	var player *media.Player
 	var err error
+	c.mu.Lock()
+	c.voiceRx = media.NewReceiver()
+	c.mu.Unlock()
 	if c.VoiceOut != nil {
 		c.mu.Lock()
 		c.voiceOut = c.VoiceOut
@@ -264,6 +268,11 @@ func (c *Core) JoinCall(chat []byte) error {
 	}
 	var seq uint32
 	lbl := chatLabel("v", chat) // once per call, not base64 per 20 ms frame
+	media.SetVoiceOpts(c.Cfg.Voice)
+	enc, err := opus.NewEncoder() // used only from the mic callback below
+	if err != nil {
+		log.Printf("call: opus: %v", err)
+	}
 	startMic := func(cb func([]byte)) (func(), error) { return media.StartVoice(c.Cfg.MicDevice, cb) }
 	if c.VoiceIn != nil {
 		startMic = c.VoiceIn
@@ -285,10 +294,18 @@ func (c *Core) JoinCall(chat []byte) error {
 		c.mu.Lock()
 		c.micPeak, c.micAt = media.Peak(samps), time.Now()
 		c.mu.Unlock()
+		if enc == nil {
+			return
+		}
+		enc.SetBitrate(media.CurVoiceOpts().Bitrate)
+		pkt, err := enc.Encode(pcm)
+		if err != nil {
+			return
+		}
 		seq++
-		frame := make([]byte, 4+len(pcm))
+		frame := make([]byte, 4+len(pkt))
 		binary.BigEndian.PutUint32(frame, seq)
-		copy(frame[4:], pcm)
+		copy(frame[4:], pkt)
 		for _, p := range c.mediaTargets(chat) {
 			p.SendMedia(lbl, frame)
 		}
@@ -329,6 +346,7 @@ func (c *Core) LeaveCall(chat []byte) {
 	sv, sc, ss := c.stopVoice, c.stopCam, c.stopScreen
 	c.stopVoice, c.stopCam, c.stopScreen = nil, nil, nil
 	c.voiceOut = nil
+	c.voiceRx = nil
 	c.player = nil
 	c.mu.Unlock()
 	for _, f := range []func(){sv, sc, ss} {
@@ -421,7 +439,9 @@ func (c *Core) VoiceLevels() map[string]float32 {
 }
 
 // MicTest opens the microphone outside a call so the settings can show its
-// level (VoiceLevels, under your own key). Nothing is sent anywhere.
+// level (VoiceLevels, under your own key) and play it back on the speaker
+// through the same denoise + Opus path the call uses: you hear what others
+// would. Nothing is sent anywhere.
 func (c *Core) MicTest(on bool) error {
 	c.mu.Lock()
 	stop := c.stopTest
@@ -433,7 +453,20 @@ func (c *Core) MicTest(on bool) error {
 	if !on {
 		return nil
 	}
-	stop, err := media.StartVoice(c.Cfg.MicDevice, func(pcm []byte) {
+	media.SetVoiceOpts(c.Cfg.Voice)
+	enc, err := opus.NewEncoder()
+	if err != nil {
+		return err
+	}
+	dec := opus.NewDecoder()
+	player, err := media.StartPlayer(c.Cfg.SpeakerDevice)
+	if err != nil {
+		return err
+	}
+	if v := c.Cfg.OutputVol; v > 0 {
+		player.SetMaster(float32(v))
+	}
+	stopMic, err := media.StartVoice(c.Cfg.MicDevice, func(pcm []byte) {
 		if g := float32(c.Cfg.MicGain); g > 0 && g != 1 {
 			media.ApplyGain(pcm, g)
 		}
@@ -444,12 +477,23 @@ func (c *Core) MicTest(on bool) error {
 		c.mu.Lock()
 		c.micPeak, c.micAt = media.Peak(samps), time.Now()
 		c.mu.Unlock()
+		o := media.CurVoiceOpts()
+		if o.NoMonitor {
+			return
+		}
+		enc.SetBitrate(o.Bitrate)
+		if pkt, err := enc.Encode(pcm); err == nil {
+			if out, err := dec.Decode(pkt, false); err == nil {
+				player.Push("test", out)
+			}
+		}
 	})
 	if err != nil {
+		player.Close()
 		return err
 	}
 	c.mu.Lock()
-	c.stopTest = stop
+	c.stopTest = func() { stopMic(); player.Close() }
 	c.mu.Unlock()
 	return nil
 }
@@ -693,7 +737,7 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 	c.mu.Lock()
 	call := c.calls[string(chat)]
 	inCall := call != nil && call.Joined && call.Members[string(p.Pub)]
-	out := c.voiceOut // read with the call check: one lock per audio frame
+	out, rx := c.voiceOut, c.voiceRx // read with the call check: one lock per audio frame
 	c.mu.Unlock()
 	if !inCall {
 		return
@@ -703,8 +747,10 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 		if len(data) <= 4 {
 			return
 		}
-		if out != nil {
-			out(string(p.Pub), data[4:])
+		if out != nil && rx != nil {
+			if pcm := rx.Decode(string(p.Pub), binary.BigEndian.Uint32(data), data[4:]); len(pcm) > 0 {
+				out(string(p.Pub), pcm)
+			}
 		}
 	case "c", "s":
 		if len(data) == 6 && data[5] == 0 { // end of stream, see sendVideoEnd

@@ -1,6 +1,5 @@
-// Package media: capture/playback devices. Voice is raw PCM s16le 16 kHz mono
-// in 20 ms frames. Raw PCM ≈ 32 kB/s per stream — swap in Opus
-// (hraban/opus) when bandwidth matters.
+// Package media: capture/playback devices. Voice is s16le 48 kHz mono in
+// 20 ms frames: denoised by rnnoise (denoise.go), sent as Opus (voice.go).
 package media
 
 import (
@@ -10,11 +9,14 @@ import (
 	"unsafe"
 
 	"github.com/gen2brain/malgo"
+
+	"szept/internal/media/opus"
+	"szept/internal/media/rnnoise"
 )
 
 const (
-	SampleRate = 16000
-	FrameSamps = 320 // 20 ms @ 16 kHz
+	SampleRate = opus.Rate  // rnnoise needs 48 kHz too
+	FrameSamps = opus.Frame // 20 ms
 )
 
 var (
@@ -101,7 +103,7 @@ func deviceID(ctx *malgo.AllocatedContext, kind malgo.DeviceType, id string) uns
 }
 
 // StartVoice captures the microphone dev ("" = default); cb receives 20 ms
-// PCM frames.
+// PCM frames, denoised and gated (see denoiser): silence sends nothing.
 func StartVoice(dev string, cb func(pcm []byte)) (stop func(), err error) {
 	ctx, err := audioCtx()
 	if err != nil {
@@ -112,31 +114,23 @@ func StartVoice(dev string, cb func(pcm []byte)) (stop func(), err error) {
 	cfg.Capture.Format = malgo.FormatS16
 	cfg.Capture.Channels = 1
 	cfg.SampleRate = SampleRate
-	cfg.PeriodSizeInFrames = FrameSamps
+	cfg.PeriodSizeInFrames = rnnoise.FrameSize
 
-	var buf []byte
+	dn := newDenoiser()
 	d, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{
-		Data: func(_, in []byte, _ uint32) {
-			buf = append(buf, in...)
-			off := 0
-			for len(buf)-off >= FrameSamps*2 {
-				frame := make([]byte, FrameSamps*2)
-				copy(frame, buf[off:off+FrameSamps*2])
-				off += FrameSamps * 2
-				cb(frame)
-			}
-			// move the rest to the front so the array never creeps forward
-			buf = buf[:copy(buf, buf[off:])]
-		},
+		Data: func(_, in []byte, _ uint32) { dn.feed(in, cb) },
 	})
 	if err != nil {
+		dn.rn.Close()
 		return nil, err
 	}
 	if err := d.Start(); err != nil {
 		d.Uninit()
+		dn.rn.Close()
 		return nil, err
 	}
-	return func() { d.Uninit() }, nil
+	// Uninit waits for the audio thread, so rnnoise is not freed under it
+	return func() { d.Uninit(); dn.rn.Close() }, nil
 }
 
 // voiceSrc: one remote speaker in the mix. Gain/pan survive an empty buffer,
@@ -146,6 +140,7 @@ type voiceSrc struct {
 	gain float32 // 0..2, default 1
 	pan  float32 // -1 (left) .. +1 (right)
 	mute bool
+	live bool      // playing; false after an underrun until prebuf is queued
 	peak float32   // 0..1, loudest sample of the last frame
 	at   time.Time // when that frame arrived
 }
@@ -199,11 +194,18 @@ func (p *Player) mix(out []byte, n int) {
 	if p.deaf {
 		master = 0
 	}
+	for _, s := range p.srcs {
+		if len(s.buf) == 0 {
+			s.live = false
+		} else if len(s.buf) >= prebuf {
+			s.live = true
+		}
+	}
 	for i := 0; i < n; i++ {
 		var sumL, sumR float32
 		for _, s := range p.srcs {
 			// each source gives one sample per output frame: sample i
-			if i >= len(s.buf) {
+			if !s.live || i >= len(s.buf) {
 				continue
 			}
 			v := float32(s.buf[i])
@@ -230,9 +232,15 @@ func (p *Player) mix(out []byte, n int) {
 	// drop what was played in one copy instead of reslicing per sample, so
 	// the buffer keeps one backing array instead of creeping through new ones
 	for _, s := range p.srcs {
-		s.buf = s.buf[:copy(s.buf, s.buf[min(n, len(s.buf)):])]
+		if s.live {
+			s.buf = s.buf[:copy(s.buf, s.buf[min(n, len(s.buf)):])]
+		}
 	}
 }
+
+// prebuf: audio a source must have queued before it (re)starts, so network
+// jitter costs 60 ms of delay instead of a crackle on every late packet.
+const prebuf = SampleRate * 6 / 100
 
 func clamp16(v float32) int16 {
 	if v > 32767 {

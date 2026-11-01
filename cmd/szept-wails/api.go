@@ -7,6 +7,8 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -29,6 +31,8 @@ import (
 	"szept/internal/core"
 	"szept/internal/identity"
 	"szept/internal/media"
+	"szept/internal/update"
+	"szept/internal/version"
 )
 
 type App struct {
@@ -52,6 +56,12 @@ type App struct {
 
 	frames  map[string]*frame // live video tiles, see media.go
 	frameNo uint64
+	camStop func() // camera test in the settings, see CamTest
+
+	dropped map[string]bool // paths dragged onto the window, see ReadDropped
+
+	upd UpdateInfo      // newest release found, see CheckUpdate
+	rel *update.Release // its signed file list, for InstallUpdate
 }
 
 func newApp(cfg *core.Config, cfgFile, baseDir string, pinned bool) *App {
@@ -238,20 +248,108 @@ func (a *App) UseProfile(name string) error {
 	}
 	a.cfg.Profile = name
 	a.saveCfg()
-	c, err := a.live()
-	if err != nil {
+	if _, err := a.live(); err != nil {
 		return nil // login screen: Boot() will pick the new directory up
 	}
+	return a.Restart()
+}
+
+// Restart starts a fresh copy of the executable (an installed update, a
+// switched account) and quits this one.
+func (a *App) Restart() error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	c.StopWebhook() // free the port before the new process claims it
+	if c, err := a.live(); err == nil {
+		c.StopWebhook() // free the port before the new process claims it
+	}
 	if err := exec.Command(exe, os.Args[1:]...).Start(); err != nil {
 		return err
 	}
 	a.app.Quit()
 	return nil
+}
+
+// UpdateInfo: a newer signed release ("" = none found yet) and whether it is
+// already installed.
+type UpdateInfo struct {
+	Version   string `json:"version"`
+	Installed bool   `json:"installed"`
+	Err       string `json:"err"`
+}
+
+// Update reports what the last check found.
+func (a *App) Update() UpdateInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.upd
+}
+
+// CheckUpdate asks for the newest signed release without installing it.
+// Version stays "" when this build is current (or a dev build).
+func (a *App) CheckUpdate() (UpdateInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	r, err := update.Latest(ctx)
+	if err != nil {
+		return UpdateInfo{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if update.Newer(r.Version, version.String()) && !(a.upd.Installed && a.upd.Version == r.Version) {
+		a.rel, a.upd = r, UpdateInfo{Version: r.Version}
+	}
+	return a.upd, nil
+}
+
+// InstallUpdate puts the release CheckUpdate found over the running
+// executable; it runs from the next start (see Restart).
+func (a *App) InstallUpdate() (UpdateInfo, error) {
+	a.mu.Lock()
+	r, info := a.rel, a.upd
+	a.mu.Unlock()
+	if r == nil || info.Installed {
+		return info, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	info.Err = ""
+	if err := r.Install(ctx); err != nil {
+		info.Err = err.Error()
+	} else {
+		info.Installed = true
+	}
+	a.mu.Lock()
+	a.upd = info
+	a.mu.Unlock()
+	return info, nil
+}
+
+// updates: with auto-update on (the default), check shortly after start and
+// then every six hours, install and tell the user once per version. Off, the
+// app never asks GitHub by itself: only the button in About does.
+func (a *App) updates() {
+	update.Cleanup()
+	for time.Sleep(15 * time.Second); ; time.Sleep(6 * time.Hour) {
+		if a.cfg.NoUpdate {
+			continue
+		}
+		before := a.Update()
+		info, err := a.CheckUpdate()
+		if err != nil || info.Version == "" || info.Version == before.Version {
+			continue
+		}
+		info, _ = a.InstallUpdate()
+		a.app.Event.Emit("update", info)
+		body := "Zainstalowana. Uruchom szepta ponownie, żeby jej używać."
+		if !info.Installed {
+			body = "Nie udało się jej zainstalować, pobierz ją z github.com/OppaiHacker/Szept/releases."
+		}
+		if a.notify != nil && !a.cfg.NoNotify {
+			_ = a.notify.SendNotification(notifications.NotificationOptions{ID: "szept-update", Title: "Nowa wersja szepta: " + info.Version, Body: body})
+		}
+	}
 }
 
 // ---- snapshot ----
@@ -269,6 +367,7 @@ type Me struct {
 	Connector string `json:"connector"`
 	ConnUp    bool   `json:"connUp"`
 	ConnErr   string `json:"connErr"`
+	ConnVer   string `json:"connVer"`
 	ConnRelay bool   `json:"connRelay"`
 	Lang      string `json:"lang"`
 	Accent    string `json:"accent"`
@@ -343,7 +442,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 		Status: card.Status, Bio: card.Bio, Style: card.Style,
 		Avatar: avatarURL(c, c.ID.Pub), Banner: bannerURL(c, c.ID.Pub),
 		Profile: a.cfg.Profile, Connector: c.Cfg.Connector,
-		ConnUp: c.ConnUp(), ConnErr: c.ConnErr(), ConnRelay: c.ConnRelay(), Lang: c.Lang(), Accent: a.cfg.Accent, Dev: a.cfg.DevMode,
+		ConnUp: c.ConnUp(), ConnErr: c.ConnErr(), ConnVer: c.ConnVersion(), ConnRelay: c.ConnRelay(), Lang: c.Lang(), Accent: a.cfg.Accent, Dev: a.cfg.DevMode,
 	}, Chats: []Chat{}, Friends: []Friend{}}
 
 	direct := map[string]string{} // peer hex -> chat hex
@@ -977,6 +1076,7 @@ type ProfileCard struct {
 	IsMe     bool        `json:"isMe"`
 	Chat     string      `json:"chat"` // existing direct chat, if any
 	History  []NickEntry `json:"history"`
+	Version  string      `json:"version"` // what they said in "hello", "" = unknown
 }
 
 func (a *App) ProfileOf(pub string) (ProfileCard, error) {
@@ -990,10 +1090,10 @@ func (a *App) ProfileOf(pub string) (ProfileCard, error) {
 		Pub: pub, Status: status, Bio: bio, Style: c.StyleOf(p),
 		Avatar: avatarURL(c, p), Banner: bannerURL(c, p),
 		Online: c.Online(p), IsFriend: c.St.IsFriend(p),
-		IsMe: equalBytes(p, c.ID.Pub), History: []NickEntry{},
+		IsMe: equalBytes(p, c.ID.Pub), History: []NickEntry{}, Version: c.PeerVersion(p),
 	}
 	if card.IsMe {
-		card.Name, card.Online = c.ID.Name, true
+		card.Name, card.Online, card.Version = c.ID.Name, true, version.String()
 	}
 	for _, ci := range c.Chats() {
 		for _, m := range ci.Members {
@@ -1145,27 +1245,46 @@ func (a *App) SetServerStyle(chat, s string) error {
 
 // ---- attachments ----
 
-// PickFiles opens the native picker and sends everything chosen.
-func (a *App) PickFiles(chat, caption string) error {
-	c, err := a.live()
-	if err != nil {
-		return err
-	}
-	paths, err := a.app.Dialog.OpenFile().
-		AttachToWindow(a.win).
-		CanChooseFiles(true).
-		SetTitle("Wyślij plik").
-		PromptForMultipleSelection()
-	if err != nil || len(paths) == 0 {
-		return nil // cancelled
+// filesDropped remembers the paths of a native file drop and tells the
+// frontend, which pulls each one through ReadDropped into the composer.
+func (a *App) filesDropped(paths []string) {
+	a.mu.Lock()
+	if a.dropped == nil {
+		a.dropped = map[string]bool{}
 	}
 	for _, p := range paths {
-		if err := c.SendFilePath(unhex(chat), p, caption); err != nil {
-			return err
-		}
-		caption = "" // caption belongs to the first file only
+		a.dropped[p] = true
 	}
-	return nil
+	a.mu.Unlock()
+	a.app.Event.Emit("files-dropped", paths)
+}
+
+// ReadDropped returns one dropped file as a data URL. Only paths that came in
+// through a real drop are served, once each, so page script cannot use this
+// to read arbitrary files off the disk.
+func (a *App) ReadDropped(path string) (string, error) {
+	a.mu.Lock()
+	ok := a.dropped[path]
+	delete(a.dropped, path)
+	a.mu.Unlock()
+	if !ok {
+		return "", errors.New("nieznany plik")
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !st.Mode().IsRegular() {
+		return "", errors.New("to nie jest plik")
+	}
+	if st.Size() > attach.MaxFileBytes {
+		return "", fmt.Errorf("plik jest za duży (limit %s)", humanBytes(attach.MaxFileBytes))
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return "data:" + attach.SniffAny(raw) + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
 }
 
 // SendData handles drag & drop and clipboard paste, where bytes arrive from JS.
@@ -1313,6 +1432,48 @@ func (a *App) MicTest(on bool) error {
 	return c.MicTest(on)
 }
 
+// CamTest shows the camera in the settings: frames go to the "camtest" tile
+// (/frame/camtest, event "camtest"), nothing is sent.
+func (a *App) CamTest(on bool) error {
+	a.mu.Lock()
+	stop := a.camStop
+	a.camStop = nil
+	a.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if !on {
+		return nil
+	}
+	stop, err := media.StartCamera(a.cfg.CamDevice, a.cfg.CamVideo.Or(core.DefCam), func(jpg []byte) {
+		a.mu.Lock()
+		f := a.frames["camtest"]
+		if f == nil {
+			f = &frame{}
+			a.frames["camtest"] = f
+		}
+		a.frameNo++
+		seq := a.frameNo
+		a.mu.Unlock()
+		f.mu.Lock()
+		f.jpeg, f.seq, f.last = jpg, seq, time.Now()
+		f.mu.Unlock()
+		a.app.Event.Emit("camtest", seq)
+	})
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.camStop = func() {
+		stop()
+		a.mu.Lock()
+		delete(a.frames, "camtest")
+		a.mu.Unlock()
+	}
+	a.mu.Unlock()
+	return nil
+}
+
 func (a *App) MutePeer(pub string, mute bool) {
 	if c, err := a.live(); err == nil {
 		c.MuteVoicePeer(unhex(pub), mute)
@@ -1340,28 +1501,30 @@ func (a *App) VoiceLevels() map[string]float32 {
 // ---- settings ----
 
 type Settings struct {
-	Connector      string   `json:"connector"`
-	Connectors     []string `json:"connectors"`
-	ConnectorLists []string `json:"connectorLists"`
-	MediaDir       string   `json:"mediaDir"`
-	Accent         string   `json:"accent"`
-	OutputVol      float64  `json:"outputVol"`
-	CamDevice      string   `json:"camDevice"`
-	NoNotify       bool     `json:"noNotify"`
-	RelayOnly      bool     `json:"relayOnly"`
-	QuietLookup    bool     `json:"quietLookup"`
-	Lang           string   `json:"lang"`
-	Profile        string   `json:"profile"`
-	Profiles       []string `json:"profiles"`
-	Pinned         bool     `json:"pinned"`
-	WebhookOn      bool     `json:"webhookOn"`
-	WebhookPort    int      `json:"webhookPort"`
-	WebhookToken   string   `json:"webhookToken"`
-	DataDir        string   `json:"dataDir"`
-	DevMode        bool     `json:"devMode"`
-	MicDevice      string   `json:"micDevice"`
-	SpeakerDevice  string   `json:"speakerDevice"`
-	MicGain        float64  `json:"micGain"`
+	Connector      string          `json:"connector"`
+	Connectors     []string        `json:"connectors"`
+	ConnectorLists []string        `json:"connectorLists"`
+	MediaDir       string          `json:"mediaDir"`
+	Accent         string          `json:"accent"`
+	OutputVol      float64         `json:"outputVol"`
+	CamDevice      string          `json:"camDevice"`
+	NoNotify       bool            `json:"noNotify"`
+	NoUpdate       bool            `json:"noUpdate"`
+	RelayOnly      bool            `json:"relayOnly"`
+	QuietLookup    bool            `json:"quietLookup"`
+	Lang           string          `json:"lang"`
+	Profile        string          `json:"profile"`
+	Profiles       []string        `json:"profiles"`
+	Pinned         bool            `json:"pinned"`
+	WebhookOn      bool            `json:"webhookOn"`
+	WebhookPort    int             `json:"webhookPort"`
+	WebhookToken   string          `json:"webhookToken"`
+	DataDir        string          `json:"dataDir"`
+	DevMode        bool            `json:"devMode"`
+	MicDevice      string          `json:"micDevice"`
+	SpeakerDevice  string          `json:"speakerDevice"`
+	MicGain        float64         `json:"micGain"`
+	Voice          media.VoiceOpts `json:"voice"`
 }
 
 // AudioDevices: microphones and speakers for the voice settings.
@@ -1374,10 +1537,11 @@ func (a *App) Settings() Settings {
 		Connector: a.cfg.Connector, Connectors: a.cfg.Connectors,
 		ConnectorLists: a.cfg.ConnectorLists, MediaDir: a.cfg.MediaDir,
 		Accent: a.cfg.Accent, OutputVol: a.cfg.OutputVol, CamDevice: a.cfg.CamDevice,
-		NoNotify: a.cfg.NoNotify, RelayOnly: a.cfg.RelayOnly, QuietLookup: a.cfg.QuietLookup, Profile: a.cfg.Profile, Pinned: a.pinned,
+		NoNotify: a.cfg.NoNotify, NoUpdate: a.cfg.NoUpdate, RelayOnly: a.cfg.RelayOnly, QuietLookup: a.cfg.QuietLookup, Profile: a.cfg.Profile, Pinned: a.pinned,
 		WebhookOn: a.cfg.WebhookOn, WebhookPort: a.cfg.WebhookPort,
 		DataDir: a.cfg.DataDir, DevMode: a.cfg.DevMode,
 		MicDevice: a.cfg.MicDevice, SpeakerDevice: a.cfg.SpeakerDevice, MicGain: a.cfg.MicGain,
+		Voice:    a.cfg.Voice,
 		Profiles: []string{},
 	}
 	if s.Connectors == nil {
@@ -1402,15 +1566,19 @@ func (a *App) SaveSettings(s Settings) error {
 	a.cfg.Connectors, a.cfg.ConnectorLists = s.Connectors, s.ConnectorLists
 	a.cfg.MediaDir, a.cfg.Accent = s.MediaDir, s.Accent
 	a.cfg.CamDevice, a.cfg.NoNotify = s.CamDevice, s.NoNotify
+	a.cfg.NoUpdate = s.NoUpdate
 	a.cfg.OutputVol = s.OutputVol
 	a.cfg.RelayOnly = s.RelayOnly
 	a.cfg.QuietLookup = s.QuietLookup
 	a.cfg.DevMode = s.DevMode
 	a.cfg.MicDevice, a.cfg.SpeakerDevice = s.MicDevice, s.SpeakerDevice
+	a.cfg.Voice = s.Voice
+	media.SetVoiceOpts(s.Voice) // live: a running call or mic test hears it now
 
 	c, _ := a.live()
 	if c != nil {
 		c.Cfg.MicDevice, c.Cfg.SpeakerDevice = s.MicDevice, s.SpeakerDevice // next call
+		c.Cfg.Voice = s.Voice
 		c.SetRelayOnly(s.RelayOnly)
 		c.SetQuietLookup(s.QuietLookup)
 		if s.Connector != "" && core.NormalizeWS(s.Connector) != a.cfg.Connector {
@@ -1530,4 +1698,4 @@ func (a *App) ToggleMax() { a.win.ToggleMaximise() }
 func (a *App) CloseApp()  { a.app.Quit() }
 
 // Version reports the build stamp shown in the About panel.
-func (a *App) Version() string { return version() }
+func (a *App) Version() string { return version.String() }

@@ -332,6 +332,8 @@ const I = {
   palette: '<path d="M12 21a9 9 0 1 1 9-9c0 2-2 2.5-3.5 2.5H16a2 2 0 0 0-1.4 3.4A2 2 0 0 1 12 21Z"/><path d="M7.5 12h.01M10 8h.01M15 8h.01"/>',
   globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c4 4.5 4 12.5 0 17-4-4.5-4-12.5 0-17Z"/>',
   hash: '<path d="M5 9h15M4 15h15M10 3 8 21M16 3l-2 18"/>',
+  play: '<path d="M7.5 5v14l11-7Z"/>',
+  pause: '<path d="M8.5 5v14M15.5 5v14"/>',
   expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   logout: '<path d="M14 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-3"/><path d="M10 12h11m0 0-3-3m3 3-3 3"/>',
 };
@@ -347,6 +349,7 @@ const S = {
   conv: null,
   chat: "",
   space: "home", // "home" (direct chats + friends) or a group's chat id
+  files: [],     // pasted or dropped files waiting over the composer
   ch: "",        // open text channel of the group ("" = the default "czat")
   voice: null,   // call key whose voice view is open instead of the chat
   pip: null,     // [x, y] where the floating call window was dragged
@@ -921,10 +924,27 @@ function ackIcon(ack) {
 
 function attachHTML(m) {
   if (m.kind !== "file") return "";
-  const img = m.mime?.startsWith("image/") || m.mime?.startsWith("video/");
-  if (img && m.src) {
+  const av = m.mime?.startsWith("video/") ? "video"
+    : m.mime?.startsWith("audio/") || m.mime === "application/ogg" ? "audio" : "";
+  if (av && m.have) {
+    // data-media: updateMsgs carries the playing element over a repaint
+    // WebKitGTK's own controls only mute and leave <audio> on a spinner
+    // forever, so the bar is ours (wired in mbarPaint and the listeners below it)
+    const bar = `<div class="mbar">
+        <button class="mb-play" title="Odtwórz">${icon("play")}</button>
+        <span class="mb-cur">0:00</span><input class="slider mb-seek" type="range" min="0" max="1000" value="0"><span class="mb-dur">0:00</span>
+        <span class="mb-v"><button class="mb-mute" title="Wycisz">${icon("volume")}</button><input class="slider mb-vol" type="range" min="0" max="1" step="0.02" value="${mediaVol()}" title="Głośność"></span>
+        ${av === "video" ? `<button class="mb-full" title="Pełny ekran">${icon("expand")}</button>` : ""}
+      </div>`;
+    const player = `<${av} preload="metadata" data-media="${m.id}" data-blob="${m.blob}"></${av}>`;
+    return av === "video" ? `<div class="video">${player}${bar}</div>`
+      : `<div class="file audio"><span class="nm"><b>${esc(m.file)}</b><span>${esc(humanSize(m.size))}</span></span>${player}${bar}</div>`;
+  }
+  if (m.mime?.startsWith("image/") && m.src) {
+    const star = m.mime === "image/gif" && m.have
+      ? `<button class="gif-star ${gifs().some((g) => g.blob === m.blob) ? "on" : ""}" data-act="gif-star" data-id="${m.id}" title="Zapisz GIF">${icon("star")}</button>` : "";
     return `<span class="attach ${m.have ? "" : "pending"}">
-        <img src="${esc(m.src)}" alt="${esc(m.file)}" data-act="zoom" data-src="${esc(m.src)}" loading="lazy">
+        <img src="${esc(m.src)}" alt="${esc(m.file)}" data-act="zoom" data-src="${esc(m.src)}" loading="lazy">${star}
       </span>`;
   }
   const state = m.have ? humanSize(m.size)
@@ -977,7 +997,7 @@ function msgHTML(m, prev, me, fresh) {
       <div class="gutter">${grouped ? `<span class="gt">${hhmm(m.ts)}</span>` : `<button ${who}>${avatar(m.avatar, m.name, m.author)}</button>`}</div>
       <div class="msg-col">
         ${quote}${head}
-        <div class="bubble">${attachHTML(m)}${text}${meta}</div>
+        <div class="bubble">${m.deleted ? "" : attachHTML(m)}${text}${meta}</div>
         ${reactionsHTML(m, mePub)}
       </div>
       ${m.deleted ? "" : `<div class="msg-tools">
@@ -1008,12 +1028,13 @@ function buildConv() {
         <input id="hs" placeholder="Szukaj" value="${esc(S.search?.q || "")}">${icon("search")}
       </div>
     </header>
-    <div class="conv-body">
+    <div class="conv-body" data-file-drop-target>
       <div class="msgs" id="msgs"></div>
       <div class="typing" id="typing"></div>
       <div class="composer-wrap" id="composer-wrap">
         <button class="jump" data-act="jump">Przeglądasz starsze wiadomości<b>Wróć na dół ${icon("down")}</b></button>
         <div class="hints" id="hints" hidden></div>
+        <div class="staged" id="staged" hidden></div>
         <div class="replying" id="replying" hidden></div>
         <div class="composer">
           <button class="add-btn" data-act="attach" title="Załącz plik">${icon("plus")}</button>
@@ -1022,7 +1043,7 @@ function buildConv() {
           <button class="icon-btn" data-act="emoji" title="Emoji">${icon("smile")}</button>
           <button class="send" data-act="send" disabled>${icon("send")}</button>
         </div>
-        <div class="drop-hint" id="drop" hidden>Upuść plik, żeby wysłać</div>
+        <div class="drop-hint">Upuść plik, żeby załączyć</div>
       </div>
     </div>`;
   host.dataset.vk = "";
@@ -1092,6 +1113,62 @@ function updateHead(c) {
 // animation for the entire history.
 let seenChat = null, seenIds = new Set();
 
+// WebKitGTK's media player cannot read from the wails:// scheme (it fails
+// with MEDIA_ERR_SRC_NOT_SUPPORTED), but plays blob: URLs fine.
+// ponytail: object URLs are kept for the session, one per media file opened.
+const mediaURLs = new Map();
+const mediaVol = () => +(localStorage.getItem("szept.vol") ?? 1);
+const clock = (s) => isFinite(s) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}` : "0:00";
+const setIco = (b, name) => { if (b && b.dataset.i !== name) { b.dataset.i = name; b.innerHTML = icon(name); } };
+const mediaOf = (t) => t.closest(".video, .file.audio")?.querySelector("[data-media]");
+function mbarPaint(el) {
+  const bar = el.closest(".video, .file.audio")?.querySelector(".mbar");
+  if (!bar) return;
+  const d = el.duration;
+  setIco(bar.querySelector(".mb-play"), el.paused ? "play" : "pause");
+  setIco(bar.querySelector(".mb-mute"), el.muted || !el.volume ? "deaf" : "volume");
+  bar.querySelector(".mb-cur").textContent = clock(el.currentTime);
+  bar.querySelector(".mb-dur").textContent = clock(d);
+  bar.querySelector(".mb-seek").value = d > 0 && isFinite(d) ? (el.currentTime / d) * 1000 : 0;
+  bar.querySelector(".mb-vol").value = el.muted ? 0 : el.volume;
+}
+// media events do not bubble, but the capture phase still sees them
+for (const ev of ["timeupdate", "durationchange", "play", "pause", "ended", "volumechange"]) {
+  document.addEventListener(ev, (e) => e.target.matches?.("[data-media]") && mbarPaint(e.target), true);
+}
+document.addEventListener("input", (e) => {
+  const r = e.target.closest?.(".mbar input");
+  const el = r && mediaOf(r);
+  if (!el) return;
+  if (r.classList.contains("mb-seek")) {
+    if (el.duration > 0) el.currentTime = (r.value / 1000) * el.duration;
+    return;
+  }
+  // one volume for every player, remembered across restarts
+  localStorage.setItem("szept.vol", r.value);
+  for (const x of document.querySelectorAll("[data-media]")) { x.volume = +r.value; x.muted = false; }
+});
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.(".mbar button, video[data-media]");
+  const el = b && mediaOf(b);
+  if (!el) return;
+  if (b === el || b.classList.contains("mb-play")) el.paused ? el.play().catch(() => {}) : el.pause();
+  else if (b.classList.contains("mb-mute")) el.muted = !el.muted;
+  else if (document.fullscreenElement) document.exitFullscreen();
+  else b.closest(".video").requestFullscreen();
+});
+function mediaURL(blob) {
+  if (!mediaURLs.has(blob)) {
+    const p = fetch("/blob/" + blob).then((r) => {
+      if (!r.ok) throw new Error(r.status);
+      return r.blob();
+    }).then((b) => URL.createObjectURL(b));
+    p.catch(() => mediaURLs.delete(blob));
+    mediaURLs.set(blob, p);
+  }
+  return mediaURLs.get(blob);
+}
+
 function updateMsgs(c) {
   const list = $("#msgs");
   const keepBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 60 || !list.scrollHeight;
@@ -1118,7 +1195,19 @@ function updateMsgs(c) {
     prev = m;
   });
   seenIds = new Set(c.msgs.map((m) => m.id));
+  // the list is rebuilt wholesale: swap the old players back in so a video
+  // keeps playing (re-inserted in the same task, the element never pauses)
+  const players = new Map([...list.querySelectorAll("[data-media]")].map((el) => [el.dataset.media, el]));
   list.innerHTML = out || `<div class="empty" style="margin:auto"><i class="empty-ico">${icon("chat")}</i><strong>Cisza</strong>Napisz pierwszą wiadomość.</div>`;
+
+  for (const el of list.querySelectorAll("[data-media]")) {
+    const old = players.get(el.dataset.media);
+    if (old) { el.replaceWith(old); mbarPaint(old); }
+    else {
+      el.volume = mediaVol();
+      mediaURL(el.dataset.blob).then((u) => { el.src = u; }).catch(() => {});
+    }
+  }
 
   // Growing the list from the top (older page) must not move what you read.
   if (keepBottom) list.scrollTop = list.scrollHeight;
@@ -1666,7 +1755,7 @@ const CMD = {
   "/mic": () => act("ToggleMic", callKey()),
   "/cam": () => startVideo(null, "cam", callKey()),
   "/ekran": () => startVideo(null, "screen", callKey()), "/screen": () => startVideo(null, "screen", callKey()),
-  "/wyslij": () => act("PickFiles", S.chat, ""), "/send": () => act("PickFiles", S.chat, ""),
+  "/wyslij": () => pickFiles(), "/send": () => pickFiles(),
   "/awatar": () => pickPicture("avatar"), "/avatar": () => pickPicture("avatar"),
   "/connector": cmdConnector,
   "/ja": () => openSettings("profile"), "/me": () => openSettings("profile"),
@@ -1790,7 +1879,7 @@ function wireComposer() {
 
   const sync = () => {
     autoGrow(input);
-    send.disabled = input.value.trim() === "";
+    send.disabled = input.value.trim() === "" && !S.files.length;
     S.hints = matchCommands(input.value.trim());
     if (!S.hints.length) S.hints = matchMentions(input);
     S.hintIdx = Math.min(S.hintIdx, Math.max(0, S.hints.length - 1));
@@ -1823,6 +1912,7 @@ function wireComposer() {
       if (e.key === "Escape") { S.hints = []; return paintHints(); }
     }
     if (e.key === "Escape" && S.reply) { e.stopPropagation(); return setReply(null); }
+    if (e.key === "Escape" && S.files.length) { e.stopPropagation(); return setFiles([]); }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
   });
 
@@ -1831,9 +1921,10 @@ function wireComposer() {
     const files = [...e.clipboardData.files];
     if (!files.length) return;
     e.preventDefault();
-    for (const f of files) await sendFileObject(f);
+    setFiles([...S.files, ...files]);
   });
   input.focus();
+  setFiles(S.files);
   sync();
 }
 
@@ -1842,10 +1933,10 @@ function wireComposer() {
 // up a fresh set of listeners each time.
 // A channel row dragged onto a category moves there; the default sections
 // take only their own kind.
+// Files never reach these listeners: the native layer takes them (see
+// "files-dropped").
 (function wireDrop() {
-  let depth = 0, ch = null, over = null;
-  const drop = () => $("#drop");
-  const files = (e) => e.dataTransfer?.types.includes("Files");
+  let ch = null, over = null;
   const mark = (c) => { if (over !== c) { over?.classList.remove("drop-to"); c?.classList.add("drop-to"); over = c; } };
   const target = (e) => {
     const c = ch && e.target.closest?.(".cat");
@@ -1857,12 +1948,7 @@ function wireComposer() {
     if (ch) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", ch.name); }
   });
   document.addEventListener("dragend", () => { ch = null; mark(null); });
-  document.addEventListener("dragenter", (e) => {
-    e.preventDefault();
-    if (!files(e)) return;
-    ch = null;
-    if (++depth === 1 && drop()) drop().hidden = false;
-  });
+  document.addEventListener("dragenter", (e) => e.preventDefault());
   document.addEventListener("dragover", (e) => {
     e.preventDefault();
     if (!ch) return;
@@ -1870,27 +1956,19 @@ function wireComposer() {
     mark(c);
     e.dataTransfer.dropEffect = c ? "move" : "none";
   });
-  document.addEventListener("dragleave", (e) => {
-    if (files(e) && --depth <= 0) { depth = 0; if (drop()) drop().hidden = true; }
-  });
   document.addEventListener("drop", async (e) => {
     e.preventDefault();
-    if (ch) {
-      const x = ch, c = target(e);
-      ch = null; mark(null);
-      if (c && (x.cat || "") !== c.dataset.cat) putChannel(x.id, x.kind, x.name, c.dataset.cat, x.arch);
-      return;
-    }
-    depth = 0;
-    if (drop()) drop().hidden = true;
-    for (const f of e.dataTransfer.files) await sendFileObject(f);
+    if (!ch) return;
+    const x = ch, c = target(e);
+    ch = null; mark(null);
+    if (c && (x.cat || "") !== c.dataset.cat) putChannel(x.id, x.kind, x.name, c.dataset.cat, x.arch);
   });
 })();
 
 async function submit() {
   const input = $("#input");
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !S.files.length) return;
   input.value = "";
   autoGrow(input);
   $(".composer .send").disabled = true;
@@ -1907,6 +1985,13 @@ async function submit() {
   api("Typing", S.chat, false).catch(() => {});
   const reply = S.reply;
   setReply(null);
+  if (S.files.length) {
+    const files = S.files;
+    setFiles([]);
+    // the text rides as the first file's caption, unless it answers someone
+    for (const [i, f] of files.entries()) await sendFileObject(f, i || reply ? "" : text);
+    if (!text || !reply) return;
+  }
   try { await (reply ? api("SendReply", S.chat, text, reply.id) : api("Send", S.chat, text)); }
   catch (e) { fail(e); input.value = text; setReply(reply); }
 }
@@ -1922,6 +2007,53 @@ function setReply(m) {
   if (m) $("#input")?.focus();
 }
 
+// pickFiles adds chosen files to the composer instead of sending them.
+function pickFiles() {
+  if (!S.chat) return toast("Najpierw wybierz czat.", "err");
+  // attached to the page: WebKit drops the change event of a detached input
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.hidden = true;
+  document.body.append(input);
+  input.onchange = () => {
+    setFiles([...S.files, ...input.files]);
+    input.remove();
+    $("#input")?.focus();
+  };
+  input.click();
+}
+
+// setFiles stages pasted or dropped files over the composer; Enter sends them.
+function setFiles(list) {
+  for (const u of S.fileURLs || []) URL.revokeObjectURL(u);
+  S.files = list;
+  S.fileURLs = [];
+  const bar = $("#staged");
+  if (!bar) return;
+  bar.hidden = !list.length;
+  bar.innerHTML = list.map((f, i) => {
+    let thumb = icon("file");
+    if (f.type.startsWith("image/")) {
+      const u = URL.createObjectURL(f);
+      S.fileURLs.push(u);
+      thumb = `<img src="${u}" alt="">`;
+    }
+    return `<div class="pend">${thumb}<span>${esc(f.name || "obraz.png")}</span>
+      <button class="icon-btn" data-act="file-drop" data-i="${i}" title="Usuń">${icon("close")}</button></div>`;
+  }).join("");
+  const send = $(".composer .send");
+  if (send) send.disabled = $("#input").value.trim() === "" && !list.length;
+}
+
+function dataURLFile(url, name) {
+  const i = url.indexOf(",");
+  const bin = atob(url.slice(i + 1));
+  const buf = new Uint8Array(bin.length);
+  for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
+  return new File([buf], name, { type: url.slice(5, url.indexOf(";")) });
+}
+
 function readAsDataURL(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -1931,11 +2063,11 @@ function readAsDataURL(file) {
   });
 }
 
-async function sendFileObject(file) {
+async function sendFileObject(file, caption = "") {
   if (!S.chat) return toast("Najpierw wybierz czat.", "err");
   try {
     toast("Wysyłam " + file.name);
-    await api("SendData", S.chat, file.name, await readAsDataURL(file), "");
+    await api("SendData", S.chat, file.name || "obraz.png", await readAsDataURL(file), caption);
   } catch (e) { fail(e); }
 }
 
@@ -2090,6 +2222,7 @@ async function profileDialog(pub, anchor) {
       <div class="nm"><span${nameFx(p.pub, style)}>${esc(p.name || "nieznany")}</span></div>
       <div class="st">${esc(p.status || (p.online ? "online" : "offline"))}</div>
       ${p.bio ? `<div class="bio">${esc(p.bio)}</div>` : ""}
+      ${p.version ? `<div class="st">szept <span class="mono">${esc(p.version)}</span></div>` : ""}
     </div>
     ${keyBlock(p.pub)}
     <div class="btn-row">
@@ -2378,6 +2511,7 @@ function closeSettings() {
   S.draftStyle = undefined;
   S.screen = "app";
   if (S.micTest) micTest(false);
+  if (S.camTest) camTest(false);
   const layer = $(".set-layer");
   if (!layer) return;
   layer.classList.add("out");
@@ -2421,7 +2555,7 @@ function settingsBody() {
       <div class="block">
         <h4>Aktywny</h4>
         <div class="field"><input class="input" id="s-conn" value="${esc(s.connector)}" placeholder="ws://twoj-vps:7777"></div>
-        <p class="hint-text" style="padding:0 16px">Stan: ${me.connUp ? "połączony" : esc(me.connErr || "łączenie…")}</p>
+        <p class="hint-text" style="padding:0 16px">Stan: ${me.connUp ? "połączony" + (me.connVer ? `, connector w wersji ${esc(me.connVer)}` : "") : esc(me.connErr || "łączenie…")}</p>
         <div class="btn-row"><button class="btn primary" data-act="save-conn">Zapisz i połącz</button></div>
       </div>
       <div class="block">
@@ -2456,6 +2590,9 @@ function settingsBody() {
           <option value="">Domyślne systemowe</option>
           ${(list || []).map((d) => `<option value="${esc(d.id)}" ${d.id === cur ? "selected" : ""}>${esc(d.name)}</option>`).join("")}
         </select></div>`;
+      const v = s.voice || {};
+      const voiceOpt = (k, title, sub) => `<div class="toggle"><div class="tx"><b>${title}</b><span>${sub}</span></div>
+          <button class="switch ${v[k] ? "" : "on"}" data-act="voice-opt" data-k="${k}" aria-pressed="${!v[k]}" aria-label="${title}"></button></div>`;
       return `
       <h2>Głos i wideo</h2><p class="lead">Rozmowy idą pełną siatką P2P: każdy wysyła do każdego. Wygodnie do ok. ośmiu osób.</p>
       <div class="block">
@@ -2474,7 +2611,20 @@ function settingsBody() {
           <button class="btn ${S.micTest ? "" : "primary"}" data-act="mic-test">${S.micTest ? "Zatrzymaj test" : "Test mikrofonu"}</button>
           <div class="meter" id="meter"><i></i></div>
         </div>
-        <p class="hint-text" style="padding:0 16px 8px">Powiedz coś: pasek pokazuje, jak głośno inni Cię słyszą. Nic nie jest wysyłane.</p>
+        <p class="hint-text" style="padding:0 16px 8px">${v.no_monitor ? "Powiedz coś: pasek pokazuje, jak głośno inni Cię słyszą." : "Powiedz coś: usłyszysz siebie tak, jak słyszą Cię inni. Najlepiej w słuchawkach."} Nic nie jest wysyłane.</p>
+      </div>
+      <div class="block">
+        <h4>Przetwarzanie dźwięku</h4>
+        <p class="hint-text" style="padding:0 16px">Działa od razu, także w trwającej rozmowie i w teście mikrofonu.</p>
+        ${voiceOpt("no_denoise", "Odszumianie", "usuwa wentylator, klawiaturę i szum ulicy (RNNoise)")}
+        ${voiceOpt("no_agc", "Automatyczna głośność", "podciąga cichy mikrofon i ścisza głośny, żeby każdy brzmiał równo")}
+        ${voiceOpt("no_gate", "Wysyłaj tylko mowę", "w ciszy nic nie idzie do sieci, a pierścień świeci tylko gdy mówisz")}
+        ${voiceOpt("no_monitor", "Odsłuch w teście mikrofonu", "słyszysz siebie podczas testu")}
+        <div class="field"><label>Jakość dźwięku</label><div class="select-wrap"><select class="input" id="s-bitrate">
+          ${[[24000, "Oszczędna, 24 kbit/s"], [32000, "Standardowa, 32 kbit/s"], [64000, "Wysoka, 64 kbit/s"], [96000, "Najwyższa, 96 kbit/s"]]
+            .map(([b, l]) => `<option value="${b}" ${(v.bitrate || 32000) === b ? "selected" : ""}>${l}</option>`).join("")}
+        </select></div></div>
+        <p class="hint-text" style="padding:0 16px 8px">Tyle wysyłasz do każdej osoby w rozmowie. Przy słabym łączu wybierz niższą.</p>
       </div>
       <div class="block">
         <h4>Głośność rozmowy</h4>
@@ -2486,11 +2636,15 @@ function settingsBody() {
         <div class="field"><label>Urządzenie</label>
           <input class="input" id="s-cam" value="${esc(s.camDevice)}" placeholder="/dev/video0"></div>
         <p class="hint-text" style="padding:0 16px">Puste = pierwsza znaleziona kamera.</p>
-        <div class="btn-row"><button class="btn primary" data-act="save-settings">Zapisz</button></div>
+        <div class="btn-row"><button class="btn primary" data-act="save-settings">Zapisz</button>
+          <button class="btn" data-act="cam-test">${S.camTest ? "Zatrzymaj podgląd" : "Test kamery"}</button></div>
+        ${S.camTest ? `<canvas class="cam-prev" id="cam-prev"></canvas>` : ""}
       </div>
       <div class="block">
         <div class="toggle"><div class="tx"><b>Powiadomienia systemowe</b><span>wiadomości prywatne i wzmianki (@ty, @everyone, @here), gdy nie patrzysz na ten czat</span></div>
           <button class="switch ${s.noNotify ? "" : "on"}" data-act="toggle-notify"></button></div>
+        <div class="toggle"><div class="tx"><b>Automatyczne aktualizacje</b><span>co kilka godzin pyta GitHuba o nową wersję podpisaną kluczem szepta i ją instaluje. Wyłączone: szept nie łączy się z GitHubem sam, sprawdzasz przyciskiem w zakładce O szepcie.</span></div>
+          <button class="switch ${s.noUpdate ? "" : "on"}" data-act="toggle-update"></button></div>
       </div>`;
     }
 
@@ -2585,6 +2739,15 @@ function settingsBody() {
         <div class="card-id" style="padding-top:16px;margin-top:0">
           <div class="nm">szept</div>
           <div class="st">wersja ${esc(S.version || "dev")}</div>
+          ${!S.update?.version ? `<div class="btn-row"><button class="btn" data-act="check-update">Sprawdź aktualizacje</button></div>`
+            : S.update.installed
+            ? `<div class="st">${esc(S.update.version)} zainstalowana, działa od następnego uruchomienia</div>
+               <div class="btn-row"><button class="btn primary" data-act="restart-app">Uruchom ponownie</button></div>`
+            : S.update.err
+            ? `<div class="st">nie udało się zainstalować ${esc(S.update.version)}: ${esc(S.update.err)}. Pobierz ją z github.com/OppaiHacker/Szept/releases.</div>
+               <div class="btn-row"><button class="btn" data-act="install-update">Spróbuj ponownie</button></div>`
+            : `<div class="st">jest nowa wersja ${esc(S.update.version)}</div>
+               <div class="btn-row"><button class="btn primary" data-act="install-update">Zainstaluj</button></div>`}
           <div class="bio">Szyfrowany komunikator P2P. Historia to podpisany DAG zdarzeń,
 transport to WebRTC (pion), a stan leży lokalnie w bbolt.
 Connector kojarzy peerów i nie widzi treści.</div>
@@ -2726,6 +2889,9 @@ function renderSettings() {
     api("SetMicGain", S.settings.micGain).catch(() => {});
   });
   if (S.micTest && S.section !== "voice") micTest(false);
+  if (S.camTest && S.section !== "voice") camTest(false);
+  $("#s-bitrate")?.addEventListener("change", (e) =>
+    saveSettings({ voice: { ...(S.settings.voice || {}), bitrate: +e.target.value } }));
 
   const vol = $("#s-vol");
   vol?.addEventListener("input", () => {
@@ -2735,6 +2901,14 @@ function renderSettings() {
 }
 
 /* ============================ settings actions ============================ */
+
+// camTest: live preview of the saved camera in the voice settings.
+async function camTest(on) {
+  S.camTest = on;
+  try { await api("CamTest", on); } catch (e) { S.camTest = false; fail(e); }
+  if (S.screen === "settings") renderSettings();
+}
+Events.On("camtest", (e) => { const cv = $("#cam-prev"); if (cv) setFrame(cv, `/frame/camtest?n=${e.data}`); });
 
 // micTest: the level meter in the voice settings. It reads your own entry of
 // VoiceLevels, so in a call it shows the call's microphone instead.
@@ -2805,7 +2979,7 @@ async function openChat(id, ch) {
     S.newMark = n ? { chat: id, n } : null;
   }
   if (id !== S.chat || ch !== S.ch) S.builtChat = undefined; // another channel, another message list
-  if (id !== S.chat || ch !== S.ch) S.reply = null;
+  if (id !== S.chat || ch !== S.ch) { S.reply = null; S.files = []; }
   S.chat = id;
   S.ch = ch;
   S.voice = null;
@@ -2923,7 +3097,7 @@ function paintStatus() {
   // the raw dial error is for whoever debugs it, not for the title bar
   $(".txt", bar).textContent = me.connErr
     ? "Brak połączenia z connectorem"
-    : me.connUp ? "połączony · " + me.connector : "łączenie z connectorem…";
+    : me.connUp ? "połączony · " + (me.connVer ? me.connVer + " · " : "") + me.connector : "łączenie z connectorem…";
   bar.title = me.connErr || "";
   $("#tb-sub").textContent = me.profile ? "· " + me.profile : "";
   paintUserbar(me, state);
@@ -3167,6 +3341,7 @@ const HANDLERS = {
   "react-more": (el) => emojiPicker(el, (e) => api("React", S.chat, el.dataset.id, e).catch(fail)),
   reply: (el) => { const m = S.conv?.msgs.find((x) => x.id === el.dataset.id); if (m) setReply(m); popClose?.(); },
   "reply-cancel": () => setReply(null),
+  "file-drop": (el) => setFiles(S.files.filter((_, i) => i !== +el.dataset.i)),
   pin: async (el) => { popClose?.(); try { await api("Pin", S.chat, el.dataset.id, el.dataset.unpin === "1"); } catch (e) { fail(e); } },
   pins: (el) => pinsPop(el),
   goto: (el) => { popClose?.(); jumpTo(el.dataset.id); },
@@ -3179,6 +3354,14 @@ const HANDLERS = {
     if (!m) return;
     setGifs([{ blob: m.blob, file: m.file }, ...gifs().filter((g) => g.blob !== m.blob)]);
     toast("GIF zapisany", "ok");
+  },
+  "gif-star": (el) => {
+    const m = S.conv?.msgs.find((x) => x.id === el.dataset.id);
+    if (!m) return;
+    const on = !gifs().some((g) => g.blob === m.blob);
+    setGifs(on ? [{ blob: m.blob, file: m.file }, ...gifs()] : gifs().filter((g) => g.blob !== m.blob));
+    el.classList.toggle("on", on);
+    toast(on ? "GIF zapisany" : "Usunięto z zapisanych GIF-ów", "ok");
   },
   "gif-unsave": (el) => { popClose?.(); setGifs(gifs().filter((g) => g.blob !== el.dataset.blob)); },
   hide: async (el) => { try { await api("HideMsg", S.chat, el.dataset.id); } catch (e) { fail(e); } },
@@ -3197,7 +3380,7 @@ const HANDLERS = {
       if (p) toast("Zapisane: " + p, "ok");
     } catch (e) { fail(e); }
   },
-  attach: () => api("PickFiles", S.chat, "").catch(fail),
+  attach: () => pickFiles(),
   ext: (el) => { window.open(el.dataset.url, "_blank"); },
 
   /* calls */
@@ -3329,8 +3512,26 @@ const HANDLERS = {
     lang: $("#s-lang")?.value ?? S.settings.lang,
   }),
   "toggle-notify": () => saveSettings({ noNotify: !S.settings.noNotify }),
+  "toggle-update": () => saveSettings({ noUpdate: !S.settings.noUpdate }),
+  "restart-app": () => api("Restart"),
+  "check-update": async () => {
+    S.update = await api("CheckUpdate");
+    if (!S.update.version) toast("Masz najnowszą wersję", "ok");
+    renderSettings();
+  },
+  "install-update": async () => {
+    toast("Pobieram aktualizację…");
+    S.update = await api("InstallUpdate");
+    toast(S.update.installed ? `Zainstalowano ${S.update.version}` : "Instalacja się nie udała", S.update.installed ? "ok" : "err");
+    renderSettings();
+  },
   "toggle-dev": () => saveSettings({ devMode: !S.settings.devMode }),
   "mic-test": () => micTest(!S.micTest),
+  "cam-test": () => camTest(!S.camTest),
+  "voice-opt": (el) => {
+    const v = S.settings.voice || {};
+    saveSettings({ voice: { ...v, [el.dataset.k]: !v[el.dataset.k] } });
+  },
   "toggle-relay": async () => {
     if (S.settings.relayOnly) return saveSettings({ relayOnly: false });
     const ok = await modal({
@@ -3496,10 +3697,12 @@ function spatialDialog() {
 
 async function boot() {
   S.boot = await api("Boot");
+  S.version = await api("Version");
+  $("#tb-ver").textContent = S.version;
   applyAccent(S.boot.accent);
   if (S.boot.stage === "ready") {
     S.stage = "ready";
-    S.version = await api("Version");
+    S.update = await api("Update");
     renderShell();
     await refresh();
   } else {
@@ -3507,6 +3710,23 @@ async function boot() {
     renderGate();
   }
 }
+
+Events.On("update", (e) => {
+  S.update = e.data;
+  toast(S.update.installed
+    ? `Zainstalowano szepta ${S.update.version}. Uruchom ponownie w ustawieniach, w zakładce O szepcie.`
+    : `Jest szept ${S.update.version}, ale nie udało się go zainstalować: ${S.update.err}`, S.update.installed ? "ok" : "warn");
+});
+
+Events.On("files-dropped", async (e) => {
+  if (!S.chat) return toast("Najpierw wybierz czat.", "err");
+  const got = [];
+  for (const p of e.data) {
+    try { got.push(dataURLFile(await api("ReadDropped", p), p.split(/[\\/]/).pop())); } catch (err) { fail(err); }
+  }
+  setFiles([...S.files, ...got]);
+  $("#input")?.focus();
+});
 
 Events.On("sync", () => { if (S.stage === "ready") refresh(); });
 
@@ -3526,17 +3746,14 @@ Events.On("frames-cleared", (e) => {
   paintCall();
 });
 
-// Speaking ring: while you are in a call, every [data-speak] avatar gets
-// --lvl (0..1) from the live audio peak. Speech peaks sit around .1-.4, so
-// the level is stretched; below .02 is room noise and stays dark.
+// Speaking ring: while you are in a call, every [data-speak] avatar of
+// someone talking gets .talking. The mic gate (media/denoise.go) only sends
+// speech and holds 400 ms over word gaps, so "heard lately" is "talking".
 setInterval(async () => {
   const live = S.stage === "ready" && S.snap?.chats.some((c) => c.call);
   const lv = live ? await api("VoiceLevels").catch(() => ({})) : {};
-  for (const el of $$("[data-speak]")) {
-    const v = lv[el.dataset.speak] || 0;
-    el.style.setProperty("--lvl", v < .02 ? 0 : Math.min(1, v * 4).toFixed(2));
-  }
-}, 150);
+  for (const el of $$("[data-speak]")) el.classList.toggle("talking", (lv[el.dataset.speak] || 0) > 0);
+}, 100);
 
 // The connector state changes without touching the DAG, so poll it gently.
 setInterval(() => { if (S.stage === "ready" && !refreshing) refresh(); }, 4000);

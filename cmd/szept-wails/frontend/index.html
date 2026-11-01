@@ -7,7 +7,7 @@
      peer-supplied content type. Even with the MIME whitelist in media.go, this
      keeps a picture from ever becoming script in the app's own origin. -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' data:; media-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+      content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>szept</title>
 <link rel="stylesheet" href="/app.css">
 </head>
@@ -18,6 +18,7 @@
         <rect x="7" y="9.4" width="1.9" height="5.2" rx=".95"/><rect x="11.05" y="7" width="1.9" height="10" rx=".95"/><rect x="15.1" y="9.4" width="1.9" height="5.2" rx=".95"/>
       </svg>
       <span class="tb-name">szept</span>
+      <span class="tb-ver" id="tb-ver"></span>
       <span class="tb-sub" id="tb-sub"></span>
     </div>
     <div class="tb-status" id="tb-status" hidden>
