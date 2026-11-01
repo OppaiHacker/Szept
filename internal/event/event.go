@@ -47,6 +47,9 @@ const (
 	// the group's look. Owner only; the whole look travels in one event, an
 	// empty field clears that part.
 	KindServer = "server"
+	// KindHistory: {NoHist} whether members added from now on get the content
+	// keys from before they joined. Owner only; overrides KindCreate's NoHist.
+	KindHistory = "history"
 	// KindLeave: {} the author leaves the chat. Anyone but the owner; unlike a
 	// remove it takes no one else along (the people they added stay).
 	KindLeave = "leave"
@@ -65,7 +68,7 @@ func MembershipKind(kind string) bool {
 // can fold membership from genesis, and content keys only from their join on.
 func MetaKind(kind string) bool {
 	switch kind {
-	case KindCreate, KindAdd, KindRemove, KindRekey, KindRename, KindNick, KindAvatar, KindProfile, KindChannel, KindServer, KindLeave:
+	case KindCreate, KindAdd, KindRemove, KindRekey, KindRename, KindNick, KindAvatar, KindProfile, KindChannel, KindServer, KindHistory, KindLeave:
 		return true
 	}
 	return false
@@ -333,8 +336,9 @@ type State struct {
 	KeyHash  map[uint32][]byte
 	MKeyHash map[uint32][]byte // the same for member keys
 
-	// NoHistory: set at creation; members added later do not get older
-	// content keys, and the owner rotates the key after every add.
+	// NoHistory: set at creation, changed by the owner with KindHistory;
+	// members added while it holds do not get older content keys, and the
+	// owner rotates the key after every add.
 	NoHistory bool
 
 	// MissingKey: epochs we hold no usable member key for. Membership events in
@@ -701,6 +705,12 @@ func (f *Folder) apply(e *Event) error {
 			st.Channels[i].Name, st.Channels[i].Cat, st.Channels[i].Arch = SafeName(body.Name), body.Ch, body.Arch
 		default:
 			st.Channels = append(st.Channels, Channel{ID: body.Target, Name: SafeName(body.Name), Kind: k, Cat: body.Ch, Arch: body.Arch})
+		}
+	case KindHistory:
+		// members already in keep the keys they hold; this decides what the
+		// next ones get (core.keysFor) and whether adds rotate the key
+		if bytes.Equal(e.Author, st.Owner) {
+			st.NoHistory = body.NoHist
 		}
 	case KindServer:
 		// owner only, ignored otherwise like a member's rename

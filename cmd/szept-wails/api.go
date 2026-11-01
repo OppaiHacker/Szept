@@ -288,6 +288,7 @@ type Chat struct {
 	InCall     []string            `json:"inCall"`
 	Call       *CallInfo           `json:"call,omitempty"` // set only while you are in this chat's call
 	IsOwner    bool                `json:"isOwner"`
+	History    bool                `json:"history"` // members added now see earlier messages
 	CallKey    string              `json:"callKey"` // the call above: chat ID + voice channel ID
 	Channels   []ChanInfo          `json:"channels"`
 	Voice      map[string][]string `json:"voice"`      // voice channel ID ("" = default) -> names in its call
@@ -366,6 +367,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 			}
 		}
 		ch.IsOwner = equalBytes(ci.Owner, c.ID.Pub)
+		ch.History = !ci.NoHistory
 		ch.Avatar, ch.Banner, ch.Style = blobURL(c, ci.Icon), blobURL(c, ci.Banner), ci.Style
 		ch.Channels, ch.Voice, ch.VFlags = []ChanInfo{}, map[string][]string{}, map[string][]string{}
 		for _, x := range ci.Channels {
@@ -1113,6 +1115,15 @@ func (a *App) SetServerImage(chat, which, dataURL string, crop Crop) error {
 		}
 	}
 	return c.SetServerImage(unhex(chat), raw, crop.rect(), which == "banner")
+}
+
+// SetHistory: owner only; on = people added from now on see earlier messages.
+func (a *App) SetHistory(chat string, on bool) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.SetHistory(unhex(chat), on)
 }
 
 func (a *App) SetServerStyle(chat, s string) error {

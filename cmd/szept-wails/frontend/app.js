@@ -2070,7 +2070,7 @@ function chatMenuHTML(c) {
     `<button class="menu-item ${danger}" data-act="${act}">${esc(label)}${icon(ic)}</button>`;
   return `<div class="menu">
       ${c.direct ? "" : item("invite", "key", "Zaproś ludzi")}
-      ${!c.direct && c.isOwner ? item("server-look", "edit", "Wygląd serwera") + item("chan-new", "plus", "Utwórz kanał") + item("cat-new", "plus", "Utwórz kategorię") : ""}
+      ${!c.direct && c.isOwner ? item("server-look", "edit", "Ustawienia serwera") + item("chan-new", "plus", "Utwórz kanał") + item("cat-new", "plus", "Utwórz kategorię") : ""}
       ${item("rename", "edit", "Zmień nazwę")}
       ${c.direct ? "" : item("members", "people", "Członkowie")}
       ${c.hidden ? item("unhide", "eye", `Pokaż schowane (${c.hidden})`) : ""}
@@ -2189,18 +2189,27 @@ function serverLook(chat) {
           <button class="btn ghost" data-pick="banner">Zmień baner</button>
           ${x.banner ? `<button class="btn ghost" data-clear="banner">Usuń baner</button>` : ""}
         </div>
+        <div class="toggle"><div class="tx"><b>Nowi członkowie widzą wcześniejszą historię</b><span>${x.history
+          ? "Każda dodana osoba czyta wszystko, co napisano przed jej dołączeniem."
+          : "Nowa osoba widzi tylko to, co napisano po jej dołączeniu. Włączenie odsłoni historię także osobom, które już dołączyły."}</span></div>
+          <button class="switch ${x.history ? "on" : ""}" data-hist></button></div>
         <div class="fx-row"><label>Dekoracja ikony</label><div class="fx-tiles">${tiles}</div></div>
         <div class="fx-row"><label>Kolory obwódki</label><div class="fx-cols">${sw("a")}${sw("b")}</div></div>
       </div>`;
   };
   return modal({
-    title: "Wygląd serwera", wide: true, body: body(),
+    title: "Ustawienia serwera", wide: true, body: body(),
     actions: [{ label: "Anuluj", kind: "ghost", value: null }, { label: "Zapisz dekorację", kind: "primary", get value() { return styleStr(st); } }],
     onMount: (box) => box.addEventListener("click", async (e) => {
-      const t = e.target.closest("[data-k], [data-pick], [data-clear]");
+      const t = e.target.closest("[data-k], [data-pick], [data-clear], [data-hist]");
       if (!t) return;
       if (t.dataset.pick) return pickPicture(t.dataset.pick, chat);
-      if (t.dataset.clear) {
+      if (t.hasAttribute("data-hist")) {
+        const on = !g()?.history;
+        if (on && !await confirmBox("Odsłonić historię?", "Wszyscy obecni i przyszli członkowie dostaną klucze do wcześniejszych wiadomości. Tego nie da się cofnąć dla osób, które już je dostaną.", false)) return;
+        try { await api("SetHistory", chat, on); await refresh(); } catch (err) { fail(err); }
+        return serverLook(chat); // the confirm replaced this sheet
+      } else if (t.dataset.clear) {
         try { await api("SetServerImage", chat, t.dataset.clear, "", {}); await refresh(); } catch (err) { fail(err); }
       } else st[t.dataset.k] = +t.dataset.v;
       $(".body", box).innerHTML = body();

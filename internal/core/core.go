@@ -494,6 +494,7 @@ type ChatInfo struct {
 	// group look (event.KindServer)
 	Icon, Banner []byte
 	Style        string
+	NoHistory    bool // members added now do not see earlier messages
 }
 
 // directPeer: the other person of a 1:1 chat (unnamed, two members), else nil.
@@ -564,7 +565,7 @@ func (c *Core) Chats() []ChatInfo {
 			continue // a duplicate DM: its messages show in the first one
 		}
 		ci := ChatInfo{ID: id, Name: c.displayName(st), Owner: st.Owner, Epoch: st.Epoch, Channels: st.Channels,
-			Icon: st.Icon, Banner: st.Banner, Style: st.Style}
+			Icon: st.Icon, Banner: st.Banner, Style: st.Style, NoHistory: st.NoHistory}
 		for _, m := range st.Members {
 			if m.Removed {
 				continue
@@ -795,6 +796,11 @@ func (c *Core) messages(chat []byte) []Msg {
 			m.Kind, m.Info, m.Text = "info", e.Kind, name+" left"
 		case event.KindRekey:
 			m.Kind, m.Info, m.Text = "info", e.Kind, "key rotation (new epoch)"
+		case event.KindHistory:
+			m.Kind, m.Info, m.Text = "info", e.Kind, name+" made earlier messages visible to new members"
+			if b.NoHist {
+				m.Text = name + " hid earlier messages from new members"
+			}
 		default:
 			continue // avatar, nick, rename, react, delete — not separate message items
 		}
@@ -1359,6 +1365,29 @@ func keysFor(chat []byte, st *event.State, m *event.Member, keys, mkeys map[uint
 func keySums(key []byte) (sum, msum []byte) {
 	a, b := sha256.Sum256(key), sha256.Sum256(event.MemberKey(key))
 	return a[:], b[:]
+}
+
+// SetHistory: owner only. on = members added from now on see earlier
+// messages. Turning it on also hands the older keys to members already in,
+// who joined while history was hidden; turning it off takes nothing back.
+func (c *Core) SetHistory(chat []byte, on bool) error {
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(st.Owner, c.ID.Pub) {
+		return errors.New("tylko właściciel może zmienić to ustawienie")
+	}
+	if st.NoHistory == !on {
+		return nil
+	}
+	if _, err := c.appendEvent(chat, event.KindHistory, event.Body{NoHist: !on, TS: time.Now().Unix()}); err != nil {
+		return err
+	}
+	if on {
+		c.pushKeys(chat, nil)
+	}
+	return nil
 }
 
 // autoRekey: in a chat without history the owner opens a new epoch after

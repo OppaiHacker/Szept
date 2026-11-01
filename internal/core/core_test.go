@@ -792,6 +792,25 @@ func TestNoHistoryForNewMembers(t *testing.T) {
 		return err == nil && len(st.Icon) == 32 && len(st.Banner) == 32 &&
 			b.St.HasBlob(st.Icon) && b.St.HasBlob(st.Banner)
 	})
+	// the owner opens the history: b, already in, gets the older keys too
+	if err := b.SetHistory(chat, true); err == nil {
+		t.Fatal("a member changed the history setting")
+	}
+	if err := a.SetHistory(chat, true); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "b reads history once it is opened", 20*time.Second, func() bool {
+		st, err := b.ChatState(chat)
+		if err != nil || st.NoHistory {
+			return false
+		}
+		for _, m := range b.Messages(chat) {
+			if m.Text == "stare" {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func TestChannels(t *testing.T) {
