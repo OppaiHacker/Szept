@@ -891,6 +891,8 @@ button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg)
 .msg:not(.grouped) { margin-top: 16px; padding-top: 2px; }
 .day + .msg, .sys + .msg, .new-line + .msg { margin-top: 4px; }
 /* a mention gets a tinted row; no side stripe */
+.ping { color: var(--accent-ink); background: var(--accent-soft); border-radius: 4px; padding: 0 3px; font-weight: 600; }
+.msg.mention .ping { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
 .msg.mention { background: color-mix(in srgb, var(--amber) 8%, transparent); }
 .msg.mention:hover { background: color-mix(in srgb, var(--amber) 12%, transparent); }
 /* sent but nobody has it yet */

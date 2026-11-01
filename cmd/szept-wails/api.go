@@ -1117,6 +1117,15 @@ func (a *App) SetServerImage(chat, which, dataURL string, crop Crop) error {
 	return c.SetServerImage(unhex(chat), raw, crop.rect(), which == "banner")
 }
 
+// Notify shows a system notification unless they are turned off. One ID per
+// chat, so a burst of pings replaces itself instead of piling up.
+func (a *App) Notify(chat, title, body string) error {
+	if a.notify == nil || a.cfg.NoNotify {
+		return nil
+	}
+	return a.notify.SendNotification(notifications.NotificationOptions{ID: "szept-" + chat, Title: title, Body: body})
+}
+
 // SetHistory: owner only; on = people added from now on see earlier messages.
 func (a *App) SetHistory(chat string, on bool) error {
 	c, err := a.live()

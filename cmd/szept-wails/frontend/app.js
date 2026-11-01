@@ -45,8 +45,29 @@ function esc(s) {
 
 // linkify: URLs stay clickable but never navigate the webview away from the app.
 function body(text) {
-  return esc(text).replace(/\bhttps?:\/\/[^\s<]+/g, (u) =>
-    `<a href="${u}" data-act="ext" data-url="${u}">${u}</a>`);
+  return mentions(esc(text).replace(/\bhttps?:\/\/[^\s<]+/g, (u) =>
+    `<a href="${u}" data-act="ext" data-url="${u}">${u}</a>`));
+}
+
+// @everyone and @here ping the whole chat; @name pings one member. Names may
+// hold spaces, so mentions are matched against the open chat's members,
+// longest first, and only where an @ starts a word.
+const PING_ALL = ["everyone", "here"];
+function mentionRe() {
+  const names = (S.conv?.members || []).map((m) => esc(m.name)).filter(Boolean);
+  const alts = [...new Set([...PING_ALL, ...names])].sort((a, b) => b.length - a.length)
+    .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`(^|[\\s(])@(${alts.join("|")})(?=$|[\\s.,!?;:)])`, "gi");
+}
+function mentions(html) {
+  return html.includes("@") ? html.replace(mentionRe(), (_, pre, n) => `${pre}<span class="ping">@${n}</span>`) : html;
+}
+// pings me: my name or the whole chat, from someone else
+function pingsMe(m, me) {
+  if (m.mine || !m.text?.includes("@")) return false;
+  const t = m.text.toLowerCase();
+  return [...PING_ALL, (me.name || "").toLowerCase()].some((n) => n &&
+    new RegExp(`(^|[\\s(])@${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[\\s.,!?;:)])`).test(t));
 }
 
 // Avatar grounds: eight inks at one lightness and chroma, so no face shouts
@@ -938,7 +959,7 @@ function msgHTML(m, prev, me, fresh) {
     return `<div class="sys">${body(m.text)}</div>`;
   }
   const grouped = prev && prev.kind !== "info" && prev.author === m.author && m.ts - prev.ts < 300;
-  const mention = !m.mine && me.name && m.text?.toLowerCase().includes("@" + me.name.toLowerCase());
+  const mention = pingsMe(m, me);
   const cls = ["msg", m.mine ? "mine" : "", grouped ? "grouped" : "", mention ? "mention" : "",
     m.mine && !m.ack && !m.deleted ? "pending" : "", m.deleted ? "deleted" : "", fresh ? "fresh" : ""].join(" ");
   // one header per block: name and clock; follow-ups show their clock in the
@@ -1713,6 +1734,29 @@ async function cmdLang(arg) {
   try { await api("SaveSettings", s); toast("Język: " + lang, "ok"); } catch (e) { fail(e); }
 }
 
+// matchMentions: "@par" right before the caret -> members (not me) and
+// @everyone/@here whose name starts that way; each carries the span to replace
+function matchMentions(input) {
+  const before = input.value.slice(0, input.selectionStart);
+  const tok = before.match(/(^|\s)@([^\s@]*)$/);
+  if (!tok || !S.conv) return [];
+  const q = tok[2].toLowerCase(), from = before.length - tok[2].length - 1;
+  const people = (S.conv.members || []).filter((m) => !m.me).map((m) => ({ n: "@" + m.name, d: m.online ? "online" : "" }));
+  const all = S.conv.direct ? [] : [{ n: "@everyone", d: "wszyscy na serwerze" }, { n: "@here", d: "wszyscy, którzy są online" }];
+  return [...people, ...all].filter((h) => h.n.slice(1).toLowerCase().startsWith(q))
+    .slice(0, 7).map((h) => ({ ...h, at: [from, input.selectionStart] }));
+}
+
+// applyHint: a command replaces the whole line, a mention only its "@…" token
+function applyHint(input, c) {
+  if (c.at) {
+    const [a, b] = c.at;
+    input.value = input.value.slice(0, a) + c.n + " " + input.value.slice(b);
+    input.selectionStart = input.selectionEnd = a + c.n.length + 1;
+  } else input.value = c.n + (c.a ? " " : "");
+  S.hints = []; paintHints(); autoGrow(input); input.focus();
+}
+
 function matchCommands(text) {
   if (!text.startsWith("/") || text.includes(" ")) return [];
   const q = text.toLowerCase();
@@ -1748,6 +1792,7 @@ function wireComposer() {
     autoGrow(input);
     send.disabled = input.value.trim() === "";
     S.hints = matchCommands(input.value.trim());
+    if (!S.hints.length) S.hints = matchMentions(input);
     S.hintIdx = Math.min(S.hintIdx, Math.max(0, S.hints.length - 1));
     paintHints();
   };
@@ -1769,11 +1814,10 @@ function wireComposer() {
       // Tab always completes; Enter only completes when there is something
       // left to complete, otherwise it runs what you already typed.
       const pick = S.hints[S.hintIdx];
-      const done = input.value.trim().toLowerCase() === pick.n;
+      const done = !pick.at && input.value.trim().toLowerCase() === pick.n;
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !done)) {
         e.preventDefault();
-        input.value = pick.n + (pick.a ? " " : "");
-        S.hints = []; paintHints(); sync();
+        applyHint(input, pick); sync();
         return;
       }
       if (e.key === "Escape") { S.hints = []; return paintHints(); }
@@ -2445,7 +2489,7 @@ function settingsBody() {
         <div class="btn-row"><button class="btn primary" data-act="save-settings">Zapisz</button></div>
       </div>
       <div class="block">
-        <div class="toggle"><div class="tx"><b>Powiadomienia systemowe</b><span>gdy przychodzi wiadomość w innym czacie</span></div>
+        <div class="toggle"><div class="tx"><b>Powiadomienia systemowe</b><span>wiadomości prywatne i wzmianki (@ty, @everyone, @here), gdy nie patrzysz na ten czat</span></div>
           <button class="switch ${s.noNotify ? "" : "on"}" data-act="toggle-notify"></button></div>
       </div>`;
     }
@@ -2834,6 +2878,21 @@ function callSounds(snap) {
   if (now.peers !== was.peers) sfx(now.peers > was.peers ? "peerJoin" : "peerLeave");
 }
 
+// pings: a chat's unread count went up and its newest message is a DM or
+// mentions me -> system notification, unless I am looking at that chat.
+// ponytail: checks only the newest message; a ping followed by a plain message
+// in the same refresh slips by. Count mentions in Go if that matters.
+let lastUnreadBy = null;
+function notifyPings(snap) {
+  const was = lastUnreadBy;
+  lastUnreadBy = Object.fromEntries(snap.chats.map((c) => [c.id, c.unread]));
+  if (!was || S.settings?.noNotify) return;
+  for (const c of snap.chats) {
+    if (!(c.unread > (was[c.id] ?? 0)) || (c.id === S.chat && document.hasFocus())) continue;
+    if (c.direct || pingsMe({ text: c.preview }, snap.me)) api("Notify", c.id, c.name, c.preview).catch(() => {});
+  }
+}
+
 let refreshing = false, again = false;
 
 async function refresh() {
@@ -2842,6 +2901,7 @@ async function refresh() {
   try {
     S.snap = await api("Snapshot");
     callSounds(S.snap);
+    notifyPings(S.snap);
     warnRelayed(S.snap.friends);
     await refreshConv();
     paint();
@@ -3058,11 +3118,7 @@ const HANDLERS = {
     closeModal(a.value);
   },
   hint: (el) => {
-    const c = S.hints[+el.dataset.i];
-    const input = $("#input");
-    input.value = c.n + (c.a ? " " : "");
-    autoGrow(input);
-    S.hints = []; paintHints(); input.focus();
+    applyHint($("#input"), S.hints[+el.dataset.i]);
   },
 
   /* chat actions */
