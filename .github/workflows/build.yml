@@ -1,5 +1,6 @@
-# Desktop client (wails) for Linux and Windows. Every push to main leaves the
-# binaries as workflow artifacts; a v* tag also publishes them as a release.
+# Desktop client (wails) for Linux and Windows plus the connector for every
+# platform in `make release`. Every push to main leaves the binaries as
+# workflow artifacts; a v* tag also publishes them as a release.
 name: build
 
 on:
@@ -46,15 +47,31 @@ jobs:
           name: szept-wails-windows-amd64
           path: szept-wails-windows-amd64.exe
 
+  connector:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # reproducible build, see the release target in the Makefile
+      - run: make release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: szept-connector
+          path: |
+            bin/release/szept-connector-*
+            bin/release/GOVERSION
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    needs: [linux, windows, connector]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - run: sha256sum szept-wails-* > SHA256SUMS
+      - run: sha256sum GOVERSION szept-* > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" szept-wails-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" szept-* GOVERSION SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
