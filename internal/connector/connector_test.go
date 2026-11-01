@@ -642,7 +642,7 @@ func TestGossipBlockCap(t *testing.T) {
 	}
 }
 
-// --private-gossip: The node shares no neighbours outside a
+// --private-gossip: the node shares no neighbours outside a
 // secret mesh, and a neighbour that asked to stay hidden is never passed on.
 func TestPrivateGossip(t *testing.T) {
 	s := NewServer()

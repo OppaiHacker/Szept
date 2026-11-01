@@ -82,7 +82,7 @@ var (
 	// Video is container-only: we don't have a decoder, so we don't pretend
 	// to validate contents. Security relies on file never being executed, with name
 	// and extension enforced by us.
-	// Mkv shares EBML structure with webm and detects as video/webm — which is fine.
+	// MKV shares EBML structure with webm and detects as video/webm — which is fine.
 	videoMimes = map[string]string{
 		"video/mp4":  ".mp4",
 		"video/webm": ".webm",
