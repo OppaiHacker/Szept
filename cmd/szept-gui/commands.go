@@ -266,7 +266,7 @@ func (u *ui) cmdCam(ch *core.ChatInfo, arg string) {
 }
 
 func (u *ui) cmdScreen(ch *core.ChatInfo, _ string) {
-	if err := u.c.ToggleScreen(ch.ID); err != nil {
+	if err := u.c.ToggleScreen(ch.ID, 0); err != nil {
 		u.sysErr(err.Error())
 	}
 }

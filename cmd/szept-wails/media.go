@@ -150,6 +150,13 @@ type frame struct {
 // the webview pulls it over HTTP, so a backlog would just be latency.
 func (a *App) onFrame(chat, from []byte, kind string, jpg []byte) {
 	key := hexs(chat) + "." + hexs(from) + "." + kind
+	if jpg == nil { // the stream ended: drop the tile now
+		a.mu.Lock()
+		delete(a.frames, key)
+		a.mu.Unlock()
+		a.app.Event.Emit("frame-end", key)
+		return
+	}
 	a.mu.Lock()
 	f := a.frames[key]
 	if f == nil {

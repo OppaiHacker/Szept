@@ -15,13 +15,13 @@ const (
 )
 
 // StartCamera: native V4L2 first (pure Go), ffmpeg as fallback.
-func StartCamera(device string, fps int, cb func(jpegFrame []byte)) (func(), error) {
+func StartCamera(device string, o VideoOpts, cb func(jpegFrame []byte)) (func(), error) {
 	if device == "" {
 		device = "/dev/video0"
 	}
 	cam, err := webcam.Open(device)
 	if err != nil {
-		return startFFmpegCamera(device, cb)
+		return startFFmpegCamera(device, o, cb)
 	}
 	formats := cam.GetSupportedFormats()
 	var pick webcam.PixelFormat
@@ -33,21 +33,26 @@ func StartCamera(device string, fps int, cb func(jpegFrame []byte)) (func(), err
 	}
 	if pick == 0 {
 		cam.Close()
-		return startFFmpegCamera(device, cb)
+		return startFFmpegCamera(device, o, cb)
 	}
-	pf, w, h, err := cam.SetImageFormat(pick, 640, 480)
+	bw, bh := o.box()
+	if o.Height <= 480 {
+		bw = o.Height * 4 / 3 // small webcam modes are 4:3
+	}
+	pf, w, h, err := cam.SetImageFormat(pick, uint32(bw), uint32(bh))
 	if err != nil {
 		cam.Close()
-		return startFFmpegCamera(device, cb)
+		return startFFmpegCamera(device, o, cb)
 	}
+	cam.SetFramerate(float32(o.FPS)) // best effort: the driver picks the nearest mode
 	if err := cam.StartStreaming(); err != nil {
 		cam.Close()
-		return startFFmpegCamera(device, cb)
+		return startFFmpegCamera(device, o, cb)
 	}
 	done := make(chan struct{})
 	go func() {
 		defer cam.Close()
-		interval := time.Second / time.Duration(fps)
+		interval := time.Second / time.Duration(o.FPS)
 		last := time.Time{}
 		for {
 			select {
@@ -75,7 +80,7 @@ func StartCamera(device string, fps int, cb func(jpegFrame []byte)) (func(), err
 				copy(cp, frame)
 				cb(cp)
 			case fmtYUYV:
-				cb(encodeJPEG(yuyvToImage(frame, int(w), int(h)), 640, 60))
+				cb(encodeJPEG(yuyvToImage(frame, int(w), int(h)), bw, bh, o.Quality))
 			}
 		}
 	}()

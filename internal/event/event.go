@@ -47,13 +47,16 @@ const (
 	// the group's look. Owner only; the whole look travels in one event, an
 	// empty field clears that part.
 	KindServer = "server"
+	// KindLeave: {} the author leaves the chat. Anyone but the owner; unlike a
+	// remove it takes no one else along (the people they added stay).
+	KindLeave = "leave"
 )
 
 // MembershipKind: events that decide who belongs to the chat. The fold can only
 // judge authorization once these are readable, so a caller holding no key for
 // one of them should wait for the key rather than store it.
 func MembershipKind(kind string) bool {
-	return kind == KindCreate || kind == KindAdd || kind == KindRemove || kind == KindRekey
+	return kind == KindCreate || kind == KindAdd || kind == KindRemove || kind == KindRekey || kind == KindLeave
 }
 
 // MetaKind: events sealed with the epoch's member key (MemberKey) instead of
@@ -62,7 +65,7 @@ func MembershipKind(kind string) bool {
 // can fold membership from genesis, and content keys only from their join on.
 func MetaKind(kind string) bool {
 	switch kind {
-	case KindCreate, KindAdd, KindRemove, KindRekey, KindRename, KindNick, KindAvatar, KindProfile, KindChannel, KindServer:
+	case KindCreate, KindAdd, KindRemove, KindRekey, KindRename, KindNick, KindAvatar, KindProfile, KindChannel, KindServer, KindLeave:
 		return true
 	}
 	return false
@@ -626,6 +629,13 @@ func (f *Folder) apply(e *Event) error {
 			m.addID = e.ID()
 		}
 		st.Members[string(body.Pub)] = m
+	case KindLeave:
+		if bytes.Equal(e.Author, st.Owner) {
+			return errors.New("owner cannot leave")
+		}
+		if m := st.Members[string(e.Author)]; m != nil {
+			m.Removed = true
+		}
 	case KindRemove:
 		if !bytes.Equal(e.Author, st.Owner) {
 			return errors.New("remove by non-owner")

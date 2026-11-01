@@ -20,13 +20,56 @@ import (
 // every other announced participant over unreliable data channels.
 // Mesh is fine to ~8 people; an SFU is the upgrade path.
 type Call struct {
-	Chat    []byte
-	Joined  bool
-	Mic     bool
-	Deaf    bool // wyciszone całe wyjście rozmowy
-	Cam     bool
-	Screen  bool
-	Members map[string]bool // remote pubs who announced "join"
+	Chat   []byte
+	Joined bool
+	Mic    bool
+	Deaf   bool // wyciszone całe wyjście rozmowy
+	// micBeforeDeaf: Mic when deafening began; undeafening gives it back
+	micBeforeDeaf bool
+	Cam           bool
+	Screen        bool
+	Members       map[string]bool   // remote pubs who announced "join"
+	Flags         map[string]string // remote pub -> State letters from their last "join"/"state"
+}
+
+// State: our state in a call as letters peers show next to our name:
+// m = mic off, d = deafened, c = camera on, s = sharing the screen.
+func (call *Call) State() string {
+	f := ""
+	if !call.Mic {
+		f += "m"
+	}
+	if call.Deaf {
+		f += "d"
+	}
+	if call.Cam {
+		f += "c"
+	}
+	if call.Screen {
+		f += "s"
+	}
+	return f
+}
+
+// ownFlags: call.State() for the call key, "" when not in it.
+func (c *Core) ownFlags(chat []byte) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if call := c.calls[string(chat)]; call != nil && call.Joined {
+		return call.State()
+	}
+	return ""
+}
+
+// PeerFlags: what a call member last said about their mic, sound, camera and
+// screen (see State); "" for a client too old to say.
+func (c *Core) PeerFlags(chat, pub []byte) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if call := c.calls[string(chat)]; call != nil {
+		return call.Flags[string(pub)]
+	}
+	return ""
 }
 
 // CallKey: a call in an added voice channel is keyed by chat ID + channel ID;
@@ -90,10 +133,15 @@ func (c *Core) handleCallCtrl(p *p2p.Peer, m Ctrl) {
 		c.calls[string(m.Chat)] = call
 	}
 	switch m.Action {
-	case "join":
+	case "join", "state": // "state": mic/sound/camera/screen changed
 		call.Members[string(p.Pub)] = true
+		if call.Flags == nil {
+			call.Flags = map[string]string{}
+		}
+		call.Flags[string(p.Pub)] = m.Status[:min(len(m.Status), 8)] // peer text: keep it small
 	case "leave":
 		delete(call.Members, string(p.Pub))
+		delete(call.Flags, string(p.Pub))
 		if !call.Joined && len(call.Members) == 0 {
 			delete(c.calls, string(m.Chat))
 		}
@@ -126,12 +174,13 @@ func (c *Core) callBroadcast(chat []byte, action string) {
 	if err != nil {
 		return
 	}
+	status := c.ownFlags(chat)
 	for _, m := range st.Members {
 		if m.Removed || bytes.Equal(m.Pub, c.ID.Pub) {
 			continue
 		}
 		if p := c.P2P.Peer(m.Pub); p != nil {
-			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: action})
+			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: action, Status: status})
 		}
 	}
 }
@@ -310,23 +359,40 @@ func (c *Core) LeaveAllCalls() {
 	}
 }
 
+// ToggleMic. Turning the mic on while deafened undeafens too: speaking
+// without hearing the answer is never what was meant.
 func (c *Core) ToggleMic(chat []byte) {
 	c.mu.Lock()
+	var p *media.Player
 	if call := c.calls[string(chat)]; call != nil {
 		call.Mic = !call.Mic
+		if call.Mic && call.Deaf {
+			call.Deaf = false
+			p = c.player
+		}
 	}
 	c.mu.Unlock()
+	if p != nil {
+		p.SetDeafen(false)
+	}
+	c.callBroadcast(chat, "state")
 	c.Notify()
 }
 
 // ToggleDeafen wycisza/przywraca całe wyjście rozmowy. Ustawienie głośności
-// zostaje nietknięte.
+// zostaje nietknięte. Deafening mutes the mic as well; undeafening restores
+// the mic as it was before (on, unless it had been muted by hand).
 func (c *Core) ToggleDeafen(chat []byte) {
 	c.mu.Lock()
 	call := c.calls[string(chat)]
 	var p *media.Player
 	if call != nil {
 		call.Deaf = !call.Deaf
+		if call.Deaf {
+			call.micBeforeDeaf, call.Mic = call.Mic, false
+		} else {
+			call.Mic = call.micBeforeDeaf
+		}
 		p = c.player
 	}
 	deaf := call != nil && call.Deaf
@@ -334,6 +400,7 @@ func (c *Core) ToggleDeafen(chat []byte) {
 	if p != nil {
 		p.SetDeafen(deaf)
 	}
+	c.callBroadcast(chat, "state")
 	c.Notify()
 }
 
@@ -472,7 +539,14 @@ func (c *Core) startVideoSource(chat []byte, kind string, start func(onJPEG func
 			}
 		}
 	}()
-	stop := func() { close(done); stopSrc() }
+	stop := func() {
+		close(done)
+		stopSrc()
+		c.sendVideoEnd(chat, kind)
+		if cb := c.OnVideoFrame; cb != nil {
+			cb(chat, c.ID.Pub, kind, nil)
+		}
+	}
 	c.mu.Lock()
 	if kind == "c" {
 		c.stopCam = stop
@@ -498,6 +572,7 @@ func (c *Core) ToggleCam(chat []byte, device string) error {
 	}
 	c.mu.Unlock()
 	defer c.Notify()
+	defer c.callBroadcast(chat, "state") // after a failed start reset the flag
 	if turnOff {
 		if stop != nil {
 			stop()
@@ -505,11 +580,13 @@ func (c *Core) ToggleCam(chat []byte, device string) error {
 		return nil
 	}
 	return c.startVideoSource(chat, "c", func(cb func([]byte)) (func(), error) {
-		return media.StartCamera(device, 24, cb)
+		return media.StartCamera(device, c.Cfg.CamVideo.Or(DefCam), cb)
 	})
 }
 
-func (c *Core) ToggleScreen(chat []byte) error {
+// ToggleScreen starts or stops sharing; display picks the monitor (see
+// media.Displays), 0 is the primary.
+func (c *Core) ToggleScreen(chat []byte, display int) error {
 	c.mu.Lock()
 	call := c.calls[string(chat)]
 	if call == nil || !call.Joined {
@@ -524,6 +601,7 @@ func (c *Core) ToggleScreen(chat []byte) error {
 	}
 	c.mu.Unlock()
 	defer c.Notify()
+	defer c.callBroadcast(chat, "state") // after a failed start reset the flag
 	if turnOff {
 		if stop != nil {
 			stop()
@@ -531,9 +609,15 @@ func (c *Core) ToggleScreen(chat []byte) error {
 		return nil
 	}
 	return c.startVideoSource(chat, "s", func(cb func([]byte)) (func(), error) {
-		return media.StartScreen(15, cb)
+		return media.StartScreen(display, c.Cfg.ScreenVideo.Or(DefScreen), cb)
 	})
 }
+
+// Video defaults when nothing was picked yet.
+var (
+	DefCam    = media.VideoOpts{FPS: 30, Height: 480, Quality: 60}
+	DefScreen = media.VideoOpts{FPS: 15, Height: 720, Quality: 60}
+)
 
 // ---- media frame transport ----
 
@@ -566,6 +650,19 @@ func (c *Core) sendVideoFrame(chat []byte, kind string, frameID uint32, jpeg []b
 		buf[5] = byte(total)
 		copy(buf[6:], part)
 		for _, p := range targets {
+			p.SendMedia(lbl, buf)
+		}
+	}
+}
+
+// sendVideoEnd tells viewers a camera or screen stopped, so the tile goes at
+// once instead of after the 4 s silence timeout: a bare header, total 0. Media
+// packets may drop, so it goes out a few times; repeats are harmless.
+func (c *Core) sendVideoEnd(chat []byte, kind string) {
+	lbl := chatLabel(kind, chat)
+	buf := make([]byte, 6)
+	for range 3 {
+		for _, p := range c.mediaTargets(chat) {
 			p.SendMedia(lbl, buf)
 		}
 	}
@@ -610,6 +707,15 @@ func (c *Core) onMedia(p *p2p.Peer, label string, data []byte) {
 			out(string(p.Pub), data[4:])
 		}
 	case "c", "s":
+		if len(data) == 6 && data[5] == 0 { // end of stream, see sendVideoEnd
+			c.mu.Lock()
+			delete(c.assemblers, string(p.Pub)+label)
+			c.mu.Unlock()
+			if cb := c.OnVideoFrame; cb != nil {
+				cb(chat, p.Pub, kind, nil)
+			}
+			return
+		}
 		if len(data) <= 6 {
 			return
 		}

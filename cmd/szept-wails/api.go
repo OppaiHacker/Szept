@@ -291,6 +291,7 @@ type Chat struct {
 	CallKey    string              `json:"callKey"` // the call above: chat ID + voice channel ID
 	Channels   []ChanInfo          `json:"channels"`
 	Voice      map[string][]string `json:"voice"`      // voice channel ID ("" = default) -> names in its call
+	VFlags     map[string][]string `json:"vflags"`     // same keys and order: m mic off, d deafened, c camera, s screen
 	ChanUnread map[string]int      `json:"chanUnread"` // text channel ID -> new messages
 	Unread     int                 `json:"unread"`
 	Preview    string              `json:"preview"`
@@ -366,12 +367,13 @@ func (a *App) Snapshot() (Snapshot, error) {
 		}
 		ch.IsOwner = equalBytes(ci.Owner, c.ID.Pub)
 		ch.Avatar, ch.Banner, ch.Style = blobURL(c, ci.Icon), blobURL(c, ci.Banner), ci.Style
-		ch.Channels, ch.Voice = []ChanInfo{}, map[string][]string{}
+		ch.Channels, ch.Voice, ch.VFlags = []ChanInfo{}, map[string][]string{}, map[string][]string{}
 		for _, x := range ci.Channels {
 			ch.Channels = append(ch.Channels, ChanInfo{ID: hexs(x.ID), Name: x.Name, Kind: x.Kind, Cat: hexs(x.Cat), Arch: x.Arch})
 		}
 		for k, names := range ci.Voice {
 			ch.Voice[hexs([]byte(k))] = names
+			ch.VFlags[hexs([]byte(k))] = ci.VFlags[k]
 		}
 		if ci.Direct { // a named group of two is still a group
 			for _, m := range ci.Members {
@@ -524,6 +526,7 @@ type Member struct {
 	Owner  bool   `json:"owner"`
 	Me     bool   `json:"me"`
 	InCall bool   `json:"inCall"`
+	Flags  string `json:"flags"` // in the call: m mic off, d deafened, c camera, s screen
 	Relay  string `json:"relay"` // TURN relay the link goes through, "" = direct
 }
 
@@ -641,6 +644,7 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 	}
 	conv.CallKey = hexs(key)
 	inCall := map[string]bool{}
+	flags := map[string]string{}
 	if call := c.CallState(key); call != nil {
 		conv.Call = CallInfo{
 			Joined: call.Joined, Mic: call.Mic, Deaf: call.Deaf,
@@ -648,10 +652,12 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 		}
 		for pub := range call.Members {
 			inCall[hexs([]byte(pub))] = true
+			flags[hexs([]byte(pub))] = c.PeerFlags(key, []byte(pub))
 			conv.Call.Members = append(conv.Call.Members, hexs([]byte(pub)))
 		}
 		if call.Joined {
 			inCall[hexs(c.ID.Pub)] = true
+			flags[hexs(c.ID.Pub)] = call.State()
 		}
 	}
 	for _, m := range ci.Members {
@@ -661,7 +667,7 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 			Pub: hexs(m.Pub), Name: m.Name, Avatar: avatarURL(c, m.Pub),
 			Status: status, Style: c.StyleOf(m.Pub), Online: mine || c.Online(m.Pub),
 			Owner: equalBytes(m.Pub, ci.Owner), Me: mine,
-			InCall: inCall[hexs(m.Pub)], Relay: c.Relay(m.Pub),
+			InCall: inCall[hexs(m.Pub)], Flags: flags[hexs(m.Pub)], Relay: c.Relay(m.Pub),
 		})
 		if ci.Direct && !mine {
 			conv.Direct, conv.Peer, conv.Avatar = true, hexs(m.Pub), avatarURL(c, m.Pub)
@@ -850,6 +856,14 @@ func (a *App) Kick(chat, pub string) error {
 		return err
 	}
 	return c.Kick(unhex(chat), unhex(pub))
+}
+
+func (a *App) Leave(chat string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.Leave(unhex(chat))
 }
 
 func (a *App) Rekey(chat string) error {
@@ -1202,20 +1216,50 @@ func (a *App) ToggleDeafen(chat string) {
 	}
 }
 
-func (a *App) ToggleCam(chat string) error {
+// ToggleCam / ToggleScreen: o is what was picked when starting (zero when
+// stopping); it is remembered as the next start's preselection.
+func (a *App) ToggleCam(chat string, o media.VideoOpts) error {
 	c, err := a.live()
 	if err != nil {
 		return err
+	}
+	if o.FPS > 0 {
+		a.cfg.CamVideo, c.Cfg.CamVideo = o, o
+		a.saveCfg()
 	}
 	return c.ToggleCam(unhex(chat), a.cfg.CamDevice)
 }
 
-func (a *App) ToggleScreen(chat string) error {
+func (a *App) ToggleScreen(chat string, display int, o media.VideoOpts) error {
 	c, err := a.live()
 	if err != nil {
 		return err
 	}
-	return c.ToggleScreen(unhex(chat))
+	if o.FPS > 0 {
+		a.cfg.ScreenVideo, c.Cfg.ScreenVideo = o, o
+		a.saveCfg()
+	}
+	return c.ToggleScreen(unhex(chat), display)
+}
+
+// VideoPicks: the start dialog's preselection for camera and screen.
+func (a *App) VideoPicks() map[string]media.VideoOpts {
+	return map[string]media.VideoOpts{
+		"cam": a.cfg.CamVideo.Or(core.DefCam), "screen": a.cfg.ScreenVideo.Or(core.DefScreen),
+	}
+}
+
+// Displays: the monitors screen sharing can pick ("W×H"); empty when the
+// system dialog picks instead (Wayland portal).
+func (a *App) Displays() []string { return media.Displays() }
+
+// SetFullscreen: a call tile shown over the whole screen.
+func (a *App) SetFullscreen(on bool) {
+	if on {
+		a.win.Fullscreen()
+	} else {
+		a.win.UnFullscreen()
+	}
 }
 
 func (a *App) SetOutputVolume(v float64) {

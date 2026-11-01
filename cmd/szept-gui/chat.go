@@ -409,7 +409,7 @@ func (u *ui) buildCallControls() {
 	})
 	u.scrBtn = widget.NewButtonWithIcon("", theme.ComputerIcon(), func() {
 		if ch := u.cur(); ch != nil {
-			u.fail(u.c.ToggleScreen(ch.ID))
+			u.fail(u.c.ToggleScreen(ch.ID, 0))
 		}
 	})
 	u.spatialBtn = widget.NewButtonWithIcon("", theme.ViewFullScreenIcon(), u.spatialPage)

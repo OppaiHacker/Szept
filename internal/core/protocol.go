@@ -49,7 +49,7 @@ func (c *Core) onPeerUp(p *p2p.Peer) {
 	// announce active calls to the newcomer
 	for _, chat := range inCall {
 		if st, err := c.ChatState(chatOf(chat)); err == nil && st.IsMember(p.Pub) {
-			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "join"})
+			p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "join", Status: c.ownFlags(chat)})
 		}
 	}
 	go c.retryWants(true) // peer connected: may hold missing attachments
@@ -162,7 +162,8 @@ func (c *Core) handleSync(p *p2p.Peer, m Ctrl) {
 		r := c.redeem
 		c.mu.Unlock()
 		fromInviter := r != nil && bytes.Equal(r.Inviter, p.Pub) && bytes.Equal(r.Chat, m.Chat)
-		if !c.St.IsFriend(p.Pub) && !fromInviter {
+		// a chat we left comes back only through a new invite
+		if (!c.St.IsFriend(p.Pub) || c.left(m.Chat)) && !fromInviter {
 			return
 		}
 		if len(m.Chat) != sha256.Size || c.pendingChats() >= maxPendingChats {
@@ -360,6 +361,9 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	c.publish(chat, gen, f, nil)
 	if e.Kind == event.KindAdd {
 		go c.autoRekey(chat)
+	}
+	if e.Kind == event.KindLeave {
+		go c.rekeyAfterLeave(chat)
 	}
 	if bytes.Equal(e.ID(), chat) {
 		c.mu.Lock()

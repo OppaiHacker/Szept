@@ -20,7 +20,8 @@ var errCancelled = errors.New("udostępnianie ekranu anulowane")
 // portal asks the user what to share and hands over a PipeWire stream, which
 // gstreamer turns into a continuous MJPEG stream. The screenshot fallback
 // writes a PNG per frame through the same portal, which crawls at ~2 fps.
-func startScreenCast(fps int, cb func([]byte)) (func(), error) {
+func startScreenCast(o VideoOpts, cb func([]byte)) (func(), error) {
+	fps := o.FPS
 	if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
 		return nil, errors.New("gst-launch-1.0 not found")
 	}
@@ -88,6 +89,15 @@ func startScreenCast(fps int, cb func([]byte)) (func(), error) {
 		return fail(errors.New("portal nie dał strumienia ekranu"))
 	}
 	node, _ := streams[0][0].(uint32)
+	ow, oh := o.box()
+	if len(streams[0]) > 1 {
+		props, _ := streams[0][1].(map[string]dbus.Variant)
+		if sz, ok := props["size"].Value().([]any); ok && len(sz) == 2 {
+			sw, _ := sz[0].(int32)
+			sh, _ := sz[1].(int32)
+			ow, oh = fitSize(int(sw), int(sh), ow, oh)
+		}
+	}
 	var fd dbus.UnixFD
 	if err := portal.Call("org.freedesktop.portal.ScreenCast.OpenPipeWireRemote", 0, session,
 		map[string]dbus.Variant{}).Store(&fd); err != nil {
@@ -100,8 +110,10 @@ func startScreenCast(fps int, cb func([]byte)) (func(), error) {
 		"pipewiresrc", "fd=3", fmt.Sprintf("path=%d", node), "do-timestamp=true", "!",
 		"videorate", "drop-only=true", fmt.Sprintf("max-rate=%d", fps), "!",
 		"videoconvert", "!", "videoscale", "!",
-		"video/x-raw,width=[1,1280],height=[1,720],pixel-aspect-ratio=1/1", "!",
-		"jpegenc", "quality=60", "!", "fdsink", "fd=1")
+		// fixed caps: Hyprland's portal offers open size ranges, and videoscale
+		// then fixates to 1x1 (a black tile) or fails with an overflow
+		fmt.Sprintf("video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1", ow, oh), "!",
+		"jpegenc", fmt.Sprintf("quality=%d", o.Quality), "!", "fdsink", "fd=1")
 	cmd.ExtraFiles = []*os.File{pw}
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -113,7 +125,15 @@ func startScreenCast(fps int, cb func([]byte)) (func(), error) {
 		return fail(err)
 	}
 	pw.Close() // the child holds its own copy
-	go splitJPEG(bufio.NewReaderSize(out, 1<<20), cb)
+	// videorate does not hold Hyprland's stream to fps (it delivered ~90/s),
+	// so frames past the rate are dropped here as well
+	gap, next := time.Second/time.Duration(fps), time.Time{}
+	go splitJPEG(bufio.NewReaderSize(out, 1<<20), func(f []byte) {
+		if now := time.Now(); now.After(next) {
+			next = now.Add(gap)
+			cb(f)
+		}
+	})
 	return func() {
 		cmd.Process.Kill()
 		cmd.Wait()

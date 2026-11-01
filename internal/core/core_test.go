@@ -426,6 +426,10 @@ func TestDirectChatViaFriendCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs, _ := a.St.Friends()
+	// link up first: a chat created while already connected used to reach b
+	// only after a reconnect (no sync for a chat b had never heard of)
+	go a.ensurePeer(fs[0].Pub)
+	waitFor(t, "link up", 20*time.Second, func() bool { return a.Online(fs[0].Pub) })
 	chat, err := a.CreateDirect(fs[0])
 	if err != nil {
 		t.Fatal(err)
@@ -1007,4 +1011,98 @@ func TestOrphanSenderCap(t *testing.T) {
 	if n != maxSenderOrphans+1 {
 		t.Fatalf("w buforze %d sierot, chciałem %d", n, maxSenderOrphans+1)
 	}
+}
+
+// A member leaves on their own: the owner sees them go and rotates the key, the
+// chat is gone on the leaver's side, and the owner may leave only when alone.
+func TestLeave(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	a := newCore(t, "ala", url)
+	b := newCore(t, "bartek", url)
+
+	chat, err := a.CreateChat("grupa", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, pin, err := a.NewInvite(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Redeem(code, pin); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "b joins", 20*time.Second, func() bool {
+		st, err := b.ChatState(chat)
+		return err == nil && st.IsMember(b.ID.Pub)
+	})
+	if err := a.Leave(chat); err == nil {
+		t.Fatal("owner left a chat that still has members")
+	}
+	before, _ := a.ChatState(chat)
+	a.P2P.Peer(b.ID.Pub).Close() // nobody to carry the leave: refused
+	waitFor(t, "link down", 10*time.Second, func() bool { return !b.Online(a.ID.Pub) })
+	if err := b.Leave(chat); err == nil {
+		t.Fatal("left with no member online")
+	}
+	go b.ensurePeer(a.ID.Pub)
+	waitFor(t, "link back", 20*time.Second, func() bool { return b.Online(a.ID.Pub) })
+	if err := b.Leave(chat); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ChatState(chat); err == nil || !b.left(chat) {
+		t.Fatal("chat still on the leaver's side")
+	}
+	waitFor(t, "a sees b leave and rekeys", 10*time.Second, func() bool {
+		st, err := a.ChatState(chat)
+		return err == nil && !st.IsMember(b.ID.Pub) && st.Epoch == before.Epoch+1
+	})
+	if err := a.Leave(chat); err != nil {
+		t.Fatalf("owner alone cannot delete: %v", err)
+	}
+}
+
+func TestCallState(t *testing.T) {
+	for want, call := range map[string]Call{
+		"":    {Mic: true},
+		"m":   {},
+		"md":  {Deaf: true},
+		"cs":  {Mic: true, Cam: true, Screen: true},
+		"mdc": {Deaf: true, Cam: true},
+	} {
+		if got := call.State(); got != want {
+			t.Errorf("%+v: %q, want %q", call, got, want)
+		}
+	}
+}
+
+func TestDeafenMutesMic(t *testing.T) {
+	srv := httptest.NewServer(connector.NewServer())
+	defer srv.Close()
+	c := newCore(t, "ala", "ws"+strings.TrimPrefix(srv.URL, "http"))
+	chat, err := c.CreateChat("g", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := &Call{Chat: chat, Joined: true, Mic: true, Members: map[string]bool{}}
+	c.calls[string(chat)] = call
+	check := func(step, want string) {
+		t.Helper()
+		if got := call.State(); got != want {
+			t.Fatalf("%s: %q, want %q", step, got, want)
+		}
+	}
+	c.ToggleDeafen(chat)
+	check("deafen", "md")
+	c.ToggleDeafen(chat)
+	check("undeafen", "")
+	c.ToggleMic(chat)
+	c.ToggleDeafen(chat)
+	c.ToggleDeafen(chat)
+	check("muted by hand stays muted", "m")
+	c.ToggleMic(chat)
+	c.ToggleDeafen(chat)
+	c.ToggleMic(chat)
+	check("mic on undeafens", "")
 }

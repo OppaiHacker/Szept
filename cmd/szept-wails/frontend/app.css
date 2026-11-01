@@ -557,7 +557,19 @@ div.cat-head { padding-left: 8px; }
   padding: 4px 8px; border-radius: var(--r-s);
   font-size: var(--t-sm); color: var(--fg-2);
 }
-.vc-user > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vc-user > .vn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* call member state: mic off / deafened / camera icons, a live pill */
+.vflags { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--muted); }
+.vflags i { display: grid; place-items: center; }
+.vflags .off { color: var(--red); } /* same as the muted buttons in the call panel */
+.vflags svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.vflags .live {
+  padding: 0 6px; border-radius: var(--r-s);
+  background: var(--red); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 16px;
+}
+.vtile .cap { display: inline-flex; align-items: center; gap: 6px; }
+.vtile .cap .vflags { color: #fff; }
 button.vc-user { width: 100%; text-align: left; transition: background var(--fast), color var(--fast); }
 button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg); }
 
@@ -1201,7 +1213,29 @@ button.vc-user:not(:disabled):hover { background: var(--hover); color: var(--fg)
   font-size: var(--t-xs); font-weight: 500;
 }
 .vtile.screen { box-shadow: inset 0 0 0 2px var(--green); }
-.vtile.muted .cap::after, .vc-user.muted > span:last-child::after { content: " · wyciszony"; color: var(--red); }
+.vtile.cam { cursor: zoom-in; }
+.vtile.cam.focus { cursor: zoom-out; }
+.vtile .vfull {
+  position: absolute; right: 8px; top: 8px;
+  width: 32px; height: 32px; display: grid; place-items: center;
+  border: 0; border-radius: var(--r-s);
+  background: rgb(0 0 0 / 52%); color: #fff; cursor: pointer;
+  opacity: 0; transition: opacity var(--d-fast);
+}
+.vtile .vfull svg { width: 16px; height: 16px; }
+.vtile:hover .vfull, .vtile .vfull:focus-visible { opacity: 1; }
+/* focus: one tile fills the stage, the rest sit in a strip under it */
+.vtiles.focused[data-n] {
+  grid-template-columns: repeat(auto-fill, 160px);
+  grid-template-rows: minmax(0, 1fr) auto;
+  justify-content: center; align-content: stretch;
+}
+.vtiles.focused > .vtile { animation: none; }
+.vtiles.focused > .vtile.focus { grid-column: 1 / -1; grid-row: 1; aspect-ratio: auto; min-height: 0; }
+/* full: the focused tile over the whole (fullscreen) window, title bar too */
+.vtile.full { position: fixed; inset: 0; z-index: 85; border-radius: 0; box-shadow: none; cursor: default; }
+.vtile.full .vfull { opacity: 1; }
+.vtile.muted .cap::after, .vc-user.muted > .vn::after { content: " · wyciszony"; color: var(--red); }
 .member.muted .nm b { text-decoration: line-through; text-decoration-color: var(--red); }
 .vbar { flex: none; display: flex; justify-content: center; gap: 12px; padding: 12px 16px 20px; }
 .vbar .ctl { width: 48px; height: 48px; background: var(--stage-ctl); color: var(--stage-fg); }
@@ -1683,6 +1717,9 @@ textarea.input { resize: vertical; min-height: 74px; line-height: 1.5; }
 .modal .body > p { padding: 0 16px 12px; color: var(--fg-2); font-size: var(--t-sm); line-height: 1.6; text-wrap: pretty; }
 .modal footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px; background: var(--layer-1); }
 .modal .card-banner:first-child { margin-top: -4px; }
+.modal.bare .body { padding: 0; border-radius: inherit; }
+.modal.bare .card-banner { border-radius: inherit; border-bottom-left-radius: 0; border-bottom-right-radius: 0; margin-top: 0; }
+.modal.bare .pcard { padding-bottom: 16px; }
 
 /* popovers: menus, emoji, profile cards. They scale out of their trigger
    (transform-origin is set by app.js). */
@@ -2159,3 +2196,9 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 .sl-icon .ini { font-weight: 600; }
 .sl-icon.big { position: absolute; left: 16px; bottom: -32px; width: 72px; height: 72px; box-shadow: 0 0 0 5px var(--card-ground, var(--layer-1)); }
 .sl .btn-row { padding: 0 0 16px; flex-wrap: wrap; }
+
+/* camera / screen start: how to send it */
+.vpick { display: grid; gap: 8px; padding: 10px; width: 300px; }
+.vp-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 8px; font-size: var(--t-sm); color: var(--fg-2); }
+.vp-row .input { height: 30px; padding: 0 8px; font-size: var(--t-sm); min-width: 0; }
+.vpick .btn { margin-top: 4px; justify-content: center; }

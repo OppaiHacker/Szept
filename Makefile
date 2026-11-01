@@ -16,6 +16,7 @@ KS_PASS          ?= android
 KS_ALIAS         ?= androiddebugkey
 APKWORK          := $(BIN)/apkres
 WINCC            ?= x86_64-w64-mingw32-gcc
+WINDRES          ?= x86_64-w64-mingw32-windres
 
 # Wails v3 targets GTK4 + webkitgtk-6.0. Distros still shipping only GTK3 +
 # webkit2gtk-4.1 need the gtk3 build tag, and without it every `go build ./...`
@@ -65,10 +66,16 @@ test:
 # a small runtime install on 10 — no GTK/webkit story there.
 windows: $(WINDOWS)
 
+# Icon: a .syso next to main.go, which go build links into the .exe (Explorer,
+# taskbar). 32512 is IDI_APPLICATION, the ID Wails loads as its window icon.
+# The terminal client stays a console program: -H=windowsgui would leave it
+# with no console to read from or print to.
 $(WINDOWS): $(BIN)/%.exe:
 	@$(fresh)
+	magick cmd/szept-wails/Icon.png -define icon:auto-resize=256,64,48,32,16 $(BIN)/szept.ico
+	echo '32512 ICON "$(BIN)/szept.ico"' | $(WINDRES) -O coff -o $(pkg-$*)/rsrc_windows_amd64.syso
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=$(WINCC) \
-		go build -ldflags -H=windowsgui -o $@ $(pkg-$*)
+		go build $(if $(filter szept,$*),,-ldflags -H=windowsgui) -o $@ $(pkg-$*)
 
 # Connector is pure Go — cross-compilation with no dependencies:
 connector-windows: $(BIN)/szept-connector.exe
@@ -203,5 +210,6 @@ uninstall:
 # sweeps the strays too — otherwise a months-old copy sits next to the sources.
 clean:
 	rm -rf $(BIN)
+	rm -f cmd/*/rsrc_windows_amd64.syso
 	rm -f $(BINS) $(addsuffix .exe,$(BINS)) connector connector.exe \
 		cmd/szept-gui/szept.apk

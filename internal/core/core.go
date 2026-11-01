@@ -7,6 +7,7 @@ import (
 	"bytes"
 	crand "crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -56,14 +57,16 @@ type Config struct {
 	// linię) — „Odśwież” w ustawieniach dopisuje wpisy do Connectors.
 	ConnectorLists []string `json:"connector_lists,omitempty"`
 
-	Accent        string  `json:"accent,omitempty"`         // kolor akcentu, hex RRGGBB
-	OutputVol     float64 `json:"output_vol,omitempty"`     // głośność rozmów 0..2, 0 = domyślna 1
-	CamDevice     string  `json:"cam_device,omitempty"`     // np. /dev/video1
-	MicDevice     string  `json:"mic_device,omitempty"`     // malgo device ID, "" = domyślny
-	SpeakerDevice string  `json:"speaker_device,omitempty"` // malgo device ID, "" = domyślny
-	MicGain       float64 `json:"mic_gain,omitempty"`       // wzmocnienie mikrofonu 0..2, 0 = 1
-	NoNotify      bool    `json:"no_notify,omitempty"`      // wycisz powiadomienia systemowe
-	DevMode       bool    `json:"dev_mode,omitempty"`       // menu kontekstowe i inspektor webview
+	Accent        string          `json:"accent,omitempty"`         // kolor akcentu, hex RRGGBB
+	OutputVol     float64         `json:"output_vol,omitempty"`     // głośność rozmów 0..2, 0 = domyślna 1
+	CamDevice     string          `json:"cam_device,omitempty"`     // np. /dev/video1
+	CamVideo      media.VideoOpts `json:"cam_video,omitempty"`      // last picked, see DefCam
+	ScreenVideo   media.VideoOpts `json:"screen_video,omitempty"`   // last picked, see DefScreen
+	MicDevice     string          `json:"mic_device,omitempty"`     // malgo device ID, "" = domyślny
+	SpeakerDevice string          `json:"speaker_device,omitempty"` // malgo device ID, "" = domyślny
+	MicGain       float64         `json:"mic_gain,omitempty"`       // wzmocnienie mikrofonu 0..2, 0 = 1
+	NoNotify      bool            `json:"no_notify,omitempty"`      // wycisz powiadomienia systemowe
+	DevMode       bool            `json:"dev_mode,omitempty"`       // menu kontekstowe i inspektor webview
 
 	Profile string `json:"profile,omitempty"` // aktywne konto (profil), "" = domyślne
 
@@ -84,7 +87,7 @@ type Ctrl struct {
 	Secret  []byte            `json:"secret,omitempty"`
 	Pin     string            `json:"pin,omitempty"` // redeem: one-time PIN
 	Name    string            `json:"name,omitempty"`
-	Action  string            `json:"action,omitempty"` // call: join|leave
+	Action  string            `json:"action,omitempty"` // call: join|leave|state|kick
 	Reply   bool              `json:"reply,omitempty"`  // sync: suppress re-reply
 	Typing  bool              `json:"typing,omitempty"`
 	EventID []byte            `json:"event_id,omitempty"`
@@ -140,6 +143,7 @@ type Core struct {
 	active     map[string]time.Time            // chatKey -> last opened or written (QuietLookup)
 
 	// media hooks (set by calls.go / UIs)
+	// OnVideoFrame gets each video frame; a nil jpeg means that stream ended.
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
 	voiceOut     func(src string, pcm []byte) // speaker mixer sink, set when call active
 	player       *media.Player                // żyje razem z rozmową (JoinCall/LeaveCall)
@@ -484,6 +488,7 @@ type ChatInfo struct {
 	Online   int
 	InCall   []string            // member names currently in any of the chat's calls
 	Voice    map[string][]string // channel ID ("" = default) -> member names in its call
+	VFlags   map[string][]string // same keys, Voice's order: each one's Call.State
 	Direct   bool                // 1:1 chat: unnamed with two members (see CreateDirect)
 	Channels []event.Channel
 	// group look (event.KindServer)
@@ -582,9 +587,11 @@ func (c *Core) Chats() []ChatInfo {
 				n := c.memberName(st, []byte(pub))
 				ci.InCall = append(ci.InCall, n)
 				if ci.Voice == nil {
-					ci.Voice = map[string][]string{}
+					ci.Voice, ci.VFlags = map[string][]string{}, map[string][]string{}
 				}
-				ci.Voice[key[len(idStr):]] = append(ci.Voice[key[len(idStr):]], n)
+				ch := key[len(idStr):]
+				ci.Voice[ch] = append(ci.Voice[ch], n)
+				ci.VFlags[ch] = append(ci.VFlags[ch], call.Flags[pub])
 			}
 		}
 		c.mu.Unlock()
@@ -784,6 +791,8 @@ func (c *Core) messages(chat []byte) []Msg {
 			m.Kind, m.Info, m.Text = "info", e.Kind, name+" added "+safeName(b.Name)
 		case event.KindRemove:
 			m.Kind, m.Info, m.Text = "info", e.Kind, name+" removed a member"
+		case event.KindLeave:
+			m.Kind, m.Info, m.Text = "info", e.Kind, name+" left"
 		case event.KindRekey:
 			m.Kind, m.Info, m.Text = "info", e.Kind, "key rotation (new epoch)"
 		default:
@@ -1212,6 +1221,66 @@ func (c *Core) dropUnauthorized() {
 	}
 }
 
+// Leave takes us out of the chat: a signed "leave" goes to the members online
+// now (they pass it on), then the chat is deleted here and a friend's later
+// sync no longer brings it back. The owner cannot hand the chat over, so they
+// may only leave once they are its last member. A member may only leave while
+// another member is online to receive the leave.
+func (c *Core) Leave(chat []byte) error {
+	st, err := c.ChatState(chat)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(st.Owner, c.ID.Pub) {
+		for _, m := range st.Members {
+			if !m.Removed && !bytes.Equal(m.Pub, c.ID.Pub) {
+				return errors.New("jesteś właścicielem: najpierw wyrzuć pozostałych członków")
+			}
+		}
+	} else {
+		// someone has to carry the leave: sent to nobody, it would never
+		// arrive, and we would stay a member over there for good
+		online := false
+		for _, m := range st.Members {
+			if !m.Removed && !bytes.Equal(m.Pub, c.ID.Pub) && c.Online(m.Pub) {
+				online = true
+				break
+			}
+		}
+		if !online {
+			return errors.New("nikt z serwera nie jest teraz online: spróbuj, gdy ktoś będzie")
+		}
+		if _, err := c.appendEvent(chat, event.KindLeave, event.Body{TS: time.Now().Unix()}); err != nil {
+			return err
+		}
+	}
+	if err := c.St.PutMeta(leftKey(chat), []byte{1}); err != nil {
+		return err
+	}
+	if err := c.St.DeleteChat(chat); err != nil {
+		return err
+	}
+	c.invalidate(chat)
+	// links kept only for this chat go too, but not before the leave is out:
+	// closing at once dropped it unsent
+	time.AfterFunc(5*time.Second, c.dropUnauthorized)
+	c.Notify()
+	return nil
+}
+
+func leftKey(chat []byte) string { return "left:" + hex.EncodeToString(chat) }
+
+func (c *Core) left(chat []byte) bool { return c.St.Meta(leftKey(chat)) != nil }
+
+// rekeyAfterLeave: whoever left must not read what comes next, same as a kick.
+func (c *Core) rekeyAfterLeave(chat []byte) {
+	if st, err := c.ChatState(chat); err == nil && bytes.Equal(st.Owner, c.ID.Pub) {
+		if err := c.Rekey(chat); err != nil {
+			log.Printf("core: rekey after leave: %v", err)
+		}
+	}
+}
+
 // Rekey bumps the epoch: rekey event (encrypted with old key) + fresh key
 // pushed over E2E ctrl channels to remaining online members; offline members
 // fetch it via keyreq when they return.
@@ -1316,6 +1385,12 @@ func (c *Core) gossip(chat []byte, e *event.Event, skip []byte) {
 		}
 		if p := c.P2P.Peer(m.Pub); p != nil {
 			p.SendCtrl(msg)
+			// A member added while already connected does not know the chat
+			// yet and drops its events (handleEvents): only a sync bootstraps
+			// it, and onPeerUp has long passed. Old members just see known heads.
+			if e.Kind == event.KindAdd {
+				p.SendCtrl(Ctrl{T: "sync", Chat: chat, Heads: c.St.Heads(chat)})
+			}
 		}
 	}
 }

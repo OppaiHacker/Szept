@@ -311,6 +311,7 @@ const I = {
   palette: '<path d="M12 21a9 9 0 1 1 9-9c0 2-2 2.5-3.5 2.5H16a2 2 0 0 0-1.4 3.4A2 2 0 0 1 12 21Z"/><path d="M7.5 12h.01M10 8h.01M15 8h.01"/>',
   globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c4 4.5 4 12.5 0 17-4-4.5-4-12.5 0-17Z"/>',
   hash: '<path d="M5 9h15M4 15h15M10 3 8 21M16 3l-2 18"/>',
+  expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   logout: '<path d="M14 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-3"/><path d="M10 12h11m0 0-3-3m3 3-3 3"/>',
 };
 
@@ -328,6 +329,8 @@ const S = {
   ch: "",        // open text channel of the group ("" = the default "czat")
   voice: null,   // call key whose voice view is open instead of the chat
   pip: null,     // [x, y] where the floating call window was dragged
+  focus: null,   // voice view: key of the tile blown up over the others
+  full: false,   // that tile also covers the whole screen
   selfMute: false, selfDeaf: false, // how the next call starts
   fpage: false,  // phone: the friends page is open instead of the sidebar
   ftab: "online",
@@ -392,16 +395,18 @@ function anchor(box) {
 
 // modal({title, body, actions, wide, onMount}) -> Promise resolved with the
 // value passed to the action that closed it (null when dismissed).
-function modal({ title, body: bodyHTML, actions = [], wide = false, onMount }) {
+// bare: no title bar and no buttons, the body is the whole sheet (a profile
+// card whose frame has to go around all of it); Esc or a click outside closes.
+function modal({ title, body: bodyHTML, actions = [], wide = false, bare = false, onMount }) {
   closeModal(null);
   return new Promise((resolve) => {
     const root = $("#modal-root");
     root.innerHTML = `
       <div class="backdrop" data-act="modal-dismiss">
-        <div class="modal ${wide ? "wide" : ""}" role="dialog" aria-modal="true">
-          <header><h3>${esc(title)}</h3>
+        <div class="modal ${wide ? "wide" : ""} ${bare ? "bare" : ""}" role="dialog" aria-modal="true" ${bare ? `aria-label="${esc(title)}"` : ""}>
+          ${bare ? "" : `<header><h3>${esc(title)}</h3>
             <button class="icon-btn" data-act="modal-dismiss">${icon("x")}</button>
-          </header>
+          </header>`}
           <div class="body">${bodyHTML}</div>
           ${actions.length ? `<footer>${actions.map((a, i) =>
             `<button class="btn ${a.kind || "ghost"}" data-act="modal-action" data-i="${i}">${esc(a.label)}</button>`).join("")}</footer>` : ""}
@@ -678,13 +683,25 @@ function chanName(g, id, kind = "text") {
   return chanOf(g, id, kind)?.name || (id ? "?" : kind === "voice" ? "Rozmowa" : "czat");
 }
 
+// callFlags: what a call member says about themselves (letters from core's
+// Call.State: m mic off, d deafened, c camera, s screen) as small icons.
+function callFlags(f = "") {
+  const ic = (name, t, cls = "") => `<i class="${cls}" title="${t}">${icon(name)}</i>`;
+  const out = (f.includes("m") ? ic("micOff", "Wyciszony mikrofon", "off") : "")
+    + (f.includes("d") ? ic("deaf", "Wyciszone dźwięki", "off") : "")
+    + (f.includes("c") ? ic("cam", "Kamera włączona") : "")
+    + (f.includes("s") ? `<b class="live" title="Udostępnia ekran">Na żywo</b>` : "");
+  return out && `<span class="vflags">${out}</span>`;
+}
+const myFlags = (k) => k ? (k.mic ? "" : "m") + (k.deaf ? "d" : "") + (k.cam ? "c" : "") + (k.screen ? "s" : "") : "";
+
 function groupSide(g) {
   // the call list has names only; the open chat's member list adds faces
   const members = S.conv?.id === g.id ? S.conv.members : [];
   const me = S.snap.me.name;
-  const who = (name) => {
+  const who = (name, flags) => {
     const m = members.find((x) => x.name === name) || (name === me ? S.snap.me : null);
-    return `<button class="vc-user ${m && peerVol.get(m.pub)?.mute ? "muted" : ""}" ${m ? `data-act="user-menu" data-pub="${m.pub}"` : "disabled"}><span class="spk" data-speak="${m?.pub || ""}">${avatar(m?.avatar, name, m?.pub || name, "xs")}</span><span>${esc(name)}</span></button>`;
+    return `<button class="vc-user ${m && peerVol.get(m.pub)?.mute ? "muted" : ""}" ${m ? `data-act="user-menu" data-pub="${m.pub}"` : "disabled"}><span class="spk" data-speak="${m?.pub || ""}">${avatar(m?.avatar, name, m?.pub || name, "xs")}</span><span class="vn">${esc(name)}</span>${callFlags(flags)}</button>`;
   };
   const attrs = (x) => `data-chat="${g.id}" data-ch="${x.id}" data-kind="${x.kind}" data-ctx
     ${g.isOwner && !x.arch ? `draggable="true"` : ""}`;
@@ -696,12 +713,12 @@ function groupSide(g) {
   };
   const voice = (x) => {
     const key = g.id + x.id;
-    let live = g.voice[x.id] || [];
-    if (g.callKey === key && !live.includes(me)) live = [me, ...live];
+    let live = g.voice[x.id] || [], flags = g.vflags?.[x.id] || [];
+    if (g.callKey === key && !live.includes(me)) { live = [me, ...live]; flags = [myFlags(g.call), ...flags]; }
     return `<button class="row chan ${g.callKey === key ? "joined" : ""} ${S.voice === key ? "active" : ""}"
         data-act="voice-chan" ${attrs(x)}>
         ${icon("volume")}<span class="row-name">${esc(x.name)}</span></button>
-      ${live.length ? `<div class="vc-list">${live.map(who).join("")}</div>` : ""}`;
+      ${live.length ? `<div class="vc-list">${live.map((n, i) => who(n, flags[i])).join("")}</div>` : ""}`;
   };
   // archived voice channels are not joinable, archived text ones stay readable
   const row = (x) => x.kind === "text" ? text(x)
@@ -1235,18 +1252,25 @@ function paintCall() {
     const cam = frames.get(`${key}.${m.pub}.c`);
     tiles.push({
       key: m.pub, cls: "vtile" + (cam ? " cam" : "") + (peerVol.get(m.pub)?.mute ? " muted" : ""),
-      sig: (cam ? "c" : "a" + m.avatar) + peerVol.get(m.pub)?.mute,
+      sig: (cam ? "c" : "a" + m.avatar) + peerVol.get(m.pub)?.mute + m.flags,
       src: cam && `/frame/${key}.${m.pub}.c?n=${cam.seq}`,
-      html: cam ? `<canvas class="v"></canvas><span class="cap">${esc(m.name)}</span>`
-        : `<span class="spk" data-speak="${m.pub}">${avatar(m.avatar, m.name, m.pub, "xl")}</span><span class="cap">${esc(m.name)}</span>`,
+      html: cam ? `<canvas class="v"></canvas><span class="cap">${esc(m.name)}${callFlags(m.flags)}</span>${FULL_BTN}`
+        : `<span class="spk" data-speak="${m.pub}">${avatar(m.avatar, m.name, m.pub, "xl")}</span><span class="cap">${esc(m.name)}${callFlags(m.flags)}</span>`,
     });
     const scr = frames.get(`${key}.${m.pub}.s`);
     if (scr) tiles.push({ key: m.pub + ".s", cls: "vtile cam screen", sig: "s", src: `/frame/${key}.${m.pub}.s?n=${scr.seq}`,
-      html: `<canvas class="v"></canvas><span class="cap">${esc(m.name)} · ekran</span>` });
+      html: `<canvas class="v"></canvas><span class="cap">${esc(m.name)} · ekran</span>${FULL_BTN}` });
   }
   const host = $("#vtiles");
   host.dataset.n = Math.min(tiles.length, 4);
+  // a focused tile whose picture stopped drops back into the grid
+  if (S.focus && !tiles.some((t) => t.key === S.focus && t.src)) setFocus(null);
   syncTiles(host, tiles);
+  host.classList.toggle("focused", !!S.focus);
+  for (const el of host.children) {
+    el.classList.toggle("focus", el.dataset.key === S.focus);
+    el.classList.toggle("full", el.dataset.key === S.focus && S.full);
+  }
   if (!people.length) host.innerHTML = `<div class="empty"><i class="empty-ico">${icon("volume")}</i><strong>Pusto</strong>Nikogo nie ma w tym kanale.</div>`;
 
   const head = `<button class="icon-btn back" data-act="back" title="Wróć">${icon("chev")}</button>
@@ -1262,6 +1286,17 @@ function paintCall() {
       <button class="ctl hang" data-act="hangup" ${d} title="Rozłącz">${icon("hangup")}</button>`
     : `<button class="btn join" data-act="voice-chan" data-chat="${S.chat}" data-ch="${key.slice(S.chat.length)}">${icon("phone")}Dołącz do kanału</button>`;
   if ($("#vbar").dataset.sig !== bar) { $("#vbar").dataset.sig = bar; $("#vbar").innerHTML = bar; }
+}
+
+const FULL_BTN = `<button class="vfull" data-act="tile-full" title="Pełny ekran">${icon("expand")}</button>`;
+
+// setFocus: a click on a video tile blows it up over the stage (the rest
+// shrink to a strip), full also covers the whole screen. null goes back.
+function setFocus(key, full = false) {
+  if (S.full !== (full && !!key)) api("SetFullscreen", full && !!key).catch(() => {});
+  S.focus = key;
+  S.full = full && !!key;
+  paintCall();
 }
 
 // Floating window: while you are in a call with video and look at something
@@ -1285,6 +1320,7 @@ function paintPip(g) {
   }
   pip.dataset.key = key;
   const [k, f] = fr[0];
+  pip.dataset.tile = k.slice(key.length + 1).replace(/\.c$/, "");
   const src = `/frame/${k}?n=${f.seq}`;
   setFrame(pip.querySelector("canvas"), src);
   pip.querySelector(".cap").textContent = f.name + (k.endsWith(".s") ? " · ekran" : "") + " · " + chanName(g, key.slice(g.id.length), "voice");
@@ -1307,7 +1343,7 @@ function dragPip(pip) {
     pip.addEventListener("pointermove", move);
     pip.addEventListener("pointerup", () => {
       pip.removeEventListener("pointermove", move);
-      if (!moved) openVoice(pip.dataset.key);
+      if (!moved) openVoice(pip.dataset.key).then(() => setFocus(pip.dataset.tile));
     }, { once: true });
   });
 }
@@ -1507,6 +1543,36 @@ async function dropChannel(g, x, name, arch) {
   if (x.kind === "text" && S.chat === g.id && S.ch === x.id) await openChat(g.id);
 }
 
+// Starting a camera or screen share asks how: monitor (when there is a
+// choice), frame rate, resolution, quality. The last pick is preselected.
+// Stopping, and the slash commands, skip the question.
+const VIDEO_CHOICES = {
+  fps: [[15, "15 fps"], [30, "30 fps"], [60, "60 fps"]],
+  cam: [[480, "480p"], [720, "720p"], [1080, "1080p"]],
+  screen: [[720, "720p"], [1080, "1080p"], [1440, "1440p"]],
+  quality: [[40, "Niska"], [60, "Średnia"], [85, "Wysoka"]],
+};
+
+async function startVideo(anchor, kind, key) {
+  const method = kind === "cam" ? "ToggleCam" : "ToggleScreen";
+  const pre = (o) => (kind === "cam" ? [o] : [0, o]);
+  if (S.snap.chats.find((c) => c.callKey === key)?.call?.[kind]) return act(method, key, ...pre({}));
+  const [picks, mons] = await Promise.all([api("VideoPicks").catch(() => ({})),
+    kind === "screen" ? api("Displays").catch(() => []) : []]);
+  const p = picks[kind] || {};
+  if (!anchor) return act(method, key, ...pre(p));
+  const sel = (name, label, list, v) => `<label class="vp-row"><span>${label}</span>
+    <select class="input" data-k="${name}">${list.map(([n, t]) =>
+      `<option value="${n}" ${n === v ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`;
+  popover(anchor, `<div class="vpick">
+    ${mons?.length > 1 ? sel("d", "Monitor", mons.map((d, i) => [i, `Monitor ${i + 1} · ${d}`]), 0) : ""}
+    ${sel("fps", "Klatki", VIDEO_CHOICES.fps, p.fps)}
+    ${sel("height", "Rozdzielczość", VIDEO_CHOICES[kind], p.height)}
+    ${sel("quality", "Jakość", VIDEO_CHOICES.quality, p.quality)}
+    <button class="btn primary" data-act="video-go" data-kind="${kind}" data-chat="${key}">${kind === "cam" ? "Włącz kamerę" : "Udostępnij ekran"}</button>
+  </div>`, "top", "menu-pop");
+}
+
 // openVoice shows the voice view of a call key (chat ID + channel ID).
 async function openVoice(key) {
   const chat = key.slice(0, 64);
@@ -1577,8 +1643,8 @@ const CMD = {
   "/rozlacz": () => act("LeaveCall", callKey()), "/leave": () => act("LeaveCall", callKey()),
   "/hangup": () => act("LeaveCall", callKey()),
   "/mic": () => act("ToggleMic", callKey()),
-  "/cam": () => act("ToggleCam", callKey()),
-  "/ekran": () => act("ToggleScreen", callKey()), "/screen": () => act("ToggleScreen", callKey()),
+  "/cam": () => startVideo(null, "cam", callKey()),
+  "/ekran": () => startVideo(null, "screen", callKey()), "/screen": () => startVideo(null, "screen", callKey()),
   "/wyslij": () => act("PickFiles", S.chat, ""), "/send": () => act("PickFiles", S.chat, ""),
   "/awatar": () => pickPicture("avatar"), "/avatar": () => pickPicture("avatar"),
   "/connector": cmdConnector,
@@ -1995,9 +2061,8 @@ async function profileDialog(pub, anchor) {
     const side = anchor.closest(".members, .userbar") ? (anchor.closest(".userbar") ? "top" : "left") : "right";
     return popover(anchor, html, side, "card");
   }
-  // the name is spelled out in the card right below — repeating it in the
-  // header just makes the sheet look like it stutters
-  modal({ title: "Profil", body: html, actions: [{ label: "Zamknij", kind: "ghost", value: null }] });
+  // the card is the whole sheet, so its frame and effect cover all of it
+  modal({ title: "Profil", body: html, bare: true });
 }
 
 function chatMenuHTML(c) {
@@ -2011,6 +2076,7 @@ function chatMenuHTML(c) {
       ${c.hidden ? item("unhide", "eye", `Pokaż schowane (${c.hidden})`) : ""}
       <i class="menu-sep"></i>
       ${item("rekey", "shield", "Obróć klucz")}
+      ${c.direct ? "" : item("leave", "logout", c.isOwner ? "Usuń serwer" : "Opuść serwer", "danger")}
     </div>`;
 }
 
@@ -2652,6 +2718,7 @@ function applyAccent(hex) {
 // leaveChat closes the open chat and lands on a sidebar or the friends page.
 function leaveChat(to) {
   Object.assign(S, { chat: "", ch: "", voice: null, search: null, filter: "" }, to);
+  if (S.focus) setFocus(null);
   api("Open", "").catch(() => {});
   refresh();
 }
@@ -2674,6 +2741,7 @@ async function openChat(id, ch) {
   S.chat = id;
   S.ch = ch;
   S.voice = null;
+  if (S.focus) setFocus(null);
   await api("OpenChannel", id, ch);
   S.search = null;
   S.limit = 60;
@@ -2992,6 +3060,15 @@ const HANDLERS = {
     }
   },
   unhide: async () => { closeModal(null); try { await api("UnhideAll", S.chat); } catch (e) { fail(e); } },
+  leave: async () => {
+    popClose?.();
+    const c = S.conv;
+    const owner = c.isOwner;
+    if (!(await confirmBox(owner ? "Usunąć serwer?" : "Opuścić serwer?",
+      owner ? "Serwer zniknie z tego urządzenia razem z historią. Możesz go usunąć, gdy nie ma w nim już nikogo poza tobą."
+        : "Pozostali zobaczą, że opuszczasz serwer. Historia zniknie z tego urządzenia; wrócić można tylko przez nowe zaproszenie."))) return;
+    try { await api("Leave", c.id); leaveChat({ space: "home", fpage: false }); } catch (e) { fail(e); }
+  },
   kick: async (el) => {
     closeModal(null);
     if (await confirmBox("Wyrzucić z czatu?", "Klucz zostanie obrócony, żeby usunięty nie czytał dalej.")) {
@@ -3103,8 +3180,15 @@ const HANDLERS = {
   hangup: (el) => act("LeaveCall", el.dataset.chat || S.chat),
   mic: (el) => act("ToggleMic", el.dataset.chat || S.chat),
   deaf: (el) => act("ToggleDeafen", el.dataset.chat || S.chat),
-  cam: (el) => act("ToggleCam", el.dataset.chat || S.chat),
-  screen: (el) => act("ToggleScreen", el.dataset.chat || S.chat),
+  cam: (el) => startVideo(el, "cam", el.dataset.chat || S.chat),
+  screen: (el) => startVideo(el, "screen", el.dataset.chat || S.chat),
+  "video-go": (el) => {
+    const v = Object.fromEntries([...el.parentElement.querySelectorAll("select")].map((x) => [x.dataset.k, +x.value]));
+    const o = { fps: v.fps, height: v.height, quality: v.quality };
+    if (el.dataset.kind === "cam") act("ToggleCam", el.dataset.chat, o);
+    else act("ToggleScreen", el.dataset.chat, v.d || 0, o);
+  },
+  "tile-full": (el) => { const k = el.closest(".vtile").dataset.key; setFocus(k, !(S.full && S.focus === k)); },
   spatial: async (el) => {
     if (el.dataset.chat && el.dataset.chat !== S.chat) await openChat(el.dataset.chat);
     spatialDialog();
@@ -3238,12 +3322,22 @@ document.addEventListener("click", (e) => {
   if (el.closest(".pop")) popClose?.();
 });
 
+document.addEventListener("click", (e) => {
+  const t = e.target.closest(".vtile.cam");
+  if (t && !e.target.closest("[data-act]")) setFocus(S.focus === t.dataset.key && !S.full ? null : t.dataset.key, S.full);
+});
+document.addEventListener("dblclick", (e) => {
+  const t = e.target.closest(".vtile.cam");
+  if (t) setFocus(t.dataset.key, !S.full);
+});
+
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (popClose) return popClose();
     if ($("#modal-root").innerHTML) return closeModal(null);
     if ($(".lightbox")) return closeLightbox();
     if (S.screen === "settings") return closeSettings();
+    if (S.focus) return setFocus(S.full ? S.focus : null);
   }
   if (e.key === "f" && (e.ctrlKey || e.metaKey) && S.chat) { e.preventDefault(); $("#hs")?.focus(); }
   if (e.key === "k" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#q")?.focus(); }
@@ -3339,11 +3433,13 @@ Events.On("sync", () => { if (S.stage === "ready") refresh(); });
 let callRaf = 0;
 Events.On("frame", (e) => {
   const d = e.data;
-  const name = S.conv?.members.find((m) => m.pub === d.from)?.name || "peer";
+  const name = S.conv?.members.find((m) => m.pub === d.from)?.name || S.frames.get(d.key)?.name || "peer";
   S.frames.set(d.key, { seq: d.seq, kind: d.kind, name, at: Date.now() });
   // several streams at 15-24 fps: one repaint per screen refresh is plenty
   callRaf ||= requestAnimationFrame(() => { callRaf = 0; paintCall(); });
 });
+
+Events.On("frame-end", (e) => { S.frames.delete(e.data); paintCall(); });
 
 Events.On("frames-cleared", (e) => {
   for (const k of [...S.frames.keys()]) if (k.startsWith(e.data + ".")) S.frames.delete(k);

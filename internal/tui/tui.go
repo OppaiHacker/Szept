@@ -471,7 +471,7 @@ func (m *model) exec(line string) tea.Cmd {
 		}
 	case "/ekran", "/screen":
 		if ch != nil {
-			if err := m.c.ToggleScreen(ch.ID); err != nil {
+			if err := m.c.ToggleScreen(ch.ID, 0); err != nil {
 				m.logErr(err.Error())
 			}
 		}

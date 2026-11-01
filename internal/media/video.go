@@ -19,12 +19,39 @@ import (
 	xdraw "golang.org/x/image/draw"
 )
 
-// encodeJPEG scales to maxW and encodes. Quality tuned for data-channel frames.
-func encodeJPEG(img image.Image, maxW int, quality int) []byte {
+// VideoOpts: what a camera or screen share sends. Height is the target picture
+// height (the width follows the source's aspect, within 16:9), Quality the
+// JPEG quality 1..100. Zero fields take a default, see Or.
+type VideoOpts struct {
+	FPS     int `json:"fps,omitempty"`
+	Height  int `json:"height,omitempty"`
+	Quality int `json:"quality,omitempty"`
+}
+
+// Or fills unset fields from def and clamps the rest to sane bounds: a
+// config value or a peer of the UI never asks for 500 fps or 8K.
+func (o VideoOpts) Or(def VideoOpts) VideoOpts {
+	pick := func(v, d, lo, hi int) int {
+		if v <= 0 {
+			v = d
+		}
+		return min(max(v, lo), hi)
+	}
+	return VideoOpts{
+		FPS:     pick(o.FPS, def.FPS, 1, 60),
+		Height:  pick(o.Height, def.Height, 144, 1440),
+		Quality: pick(o.Quality, def.Quality, 10, 95),
+	}
+}
+
+// box: the largest picture for this height, 16:9.
+func (o VideoOpts) box() (int, int) { return o.Height * 16 / 9, o.Height }
+
+// encodeJPEG scales down to fit maxW×maxH and encodes.
+func encodeJPEG(img image.Image, maxW, maxH int, quality int) []byte {
 	b := img.Bounds()
-	if b.Dx() > maxW {
-		h := b.Dy() * maxW / b.Dx()
-		dst := image.NewRGBA(image.Rect(0, 0, maxW, h))
+	if w, h := fitSize(b.Dx(), b.Dy(), maxW, maxH); w < b.Dx() {
+		dst := image.NewRGBA(image.Rect(0, 0, w, h))
 		// Src, not Over: the frame is opaque, and Over blends every pixel
 		xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
 		img = dst
@@ -34,11 +61,41 @@ func encodeJPEG(img image.Image, maxW int, quality int) []byte {
 	return out.Bytes()
 }
 
-// StartScreen captures the primary display as JPEG frames.
-// X11/Windows OK; Wayland needs XWayland (portal capture is the upgrade path).
-func StartScreen(fps int, cb func(jpegFrame []byte)) (stop func(), err error) {
+// fitSize scales w×h down to fit maxW×maxH, keeping the aspect ratio and even
+// dimensions (encoders like them). Unknown sizes fall back to maxW×maxH.
+func fitSize(w, h, maxW, maxH int) (int, int) {
+	if w <= 0 || h <= 0 {
+		return maxW, maxH
+	}
+	if w > maxW {
+		w, h = maxW, h*maxW/w
+	}
+	if h > maxH {
+		w, h = w*maxH/h, maxH
+	}
+	return max(2, w&^1), max(2, h&^1)
+}
+
+// Displays lists the monitors StartScreen can capture, as "W×H", in
+// display-index order. Empty on Wayland: the portal dialog picks there.
+func Displays() []string {
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
-		stop, err := startScreenCast(fps, cb)
+		return nil
+	}
+	out := []string{}
+	for i := range screenshot.NumActiveDisplays() {
+		b := screenshot.GetDisplayBounds(i)
+		out = append(out, fmt.Sprintf("%d×%d", b.Dx(), b.Dy()))
+	}
+	return out
+}
+
+// StartScreen captures one display (index into Displays) as JPEG frames.
+// X11/Windows capture directly; Wayland goes through the portal, which asks
+// the user itself and ignores display.
+func StartScreen(display int, o VideoOpts, cb func(jpegFrame []byte)) (stop func(), err error) {
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		stop, err := startScreenCast(o, cb)
 		if err == nil || errors.Is(err, errCancelled) {
 			return stop, err
 		}
@@ -47,23 +104,27 @@ func StartScreen(fps int, cb func(jpegFrame []byte)) (stop func(), err error) {
 	if screenshot.NumActiveDisplays() == 0 {
 		return nil, errors.New("no displays detected (Wayland without XWayland?)")
 	}
-	if _, err := screenshot.CaptureDisplay(0); err != nil {
+	if display < 0 || display >= screenshot.NumActiveDisplays() {
+		display = 0
+	}
+	if _, err := screenshot.CaptureDisplay(display); err != nil {
 		return nil, fmt.Errorf("screen capture: %w", err)
 	}
 	done := make(chan struct{})
 	go func() {
-		t := time.NewTicker(time.Second / time.Duration(fps))
+		t := time.NewTicker(time.Second / time.Duration(o.FPS))
 		defer t.Stop()
 		for {
 			select {
 			case <-done:
 				return
 			case <-t.C:
-				img, err := screenshot.CaptureDisplay(0)
+				img, err := screenshot.CaptureDisplay(display)
 				if err != nil {
 					continue
 				}
-				cb(encodeJPEG(img, 1280, 50))
+				w, h := o.box()
+				cb(encodeJPEG(img, w, h, o.Quality))
 			}
 		}
 	}()
@@ -86,7 +147,10 @@ func safeDevice(device string) string {
 	return device
 }
 
-func ffmpegArgs(device string) []string {
+func ffmpegArgs(device string, o VideoOpts) []string {
+	// never upscale; ffmpeg's mjpeg q:v runs 2 (best) .. 31
+	out := []string{"-vf", fmt.Sprintf("scale=-2:'min(%d,ih)'", o.Height), "-r", fmt.Sprint(o.FPS),
+		"-q:v", fmt.Sprint(max(2, (100-o.Quality)/5)), "-f", "mjpeg", "-"}
 	device = safeDevice(device)
 	switch runtime.GOOS {
 	case "windows":
@@ -95,22 +159,27 @@ func ffmpegArgs(device string) []string {
 		} else {
 			device = "video=" + device
 		}
-		return []string{"-f", "dshow", "-i", device, "-vf", "scale=640:-1", "-q:v", "8", "-f", "mjpeg", "-"}
+		return append([]string{"-f", "dshow", "-i", device}, out...)
 	default:
 		if device == "" {
 			device = "/dev/video0"
 		}
-		return []string{"-f", "v4l2", "-i", device, "-vf", "scale=640:-1", "-q:v", "8", "-f", "mjpeg", "-"}
+		return append([]string{"-f", "v4l2", "-i", device}, out...)
 	}
 }
 
+// hideConsole keeps a child process from opening its own console window
+// (Windows: a GUI-subsystem app has no console to share). No-op elsewhere.
+var hideConsole = func(*exec.Cmd) {}
+
 // startFFmpegCamera shells out to ffmpeg and splits the MJPEG stream on
 // SOI/EOI markers. Zero cgo, works wherever ffmpeg does.
-func startFFmpegCamera(device string, cb func([]byte)) (func(), error) {
+func startFFmpegCamera(device string, o VideoOpts, cb func([]byte)) (func(), error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return nil, errors.New("camera: missing v4l2 driver and ffmpeg not found in PATH")
 	}
-	cmd := exec.Command("ffmpeg", append([]string{"-loglevel", "quiet"}, ffmpegArgs(device)...)...)
+	cmd := exec.Command("ffmpeg", append([]string{"-loglevel", "quiet"}, ffmpegArgs(device, o)...)...)
+	hideConsole(cmd)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
