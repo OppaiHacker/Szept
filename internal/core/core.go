@@ -1008,7 +1008,9 @@ func (c *Core) SetNick(name string) error {
 // not have epoch key yet and first attempt fails.
 func (c *Core) announceProfile() {
 	av, haveAv := c.St.Profile(c.ID.Pub)
-	nick := string(c.St.Meta(nickKey))
+	// c.ID.Name, not the nickKey meta: a name chosen at first run lives only
+	// in the identity file, and meta stays empty until the first rename
+	nick := c.ID.Name
 	if !haveAv && nick == "" {
 		return
 	}
@@ -1132,7 +1134,13 @@ func (c *Core) CreateDirect(friend store.Friend) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.appendEvent(chat, event.KindAdd, event.Body{Pub: friend.Pub, Name: friend.Display(), TS: time.Now().Unix()}); err != nil {
+	// the fingerprint placeholder from a friend code is no name: signed into
+	// the add it would outrank the real one "hello" brings later
+	name := friend.Display()
+	if name == identity.Fingerprint(friend.Pub)[:9] {
+		name = ""
+	}
+	if _, err := c.appendEvent(chat, event.KindAdd, event.Body{Pub: friend.Pub, Name: name, TS: time.Now().Unix()}); err != nil {
 		return nil, err
 	}
 	go c.ensurePeer(friend.Pub)

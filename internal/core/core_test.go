@@ -445,6 +445,12 @@ func TestDirectChatViaFriendCode(t *testing.T) {
 		}
 		return false
 	})
+	// b's name, set only at first run (identity file, no nick meta), reaches
+	// the chat a created; the friend code alone left a stuck fingerprint here
+	waitFor(t, "b announces its name", 20*time.Second, func() bool {
+		st, err := a.ChatState(chat)
+		return err == nil && st.Members[string(b.ID.Pub)] != nil && st.Members[string(b.ID.Pub)].Name == "bartek"
+	})
 }
 
 // An epoch key is only accepted when the signed DAG vouches for it,

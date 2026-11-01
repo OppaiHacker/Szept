@@ -361,6 +361,10 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	c.publish(chat, gen, f, nil)
 	if e.Kind == event.KindAdd {
 		go c.autoRekey(chat)
+		// if we were the one added, our name and avatar go in now, not on the
+		// next 30 s tick (the keys usually arrive before this event does);
+		// announceProfile is a no-op where they are already in place
+		go c.announceProfile()
 	}
 	if e.Kind == event.KindLeave {
 		go c.rekeyAfterLeave(chat)
