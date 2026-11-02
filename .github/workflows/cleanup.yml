@@ -1,0 +1,22 @@
+# A deleted branch takes its dev-<branch> prerelease (see build.yml) with it.
+# GitHub runs delete workflows from the default branch, so this works once it
+# is on main. Kept out of build.yml: there the delete event would land in the
+# concurrency group of main and cancel its build.
+name: cleanup
+
+on: delete
+
+permissions:
+  contents: write
+
+jobs:
+  prerelease:
+    if: github.event.ref_type == 'branch'
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.ref }}
+    steps:
+      # a branch that never built has no prerelease to delete
+      - run: gh release delete "dev-${BRANCH//\//-}" --cleanup-tag --yes || true
