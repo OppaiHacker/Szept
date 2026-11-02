@@ -548,18 +548,25 @@ func (m *Manager) newPeer(pub []byte, pc *webrtc.PeerConnection) *Peer {
 		// Disconnected is transient (Wi-Fi to LTE): ICE may recover, and pion
 		// moves to Failed on its own if it does not.
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			// Only the live link going down is news. A losing glare dial, a
+			// replaced answer or a link already superseded by a newer one also
+			// ends here (state callbacks run async, often after the new link is
+			// up); reporting those dropped a connected peer from voice calls.
 			m.mu.Lock()
-			if m.peers[string(pub)] == peer {
+			live := m.peers[string(pub)] == peer
+			if live {
 				delete(m.peers, string(pub))
 			}
 			if m.answering[string(pub)] == pc {
 				delete(m.answering, string(pub))
 			}
-			delete(m.pending, string(pub))
-			delete(m.dialing, string(pub))
+			if m.dialing[string(pub)] == peer {
+				delete(m.pending, string(pub))
+				delete(m.dialing, string(pub))
+			}
 			m.mu.Unlock()
 			pc.Close()
-			if m.OnPeerDown != nil {
+			if live && m.OnPeerDown != nil {
 				m.OnPeerDown(pub)
 			}
 		}

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"szept/internal/connector"
 )
 
@@ -67,4 +69,38 @@ func TestP2PHandshakeAndCtrl(t *testing.T) {
 	}
 	ma.Close()
 	mb.Close()
+}
+
+// A superseded or never-up PeerConnection closing must not report the peer
+// down: core would drop a still-connected peer from its voice calls.
+func TestStaleLinkCloseKeepsPeer(t *testing.T) {
+	m := &Manager{peers: map[string]*Peer{}, pending: map[string][]byte{},
+		dialing: map[string]*Peer{}, answering: map[string]*webrtc.PeerConnection{}}
+	down := make(chan struct{}, 2)
+	m.OnPeerDown = func([]byte) { down <- struct{}{} }
+	pub := []byte("peer")
+	mk := func() *Peer {
+		pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.newPeer(pub, pc)
+	}
+	old, cur := mk(), mk()
+	m.peers[string(pub)] = cur
+	old.Close()
+	select {
+	case <-down:
+		t.Fatal("stale link reported the peer down")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if m.Peer(pub) != cur {
+		t.Fatal("stale link removed the live peer")
+	}
+	cur.Close()
+	select {
+	case <-down:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live link down not reported")
+	}
 }
