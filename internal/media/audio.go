@@ -94,8 +94,6 @@ func deviceID(ctx *malgo.AllocatedContext, kind malgo.DeviceType, id string) uns
 	infos, _ := ctx.Devices(kind)
 	for _, d := range infos {
 		if d.ID.String() == id {
-			// C copy leaks 256 B per call start; free it if calls
-			// ever start in a loop
 			return d.ID.Pointer()
 		}
 	}
@@ -103,7 +101,7 @@ func deviceID(ctx *malgo.AllocatedContext, kind malgo.DeviceType, id string) uns
 }
 
 // StartVoice captures the microphone dev ("" = default); cb receives 20 ms
-// PCM frames, denoised and gated (see denoiser): silence sends nothing.
+// PCM frames, denoised, leveled and compressed.
 func StartVoice(dev string, cb func(pcm []byte)) (stop func(), err error) {
 	ctx, err := audioCtx()
 	if err != nil {
@@ -129,31 +127,59 @@ func StartVoice(dev string, cb func(pcm []byte)) (stop func(), err error) {
 		dn.rn.Close()
 		return nil, err
 	}
-	// Uninit waits for the audio thread, so rnnoise is not freed under it
 	return func() { d.Uninit(); dn.rn.Close() }, nil
 }
 
-// voiceSrc: one remote speaker in the mix. Gain/pan survive an empty buffer,
-// so spatial settings applied before the first frame still stick.
+const (
+	itdMaxDelay = 24 // up to 0.5 ms delay line for interaural time difference (ITD)
+)
+
+// voiceSrc: one remote speaker in the mix.
 type voiceSrc struct {
-	buf  []int16
-	gain float32 // 0..2, default 1
-	pan  float32 // -1 (left) .. +1 (right)
-	mute bool
-	live bool      // playing; false after an underrun until prebuf is queued
-	peak float32   // 0..1, loudest sample of the last frame
-	at   time.Time // when that frame arrived
+	buf      []int16
+	gain     float32 // 0..2, default 1
+	pan      float32 // -1 (left) .. +1 (right)
+	mute     bool
+	live     bool
+	peak     float32
+	at       time.Time
+	rxComp   *lookaheadCompressor
+	rxLim    *peakLimiter
+	itdBufL  [itdMaxDelay]float32
+	itdPosL  int
+	itdBufR  [itdMaxDelay]float32
+	itdPosR  int
+	shadowL  *headShadowLPF
+	shadowR  *headShadowLPF
+}
+
+func newVoiceSrc() *voiceSrc {
+	// RX protect preset: -14 dBFS threshold, 4:1 ratio, 3 ms attack, 120 ms release, 0 dB makeup
+	p := CompParams{
+		ThresholdDB: -14.0,
+		Ratio:       4.0,
+		KneeDB:      6.0,
+		AttackMS:    3.0,
+		ReleaseMS:   120.0,
+		MakeupDB:    0.0,
+	}
+	return &voiceSrc{
+		gain:    1,
+		rxComp:  newLookaheadCompressor(p),
+		rxLim:   newPeakLimiter(-1.5),
+		shadowL: newHeadShadowLPF(),
+		shadowR: newHeadShadowLPF(),
+	}
 }
 
 // Player mixes named PCM streams into the default stereo output device.
-// Each source has its own gain/pan/mute; master scales everything; deafen
-// silences the mix without losing the volume setting.
 type Player struct {
-	mu     sync.Mutex
-	srcs   map[string]*voiceSrc
-	dev    *malgo.Device
-	master float32
-	deaf   bool
+	mu        sync.Mutex
+	srcs      map[string]*voiceSrc
+	dev       *malgo.Device
+	master    float32
+	deaf      bool
+	masterLim [2]*peakLimiter // master limiter for L and R channels
 }
 
 func StartPlayer(dev string) (*Player, error) {
@@ -161,7 +187,11 @@ func StartPlayer(dev string) (*Player, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Player{srcs: map[string]*voiceSrc{}, master: 1}
+	p := &Player{
+		srcs:      map[string]*voiceSrc{},
+		master:    1,
+		masterLim: [2]*peakLimiter{newPeakLimiter(-1.0), newPeakLimiter(-1.0)},
+	}
 	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
 	cfg.Playback.DeviceID = deviceID(ctx, malgo.Playback, dev)
 	cfg.Playback.Format = malgo.FormatS16
@@ -185,8 +215,7 @@ func StartPlayer(dev string) (*Player, error) {
 	return p, nil
 }
 
-// mix fills out (interleaved s16le stereo) with n frames. Pure of any device
-// state, so tests can call it directly.
+// mix fills out (interleaved s16le stereo) with n frames.
 func (p *Player) mix(out []byte, n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -201,36 +230,78 @@ func (p *Player) mix(out []byte, n int) {
 			s.live = true
 		}
 	}
+
+	opts := CurVoiceOpts()
+	rxProtect := !opts.NoRXProtect
+
 	for i := 0; i < n; i++ {
 		var sumL, sumR float32
 		for _, s := range p.srcs {
-			// each source gives one sample per output frame: sample i
 			if !s.live || i >= len(s.buf) {
 				continue
 			}
-			v := float32(s.buf[i])
 			if s.mute {
 				continue
 			}
-			// stała moc: pan przesuwa między kanałami, środek gra pełną głośnością
-			l, r := float32(1), float32(1)
-			if s.pan > 0 {
-				l = 1 - s.pan
-			} else if s.pan < 0 {
-				r = 1 + s.pan
+			v := float32(s.buf[i])
+
+			// 1. RX hearing protection per-source
+			if rxProtect {
+				v = s.rxComp.processSample(v)
+				v = s.rxLim.processSample(v)
 			}
-			sumL += v * s.gain * l
-			sumR += v * s.gain * r
+
+			// 2. Constant-Power Panning (equal energy)
+			// theta = pi/4 * (pan + 1), pan in [-1, +1]
+			// at pan=0, theta=pi/4 -> cos(pi/4)*sqrt(2) = 1.0, sin(pi/4)*sqrt(2) = 1.0
+			theta := (float64(s.pan) + 1.0) * (math.Pi / 4.0)
+			panL := float32(math.Cos(theta) * math.Sqrt2)
+			panR := float32(math.Sin(theta) * math.Sqrt2)
+
+			sample := v * s.gain
+			sampL := sample * panL
+			sampR := sample * panR
+
+			// 3. Binaural ITD (Interaural Time Difference up to ~0.4 ms = 19 samples) & Head Shadow
+			itdSamples := int(math.Abs(float64(s.pan)) * 19.0)
+			if itdSamples >= itdMaxDelay {
+				itdSamples = itdMaxDelay - 1
+			}
+
+			if s.pan > 0 { // panned to right: left ear is shadowed and delayed
+				s.itdBufL[s.itdPosL] = sampL
+				readIdx := (s.itdPosL - itdSamples + itdMaxDelay) % itdMaxDelay
+				s.itdPosL = (s.itdPosL + 1) % itdMaxDelay
+				sampL = s.shadowL.process(s.itdBufL[readIdx], s.pan)
+			} else if s.pan < 0 { // panned to left: right ear is shadowed and delayed
+				s.itdBufR[s.itdPosR] = sampR
+				readIdx := (s.itdPosR - itdSamples + itdMaxDelay) % itdMaxDelay
+				s.itdPosR = (s.itdPosR + 1) % itdMaxDelay
+				sampR = s.shadowR.process(s.itdBufR[readIdx], -s.pan)
+			}
+
+			sumL += sampL
+			sumR += sampR
 		}
-		l := clamp16(sumL * master)
-		r := clamp16(sumR * master)
+
+		// Master volume
+		finalL := sumL * master
+		finalR := sumR * master
+
+		// 4. Master Bus Peak Limiter (-1.0 dBFS)
+		if p.masterLim[0] != nil {
+			finalL = p.masterLim[0].processSample(finalL)
+			finalR = p.masterLim[1].processSample(finalR)
+		}
+
+		l := clamp16(finalL)
+		r := clamp16(finalR)
 		out[4*i] = byte(uint16(l))
 		out[4*i+1] = byte(uint16(l) >> 8)
 		out[4*i+2] = byte(uint16(r))
 		out[4*i+3] = byte(uint16(r) >> 8)
 	}
-	// drop what was played in one copy instead of reslicing per sample, so
-	// the buffer keeps one backing array instead of creeping through new ones
+
 	for _, s := range p.srcs {
 		if s.live {
 			s.buf = s.buf[:copy(s.buf, s.buf[min(n, len(s.buf)):])]
@@ -238,8 +309,7 @@ func (p *Player) mix(out []byte, n int) {
 	}
 }
 
-// prebuf: audio a source must have queued before it (re)starts, so network
-// jitter costs 60 ms of delay instead of a crackle on every late packet.
+// prebuf: audio a source must have queued before it (re)starts
 const prebuf = SampleRate * 6 / 100
 
 func clamp16(v float32) int16 {
@@ -255,7 +325,7 @@ func clamp16(v float32) int16 {
 func (p *Player) src(name string) *voiceSrc {
 	s := p.srcs[name]
 	if s == nil {
-		s = &voiceSrc{gain: 1}
+		s = newVoiceSrc()
 		p.srcs[name] = s
 	}
 	return s

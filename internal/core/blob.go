@@ -641,6 +641,12 @@ func (c *Core) rescanAttachments() {
 // announced in. Membership alone was not enough: bBlobs is global, so any shared
 // chat used to be a pass to files from every other chat (the hash is guessable
 // for a known document, which also made it a confirmation oracle).
+func (c *Core) blobBufLimit() uint64 {
+	if c.JoinedCall() != nil {
+		return 64 << 10 // 64 KB during calls to prevent SCTP queuing on voice packets
+	}
+	return sendBufHigh // 1 MB otherwise
+}
 func (c *Core) serveBlob(p *p2p.Peer, m Ctrl) {
 	st, err := c.ChatState(m.Chat)
 	if err != nil || !st.IsMember(p.Pub) {
@@ -684,7 +690,7 @@ func (c *Core) serveBlob(p *p2p.Peer, m Ctrl) {
 				end = len(data)
 			}
 			// backpressure check: don't push 32 MB at once
-			for i := 0; p.BufferedCtrl() > sendBufHigh && i < 500; i++ {
+			for i := 0; p.BufferedCtrl() > c.blobBufLimit() && i < 500; i++ {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if err := p.SendRaw(blobFrame(m.Chat, m.Blob, idx, total, data[idx*blobChunk:end])); err != nil {

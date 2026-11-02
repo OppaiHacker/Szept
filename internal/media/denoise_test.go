@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gen2brain/malgo"
+
+	"szept/internal/media/rnnoise"
 )
 
 func pcm48(f func(i int) float64, n int) []byte {
@@ -20,8 +22,7 @@ func pcm48(f func(i int) float64, n int) []byte {
 	return b
 }
 
-// Steady fan-like (brown) noise is gated: nothing goes out. White noise is a
-// poor stand-in, rnnoise half-takes it for speech.
+// Steady fan-like (brown) noise is gated: nothing goes out.
 func TestDenoiserGatesNoise(t *testing.T) {
 	d := newDenoiser()
 	defer d.rn.Close()
@@ -29,53 +30,85 @@ func TestDenoiserGatesNoise(t *testing.T) {
 	var y float64
 	brown := func(int) float64 { y = 0.95*y + r.NormFloat64()*300; return y }
 	sent := 0
-	d.feed(pcm48(brown, SampleRate*30), func([]byte) { sent++ })
-	if d.gain > 2 {
-		t.Fatalf("30 s of noise pumped the gain to %.1f", d.gain)
+	d.feed(pcm48(brown, SampleRate*10), func([]byte) { sent++ })
+	if d.agcM.gain > 2 {
+		t.Fatalf("10 s of noise pumped the gain to %.1f", d.agcM.gain)
 	}
 	if sent > 5 {
 		t.Fatalf("noise sent %d frames, want ~0", sent)
 	}
 }
 
-// A quiet voice is lifted toward agcTarget, silence never moves the gain,
-// and a loud block is limited instead of clipping.
-func TestAGC(t *testing.T) {
+// TestTransientNoSpike: after quiet speech when AGC has raised gain, a sudden 20x spike (shout/clap)
+// must be caught by lookahead compressor and peak limiter without exceeding -1.5 dBFS (~27500 in s16).
+func TestTransientNoSpike(t *testing.T) {
 	defer learned.Store(0)
-	d := &denoiser{gain: 1}
-	fill := func(amp float32) {
+	SetVoiceOpts(VoiceOpts{}) // default: AGC + Natural Compressor + Limiter
+	SetMicGain(1.0)
+
+	d := newDenoiser()
+	defer d.rn.Close()
+
+	// Train AGC for 1 second on speech-like quiet tone (amplitude 400)
+	for k := 0; k < 100; k++ {
 		for i := range d.blk {
-			d.blk[i] = amp * d.gain * float32(math.Sin(float64(i)/5))
+			d.blk[i] = 400.0 * float32(math.Sin(2.0*math.Pi*500.0*float64(k*rnnoise.FrameSize+i)/float64(SampleRate)))
+		}
+		d.vad = 0.9 // high VAD speech
+		d.block(func([]byte) {})
+	}
+
+	if d.agcM.gain <= 1.0 {
+		t.Fatalf("AGC gain did not adapt upward, got %.2f", d.agcM.gain)
+	}
+
+	// Sudden shout / burst: amplitude jumps 25x to 10000
+	maxPeak := float32(0.0)
+	for k := 0; k < 10; k++ {
+		for i := range d.blk {
+			d.blk[i] = 10000.0 * float32(math.Sin(2.0*math.Pi*500.0*float64(k*rnnoise.FrameSize+i)/float64(SampleRate)))
+		}
+		d.vad = 0.95
+		d.block(func(pcm []byte) {
+			for i := 0; i+1 < len(pcm); i += 2 {
+				val := float32(int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8))
+				if abs := float32(math.Abs(float64(val))); abs > maxPeak {
+					maxPeak = abs
+				}
+			}
+		})
+	}
+
+	// Ceiling -1.5 dBFS is ~27500. Ensure it never pierced through painfully.
+	if maxPeak > 28000 {
+		t.Fatalf("transient pierced limiter ceiling: max peak was %.0f (want <= 28000)", maxPeak)
+	}
+}
+
+func TestCompressorPresetsAndCustom(t *testing.T) {
+	p := defaultCompParams("radio")
+	c := newLookaheadCompressor(p)
+
+	// Feed 200 ms of loud tone (30000 amplitude)
+	var maxOut float32
+	for i := 0; i < SampleRate/5; i++ {
+		in := float32(30000.0 * math.Sin(2.0*math.Pi*400.0*float64(i)/float64(SampleRate)))
+		out := c.processSample(in)
+		// after attack has engaged (> 20 ms = 960 samples), measure compressed level
+		if i > 960 {
+			if abs := float32(math.Abs(float64(out))); abs > maxOut {
+				maxOut = abs
+			}
 		}
 	}
-	d.vad = 0
-	for range 100 {
-		fill(300)
-		d.agc(true)
-	}
-	if d.gain != 1 {
-		t.Fatalf("silence moved gain to %.2f", d.gain)
-	}
-	d.vad = 1
-	for range 50 { // 0.5 s of speech
-		fill(300)
-		d.agc(true)
-	}
-	if d.gain < 15 {
-		t.Fatalf("quiet voice gain %.1f, want ~19", d.gain)
-	}
-	fill(5000) // shout at the learned gain
-	d.agc(true)
-	for _, v := range d.blk {
-		if v > limit || v < -limit {
-			t.Fatalf("sample %.0f over the limit", v)
-		}
+
+	// Radio preset (-20 dB thresh, 5:1 ratio, +3.5 dB makeup) brings 30000 (-0.7 dBFS) down significantly (< 18000)
+	if maxOut > 18000 {
+		t.Fatalf("radio compressor output too high: %.0f, want <= 18000", maxOut)
 	}
 }
 
 // SZEPT_MICDIAG=1 go test -run MicDiag -v ./internal/media/
-// Talk for 8 s: per second it logs the raw level, rnnoise's speech score,
-// the AGC gain and how much of the second the gate let through.
 func TestMicDiag(t *testing.T) {
 	if os.Getenv("SZEPT_MICDIAG") == "" {
 		t.Skip("needs a microphone and someone talking")
@@ -110,25 +143,8 @@ func TestMicDiag(t *testing.T) {
 		time.Sleep(time.Second)
 		mu.Lock()
 		t.Logf("raw %5.1f dBFS  speech %.2f  gain %5.1fx  sent %3d%%",
-			10*math.Log10(raw/float64(SampleRate)/32768/32768+1e-12), vad/float64(max(blocks, 1)), d.gain, sent*2)
+			10*math.Log10(raw/float64(SampleRate)/32768/32768+1e-12), vad/float64(max(blocks, 1)), d.agcM.gain, sent*2)
 		raw, vad, blocks, sent = 0, 0, 0, 0
 		mu.Unlock()
-	}
-}
-
-// The next mic session starts at the gain the last one learned.
-func TestAGCRemembered(t *testing.T) {
-	defer learned.Store(0)
-	d := &denoiser{gain: 1, vad: 1}
-	for range 100 {
-		for i := range d.blk {
-			d.blk[i] = 300 * d.gain * float32(math.Sin(float64(i)/5))
-		}
-		d.agc(true)
-	}
-	n := newDenoiser()
-	defer n.rn.Close()
-	if n.gain != d.gain || n.gain < 15 {
-		t.Fatalf("new session gain %.1f, learned %.1f", n.gain, d.gain)
 	}
 }

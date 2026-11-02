@@ -344,7 +344,7 @@ func (u *ui) voicePage() {
 		mutedWrap("Ścieżka V4L2 na Linuksie. Na Androidzie kamera w rozmowach "+
 			"nie jest jeszcze dostępna."),
 		vspace(6), section("JAK TO CHODZI"),
-		mutedWrap("Głos: surowe PCM 16 kHz mono, 20 ms ramki, pełna siatka P2P. "+
+		mutedWrap("Głos: Opus 48 kHz (Fullband), RNNoise + kompresor dynamiki, 20 ms ramki, pełna siatka P2P. "+
 			"Wideo: klatki JPEG po niezawodnych kanałach danych. "+
 			"Wszystko w DTLS między uczestnikami."),
 	))

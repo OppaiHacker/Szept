@@ -1442,6 +1442,7 @@ func (a *App) Tones(notes [][2]float64) error {
 
 // SetMicGain: microphone volume 0..2, live in a call and in the mic test.
 func (a *App) SetMicGain(v float64) {
+	media.SetMicGain(float32(v))
 	if c, err := a.live(); err == nil {
 		c.Cfg.MicGain = v
 		a.cfg.MicGain = v

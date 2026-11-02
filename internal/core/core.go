@@ -30,6 +30,7 @@ import (
 	"szept/internal/i18n"
 	"szept/internal/identity"
 	"szept/internal/media"
+	"szept/internal/media/opus"
 	"szept/internal/p2p"
 	"szept/internal/store"
 )
@@ -161,6 +162,7 @@ type Core struct {
 	OnVideoFrame func(chat []byte, from []byte, kind string, jpeg []byte)
 	voiceOut     func(src string, pcm []byte) // speaker mixer sink, set when call active
 	voiceRx      *media.Receiver              // Opus decoders for voiceOut, per call
+	voiceEnc     *opus.Encoder                // active voice encoder for loss updates
 	player       *media.Player                // żyje razem z rozmową (JoinCall/LeaveCall)
 	micPeak      float32                      // own mic level, for the speaking ring
 	micAt        time.Time

@@ -22,7 +22,11 @@ func frame(p *Player) (l, r int16) {
 }
 
 func TestMix(t *testing.T) {
-	p := &Player{srcs: map[string]*voiceSrc{}, master: 1}
+	SetVoiceOpts(VoiceOpts{NoRXProtect: true}) // raw pass-through for exact multiplier tests
+	p := &Player{
+		srcs:   map[string]*voiceSrc{},
+		master: 1,
+	}
 
 	// jitter buffer: a lone frame waits until prebuf is queued
 	p.Push("a", pcm(1000, 8))
@@ -34,8 +38,8 @@ func TestMix(t *testing.T) {
 		t.Fatalf("center: %d/%d", l, r)
 	}
 
-	p.SetSource("a", 1, 1) // pełny pan w prawo
-	if l, r := frame(p); l != 0 || r != 1000 {
+	p.SetSource("a", 1, 1) // full pan right (pan = 1.0 -> left=0, right=1414)
+	if l, r := frame(p); l != 0 || r < 1400 {
 		t.Fatalf("pan right: %d/%d", l, r)
 	}
 
@@ -61,7 +65,7 @@ func TestMix(t *testing.T) {
 		t.Fatalf("deafen: %d/%d", l, r)
 	}
 
-	// mute zjada próbkę z bufora — po odciszeniu nie gra zaległości
+	// mute drains buffer
 	p.SetDeafen(false)
 	p.MuteSource("a", true)
 	for i := 0; i < prebuf+8; i++ {
@@ -70,6 +74,38 @@ func TestMix(t *testing.T) {
 	p.MuteSource("a", false)
 	if l, _ := frame(p); l != 0 {
 		t.Fatalf("buffer drained during mute, got %d", l)
+	}
+}
+
+func TestBinauralConstantPowerMix(t *testing.T) {
+	SetVoiceOpts(VoiceOpts{}) // with RX protect and master limiter
+	p, err := StartPlayer("")
+	if err != nil {
+		// No physical audio device available in test environment is ok
+		p = &Player{
+			srcs:      map[string]*voiceSrc{},
+			master:    1,
+			masterLim: [2]*peakLimiter{newPeakLimiter(-1.0), newPeakLimiter(-1.0)},
+		}
+	} else {
+		defer p.Close()
+	}
+
+	// 4 loud speakers talking at once
+	for _, name := range []string{"a", "b", "c", "d"} {
+		p.Push(name, pcm(25000, prebuf+FrameSamps))
+	}
+	p.SetMaster(2.0)
+
+	// Mix 10 frames and ensure master limiter prevents sample overflow/wrap
+	out := make([]byte, FrameSamps*4)
+	p.mix(out, FrameSamps)
+
+	for i := 0; i < len(out)/2; i++ {
+		val := int16(uint16(out[2*i]) | uint16(out[2*i+1])<<8)
+		if val > 32700 || val < -32700 {
+			t.Fatalf("master limiter let sample clip: %d", val)
+		}
 	}
 }
 
