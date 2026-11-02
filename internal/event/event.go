@@ -131,6 +131,10 @@ type Body struct {
 	Ch []byte `json:"ch,omitempty"`
 	// Arch (KindChannel): the channel sits in the owner's archive.
 	Arch bool `json:"arch,omitempty"`
+	// Link (KindAdd, KindNick): proof that Pub (the author for KindNick) is a
+	// device of another account (see link.go). Clients before linked devices ignore it and show the device
+	// as a member of its own.
+	Link []byte `json:"link,omitempty"`
 }
 
 // signable: deterministic length-prefixed concat of all fields except Sig.
@@ -318,6 +322,9 @@ type Member struct {
 	// chat has NoHistory, where it is the epoch after the one they were added in.
 	JoinEpoch uint32
 	addID     []byte // NoHistory: the add that set JoinEpoch, until a rekey that saw it opens that epoch
+	// Of: the account this member is a device of (nil = an account itself),
+	// and Link the proof for it, as carried by the add (see link.go)
+	Of, Link []byte
 }
 
 type State struct {
@@ -629,6 +636,9 @@ func (f *Folder) apply(e *Event) error {
 			break
 		}
 		m := &Member{Pub: body.Pub, Name: SafeName(body.Name), AddedBy: e.Author, JoinEpoch: join}
+		if acct := VerifyLink(body.Link, body.Pub); acct != nil {
+			m.Of, m.Link = acct, body.Link
+		}
 		if st.NoHistory {
 			m.addID = e.ID()
 		}
@@ -736,6 +746,10 @@ func (f *Folder) apply(e *Event) error {
 		// your own display name, nobody else's
 		if m, ok := st.Members[string(e.Author)]; ok && !m.Removed && body.Name != "" {
 			m.Name = SafeName(body.Name)
+			// a device that joined on its own (an invite) names its account here
+			if acct := VerifyLink(body.Link, e.Author); acct != nil {
+				m.Of, m.Link = acct, body.Link
+			}
 		}
 	case KindReact:
 		if !st.IsMember(e.Author) {

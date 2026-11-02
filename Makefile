@@ -4,17 +4,11 @@ APPID  := chat.szept
 
 ANDROID_HOME     ?= $(HOME)/Android/Sdk
 ANDROID_NDK_HOME ?= $(ANDROID_HOME)/ndk/27.2.12479018
-FYNE             ?= $(HOME)/go/bin/fyne
-ZIPALIGN         ?= $(lastword $(sort $(wildcard $(ANDROID_HOME)/build-tools/*/zipalign)))
-AAPT2            ?= $(dir $(ZIPALIGN))aapt2
-APKSIGNER        ?= $(dir $(ZIPALIGN))apksigner
-ANDROID_JAR      ?= $(lastword $(sort $(wildcard $(ANDROID_HOME)/platforms/*/android.jar)))
 KEYSTORE         ?= $(HOME)/.android/szept-debug.keystore
 # Release APKs: pass your own keystore, e.g.
 #   make android KEYSTORE=~/keys/szept-release.jks KS_PASS=... KS_ALIAS=szept
 KS_PASS          ?= android
 KS_ALIAS         ?= androiddebugkey
-APKWORK          := $(BIN)/apkres
 WINCC            ?= x86_64-w64-mingw32-gcc
 WINDRES          ?= x86_64-w64-mingw32-windres
 
@@ -140,63 +134,35 @@ sign-release:
 	ssh-keygen -Y sign -f $(SIGNKEY) -n szept-release $(BIN)/sign/SHA256SUMS
 	gh release upload $(TAG) $(BIN)/sign/SHA256SUMS.sig --clobber
 
-# APK: requires Android SDK+NDK and fyne tool (go install fyne.io/tools/cmd/fyne@latest).
-# Permissions/manifest: cmd/szept-gui/AndroidManifest.xml
+# APK: the same Wails client as the desktop, in an Android WebView. Go is built
+# as libwails.so and loaded by the Gradle host in cmd/szept-wails/android
+# (MainActivity, WailsBridge, SzeptHost). Needs the SDK + NDK and a JDK.
+# The package id stays chat.szept and the data stays where the Fyne build kept
+# it (platform_android.go), so this installs over the old app as an update,
+# provided it is signed with the same key.
 # checklinkname=0: wlynxg/anet (pion) links net.zoneCache, Go >=1.23 blocks this
-# Version: single source of truth is FyneApp.toml (Version + Build). `fyne package`
-# increments Build after every successful packaging, so every build = new version.
-# Manifest has its own file, so fyne does NOT substitute it — we inject with sed:
-# versionCode=Build (Android requires strictly increasing integer), versionName=Version.Build.
-#
-# fyne then compiles that manifest with its own binres, which sorts attributes
-# alphabetically by name — Android looks them up with a binary search over
-# resource IDs. With allowBackup in <application> the order broke and the system
-# silently dropped label and icon: the app installed as "chat.szept" with the
-# default robot icon. So the packaged APK gets its manifest and resource table
-# replaced with ones built by aapt2, which orders attributes correctly and
-# understands modern attributes (targetSdk 34, maxSdkVersion, fullBackupContent).
+# versionCode must only grow; 100 + commit count is above every Fyne build (<= 27).
+NDK_CC   := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+APK_CODE ?= $(shell echo $$((100 + $$(git rev-list --count HEAD))))
+APKHOST  := cmd/szept-wails/android
 android: $(BIN)/szept.apk
 
 $(BIN)/szept.apk: | $(KEYSTORE)
 	@$(fresh)
-	rm -rf cmd/szept-gui/szept.apk $(APKWORK)
-	cd cmd/szept-gui && \
-		V=$$(sed -n 's/^Version *= *"\(.*\)"/\1/p' FyneApp.toml) && \
-		B=$$(sed -n 's/^Build *= *//p' FyneApp.toml) && \
-		sed -i -e "s/android:versionCode=\"[^\"]*\"/android:versionCode=\"$$B\"/" \
-		       -e "s/android:versionName=\"[^\"]*\"/android:versionName=\"$$V.$$B\"/" AndroidManifest.xml && \
-		echo "szept $$V.$$B (versionCode $$B)" && \
-		ANDROID_HOME=$(ANDROID_HOME) ANDROID_NDK_HOME=$(ANDROID_NDK_HOME) \
-		GOFLAGS=-ldflags=-checklinkname=0 $(FYNE) package --os android
-	# The launcher icon comes back out of fyne's own APK already scaled — no
-	# second copy of Icon.png to keep in sync, and no image tooling in the build.
-	mkdir -p $(APKWORK)/res/mipmap-xxxhdpi
-	unzip -p cmd/szept-gui/szept.apk res/mipmap-xxxhdpi-v4/icon.png \
-		> $(APKWORK)/res/mipmap-xxxhdpi/icon.png
-	$(AAPT2) compile --dir $(APKWORK)/res -o $(APKWORK)/res.zip
-	# android:icon lands here rather than in the source manifest: `fyne package`
-	# refuses to build one that declares the icon by hand.
-	sed -e 's|<application android:label="szept"|&\n\t\tandroid:icon="@mipmap/icon"|' \
-		cmd/szept-gui/AndroidManifest.xml > $(APKWORK)/AndroidManifest.xml
-	$(AAPT2) link -I $(ANDROID_JAR) --manifest $(APKWORK)/AndroidManifest.xml \
-		--min-sdk-version 21 --target-sdk-version 34 \
-		-o $(APKWORK)/res.apk $(APKWORK)/res.zip
-	cd $(APKWORK) && unzip -oq res.apk AndroidManifest.xml resources.arsc 'res/*'
-	zip -qd cmd/szept-gui/szept.apk AndroidManifest.xml resources.arsc 'res/*' 'META-INF/*'
-	# -0 (stored): Android maps resources.arsc straight out of the file, so it has
-	# to stay uncompressed for zipalign to be able to align it at all.
-	cd $(APKWORK) && zip -qX0 $(CURDIR)/cmd/szept-gui/szept.apk \
-		AndroidManifest.xml resources.arsc res/*/*
-	# align first, sign second: apksigner's v2/v3 signatures cover the whole file,
-	# so zipalign afterwards would invalidate them.
-	$(ZIPALIGN) -p -f 4 cmd/szept-gui/szept.apk $@
-	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass pass:$(KS_PASS) --key-pass pass:$(KS_PASS) \
-		--ks-key-alias $(KS_ALIAS) $@
-	rm -rf cmd/szept-gui/szept.apk $@.idsig $(APKWORK)
+	CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC=$(NDK_CC) \
+		go build -buildmode=c-shared -tags production,android -trimpath -buildvcs=false \
+		-ldflags "-s -w -checklinkname=0 $(STAMP)" \
+		-o $(APKHOST)/app/src/main/jniLibs/arm64-v8a/libwails.so $(pkg-szept-wails)
+	cd $(APKHOST) && ANDROID_HOME=$(ANDROID_HOME) \
+		ANDROID_KEYSTORE_FILE=$(KEYSTORE) ANDROID_KEYSTORE_PASSWORD=$(KS_PASS) \
+		ANDROID_KEY_ALIAS=$(KS_ALIAS) ANDROID_KEY_PASSWORD=$(KS_PASS) \
+		./gradlew -q assembleRelease -PszeptVersionCode=$(APK_CODE) -PszeptVersionName=$(or $(VERSION),dev)
+	cp $(APKHOST)/app/build/outputs/apk/release/app-release.apk $@
+	@echo "szept $(or $(VERSION),dev) (versionCode $(APK_CODE)) -> $@"
 
-# Rebuilding the manifest means re-signing, so the APK no longer carries fyne's
-# built-in debug key. One local debug keystore, generated on first use — swapping
-# keys means uninstalling the app on the phone first, so it must stay put.
+# One local signing keystore, generated on first use. Android only accepts an
+# update signed with the key the installed app was signed with, so it must stay
+# put: a new key means uninstalling the app on the phone, and with it the data.
 $(KEYSTORE):
 	keytool -genkeypair -v -keystore $@ -storepass android -keypass android \
 		-alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10950 \

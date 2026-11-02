@@ -281,7 +281,7 @@ Cross builds:
 ```bash
 make connector-windows   # pure Go, no cgo
 make windows             # clients, needs mingw-w64
-make android             # APK, needs Android SDK/NDK + the fyne tool
+make android             # APK (wails), needs Android SDK + NDK 27 and a JDK
                          # release key: KEYSTORE=… KS_PASS=… KS_ALIAS=…
 make release SIGNKEY=~/.ssh/szept_release
                          # reproducible connector for every platform + signed SHA256SUMS
@@ -726,7 +726,7 @@ Budowanie skrośne:
 ```bash
 make connector-windows   # czysty Go, bez cgo
 make windows             # klienci, wymaga mingw-w64
-make android             # APK, wymaga Android SDK/NDK i narzędzia fyne
+make android             # APK (wails), wymaga Android SDK + NDK 27 i JDK
                          # klucz wydania: KEYSTORE=… KS_PASS=… KS_ALIAS=…
 make release SIGNKEY=~/.ssh/szept_release
                          # powtarzalny connector na każdą platformę + podpisane SHA256SUMS

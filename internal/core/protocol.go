@@ -47,6 +47,11 @@ func (c *Core) onPeerUp(p *p2p.Peer) {
 	if r != nil && bytes.Equal(r.Inviter, p.Pub) {
 		p.SendCtrl(Ctrl{T: "redeem", Chat: r.Chat, Secret: r.Secret, Pin: r.Pin, Name: c.ID.Name})
 	}
+	// linked devices: finish a pending link, or catch a sibling up
+	c.sendLink(p)
+	if c.Mine(p.Pub) {
+		c.sendDevices(p)
+	}
 	// announce active calls to the newcomer
 	for _, chat := range inCall {
 		if st, err := c.ChatState(chatOf(chat)); err == nil && st.IsMember(p.Pub) {
@@ -63,7 +68,7 @@ func (c *Core) onPeerUp(p *p2p.Peer) {
 // Strangers admitted during open invite window are only allowed to redeem it —
 // other handlers (keys, sync, blobs) are not for random guests.
 func (c *Core) known(pub []byte) bool {
-	if c.St.IsFriend(pub) {
+	if c.St.IsFriend(pub) || c.Mine(pub) || c.pendingLink(pub) != nil {
 		return true
 	}
 	c.mu.Lock()
@@ -91,7 +96,8 @@ func (c *Core) onCtrl(p *p2p.Peer, data []byte) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return
 	}
-	if m.T != "redeem" && m.T != "hello" && !c.known(p.Pub) {
+	// "link" comes from a new device holding our link code; handleLink checks it
+	if m.T != "redeem" && m.T != "hello" && m.T != "link" && !c.known(p.Pub) {
 		return
 	}
 	switch m.T {
@@ -136,6 +142,14 @@ func (c *Core) onCtrl(p *p2p.Peer, data []byte) {
 		c.handleTyping(p, m)
 	case "ack":
 		c.handleAck(p, m)
+	case "link":
+		c.handleLink(p, m)
+	case "linked":
+		c.handleLinked(p, m)
+	case "devices":
+		c.handleDevices(p, m)
+	case "unlink":
+		c.handleUnlink(p, m)
 	}
 }
 
@@ -167,7 +181,8 @@ func (c *Core) handleSync(p *p2p.Peer, m Ctrl) {
 		c.mu.Unlock()
 		fromInviter := r != nil && bytes.Equal(r.Inviter, p.Pub) && bytes.Equal(r.Chat, m.Chat)
 		// a chat we left comes back only through a new invite
-		if (!c.St.IsFriend(p.Pub) || c.left(m.Chat)) && !fromInviter {
+		// my own other devices introduce chats too (they add me, devices.go)
+		if (!(c.St.IsFriend(p.Pub) || c.Mine(p.Pub)) || c.left(m.Chat)) && !fromInviter {
 			return
 		}
 		if len(m.Chat) != sha256.Size || c.pendingChats() >= maxPendingChats {
@@ -369,6 +384,7 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 		// next 30 s tick (the keys usually arrive before this event does);
 		// announceProfile is a no-op where they are already in place
 		go c.announceProfile()
+		go c.ensureSiblings() // a chat that just took me in takes my other devices too
 	}
 	if e.Kind == event.KindLeave {
 		go c.rekeyAfterLeave(chat)
@@ -391,7 +407,7 @@ func (c *Core) ingest(chat []byte, e *event.Event, from *p2p.Peer) bool {
 	var skip []byte
 	if from != nil {
 		skip = from.Pub
-		if !bytes.Equal(e.Author, c.ID.Pub) {
+		if !c.Mine(e.Author) {
 			from.SendCtrl(Ctrl{T: "ack", Chat: chat, EventID: id, Status: "delivered"})
 		}
 	}
@@ -646,7 +662,7 @@ func (c *Core) handleKeys(p *p2p.Peer, m Ctrl) {
 		r := c.redeem
 		c.mu.Unlock()
 		fromInviter := r != nil && bytes.Equal(r.Inviter, p.Pub) && bytes.Equal(r.Chat, m.Chat)
-		if !c.St.IsFriend(p.Pub) && !fromInviter {
+		if !c.St.IsFriend(p.Pub) && !c.Mine(p.Pub) && !fromInviter {
 			return
 		}
 	}
@@ -819,7 +835,7 @@ func (c *Core) Redeem(code, pin string) error {
 // link ("hello") once connected, and every later change is a signed event.
 func (c *Core) FriendCode() string {
 	blob, _ := json.Marshal(map[string]any{
-		"p": []byte(c.ID.Pub), "u": c.connURL(),
+		"p": c.Account(), "u": c.connURL(), // linked devices hand out the account
 	})
 	return friendPrefix + base64.RawURLEncoding.EncodeToString(blob)
 }
@@ -827,7 +843,7 @@ func (c *Core) FriendCode() string {
 // Befriend adds a chat member as a friend, the same one-sided step a friend
 // code is. The member reached us through our connector, so it goes on file.
 func (c *Core) Befriend(pub []byte, name string) error {
-	if len(pub) != ed25519.PublicKeySize || bytes.Equal(pub, c.ID.Pub) {
+	if len(pub) != ed25519.PublicKeySize || c.Mine(pub) {
 		return errors.New("nie można dodać tej osoby")
 	}
 	if err := c.St.PutFriend(store.Friend{Pub: pub, PeerName: safeName(name), Connector: c.connURL()}); err != nil {
@@ -858,7 +874,7 @@ func (c *Core) AddFriend(code string) (store.Friend, error) {
 	if len(v.P) != ed25519.PublicKeySize {
 		return f, errors.New("uszkodzony kod")
 	}
-	if bytes.Equal(v.P, c.ID.Pub) {
+	if c.Mine(v.P) {
 		return f, errors.New("to twój własny kod")
 	}
 	// v.N: only old codes still carry a name; new ones don't. Until "hello"

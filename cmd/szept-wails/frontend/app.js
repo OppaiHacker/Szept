@@ -4,6 +4,11 @@
 
 import { Call, Events } from "/wails/runtime.js";
 
+// autoFocus is for focus nobody asked for (a dialog opens, a chat loads). On a
+// touch screen it would pop the keyboard up over the page, so it stays off.
+const TOUCH = matchMedia("(pointer: coarse)").matches;
+function autoFocus(el) { if (!TOUCH) el?.focus(); }
+
 const api = (method, ...args) => Call.ByName("main.App." + method, ...args);
 
 /* ============================ theme ============================ */
@@ -18,8 +23,9 @@ let themePref = "dark";
 try { themePref = localStorage.getItem("theme") || "dark"; } catch { /* opaque origin */ }
 
 function applyTheme() {
-  document.documentElement.dataset.theme =
-    themePref === "auto" ? (LIGHT_Q.matches ? "light" : "dark") : themePref;
+  const t = themePref === "auto" ? (LIGHT_Q.matches ? "light" : "dark") : themePref;
+  document.documentElement.dataset.theme = t;
+  window.szeptHost?.setLightBars(t === "light"); // Android: status bar icons follow the theme
 }
 function setTheme(pref) {
   // the whole palette crossfades instead of flashing to the other theme
@@ -315,6 +321,7 @@ const I = {
   star: '<path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.3L12 16l-4.9 2.6 1.1-5.3-4-3.7 5.4-.6L12 4Z"/>',
   heart: '<path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.4a4.3 4.3 0 0 1 7.5 2.4C19.5 15.4 12 20 12 20Z"/>',
   chev: '<path d="m9 6 6 6-6 6"/>',
+  device: '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 17.5h2"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/>',
   trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
   edit: '<path d="M4 20h4l10-10a2.8 2.8 0 1 0-4-4L4 16v4Z"/>',
@@ -357,6 +364,10 @@ const S = {
   full: false,   // that tile also covers the whole screen
   selfMute: false, selfDeaf: false, // how the next call starts
   fpage: false,  // phone: the friends page is open instead of the sidebar
+  tab: "",       // phone: "you" while the Ty tab is open, otherwise the space decides the tab
+  lastGroup: "", // phone: the server the Serwery tab goes back to
+  lastChat: null, // phone: [chat, ch] closed last, a swipe left reopens it
+  mMembers: false, // phone: the member sheet is pulled out over the chat
   ftab: "online",
   showMembers: true,
   collapsed: new Set(),
@@ -448,7 +459,7 @@ function modal({ title, body: bodyHTML, actions = [], wide = false, bare = false
     root._actions = actions;
     onMount?.(box);
     const first = $("input:not([type=radio]):not([type=checkbox]), textarea, select", box);
-    first?.focus();
+    autoFocus(first);
     first?.select?.();
   });
 }
@@ -568,6 +579,9 @@ function profileSwitch(b) {
 
 function renderGate() {
   const b = S.boot;
+  clearInterval(S.linkPoll);
+  if (b.stage === "link") return renderLinkWait();
+  if (b.stage === "setup" && S.gateLink) return renderGateLink();
   const setup = b.stage === "setup";
   const title = setup
     ? (b.profile ? `Nowe konto „${esc(b.profile)}”` : "Pierwsze uruchomienie")
@@ -591,7 +605,7 @@ function renderGate() {
             <p class="hint-text" style="padding:0 16px">Hasło szyfruje klucz i historię rozmów na tym urządzeniu. Możesz je ustawić także później w ustawieniach.</p>
           ` : `
             <div class="field"><label>Hasło</label>
-              <input class="input" id="g-pass" type="password" placeholder="hasło klucza" autofocus></div>
+              <input class="input" id="g-pass" type="password" placeholder="hasło klucza"></div>
           `}
           <p class="hint-text err" id="g-err" hidden></p>
           <div class="btn-row">
@@ -599,6 +613,7 @@ function renderGate() {
               ${setup ? "Zaczynamy" : "Odblokuj"}
             </button>
           </div>
+          ${setup ? `<div class="btn-row"><button class="btn link wide" data-act="gate-link">Mam już konto na innym urządzeniu</button></div>` : ""}
         </div>
         ${profileSwitch(b)}
       </div>
@@ -610,7 +625,62 @@ function renderGate() {
   $("#gate-profile")?.addEventListener("change", async (e) => {
     try { await api("UseProfile", e.target.value); await boot(); } catch (err) { fail(err); }
   });
-  $("#g-name, #g-pass")?.focus();
+  autoFocus($("#g-name, #g-pass"));
+}
+
+// Linked devices (docs/multi-device.md): a new device joins the account of
+// another one by scanning (or pasting) the code that device shows.
+function gateCard(inner) {
+  view.innerHTML = `
+    <div class="gate">
+      <div class="gate-card">
+        <div class="gate-logo">${LOGO}<h1>szept</h1>
+          <p>Szyfrowane rozmowy prosto między urządzeniami</p></div>
+        <div class="panel">${inner}</div>
+      </div>
+    </div>`;
+}
+
+const canScan = () => !!window.szeptHost?.scanQR;
+
+function renderGateLink() {
+  gateCard(`
+    <h3>Połącz z kontem</h3>
+    <p class="hint-text" style="padding:0 16px">Na urządzeniu, na którym już masz szepta, otwórz Ustawienia, potem Urządzenia, i wybierz „Pokaż kod”.</p>
+    ${canScan() ? `<div class="btn-row"><button class="btn wide" data-act="scan-link">${icon("qr")}Skanuj kod QR</button></div>` : ""}
+    <div class="field"><label>Kod łączenia</label>
+      <input class="input mono" id="g-code" placeholder="SZL-…" autocomplete="off" spellcheck="false"></div>
+    <div class="field"><label>Hasło klucza <span style="color:var(--muted);font-weight:400">(zalecane)</span></label>
+      <input class="input" id="g-pass" type="password" placeholder="•••••"></div>
+    <p class="hint-text" style="padding:0 16px">To urządzenie dostanie własny klucz. Nazwa, znajomi i rozmowy przyjdą z konta. Tamto urządzenie musi być w tym czasie włączone.</p>
+    <p class="hint-text err" id="g-err" hidden></p>
+    <div class="btn-row"><button class="btn primary wide" data-act="do-link">Połącz</button></div>
+    <div class="btn-row"><button class="btn link wide" data-act="gate-new">Wróć do zakładania nowego konta</button></div>`);
+  autoFocus($("#g-code"));
+}
+
+function renderLinkWait() {
+  gateCard(`
+    <h3>Czekam na drugie urządzenie</h3>
+    <p class="hint-text" style="padding:0 16px">Szept musi być włączony na urządzeniu, które pokazało kod. Połączenie skończy się samo, zwykle w kilka sekund.</p>
+    <div class="field"><label>Nowy kod, jeśli tamten wygasł</label>
+      <input class="input mono" id="g-code" placeholder="SZL-…" autocomplete="off" spellcheck="false"></div>
+    <p class="hint-text err" id="g-err" hidden></p>
+    <div class="btn-row">
+      ${canScan() ? `<button class="btn" data-act="scan-link">${icon("qr")}Skanuj</button>` : ""}
+      <button class="btn primary" data-act="retry-link">Wyślij ponownie</button></div>`);
+  S.linkPoll = setInterval(async () => {
+    const b = await api("Boot").catch(() => null);
+    if (b && b.stage !== "link") { clearInterval(S.linkPoll); await boot(); }
+  }, 2000);
+}
+
+// Android only: the host's camera scanner answers with a "szept-qr" event.
+function scanQR() {
+  return new Promise((resolve) => {
+    addEventListener("szept-qr", (e) => resolve(e.detail?.text || ""), { once: true });
+    window.szeptHost.scanQR();
+  });
 }
 
 function gateError(msg) {
@@ -637,6 +707,8 @@ function renderShell() {
       </div>
       <section class="conv" id="conv"></section>
       <aside class="members" id="members"></aside>
+      <div class="m-scrim" data-act="members-toggle"></div>
+      <nav class="tabbar" id="tabbar"></nav>
     </div>`;
 }
 
@@ -783,7 +855,7 @@ function paintList() {
   const before = new Map($$(".row[data-chat]", list).map((r) => [r.dataset.chat, r.getBoundingClientRect().top]));
 
   const g = S.space !== "home" && S.snap.chats.find((c) => c.id === S.space);
-  list.innerHTML = g ? groupSide(g) : homeSide();
+  list.innerHTML = g ? groupSide(g) : S.space === "servers" ? noServersSide() : homeSide();
   if (list.dataset.vk !== S.space) appear($(".scroll", list), undefined), list.dataset.vk = S.space;
 
   // home list only: a server's channel rows all share the server's id
@@ -816,6 +888,8 @@ function paintVoice() {
       <button class="icon-btn hang" data-act="hangup" ${id} title="Rozłącz">${icon("hangup")}</button>
     </div>
     <div class="vc-ctl">
+      <button class="ph ${k.mic ? "" : "off"}" data-act="mic" ${id} title="Mikrofon">${icon(k.mic ? "mic" : "micOff")}</button>
+      <button class="ph ${k.deaf ? "off" : ""}" data-act="deaf" ${id} title="Dźwięk">${icon(k.deaf ? "deaf" : "volume")}</button>
       <button class="${k.cam ? "on" : ""}" data-act="cam" ${id} title="Kamera">${icon("cam")}</button>
       <button class="${k.screen ? "on" : ""}" data-act="screen" ${id} title="Ekran">${icon("screen")}</button>
       <button data-act="spatial" ${id} title="Przestrzeń dźwięku">${icon("people")}</button>
@@ -1055,6 +1129,7 @@ function buildConv() {
     if (e.key === "Enter") { e.preventDefault(); searchChat(hs.value); }
     if (e.key === "Escape") { e.stopPropagation(); hs.value = ""; hs.blur(); searchChat(""); }
   });
+  hs.addEventListener("blur", () => { if (!hs.value) $("#shell")?.classList.remove("hs-open"); });
 }
 
 // What a relay operator can and cannot do. Shown when you turn relay-only on,
@@ -1102,6 +1177,7 @@ function updateHead(c) {
         <span class="s">${esc(c.name)} · ${people(c.members.length)}, ${c.online} online${extra ? " · " + extra : ""}</span>`;
   $("#conv-head").innerHTML = `${back}${id}<span class="spacer"></span>
     ${c.call.joined ? "" : `<button class="icon-btn" data-act="join-call" title="Zadzwoń">${icon("phone")}</button>`}
+    <button class="icon-btn hs-btn" data-act="head-search" title="Szukaj">${icon("search")}</button>
     <button class="icon-btn" data-act="pins" title="Przypięte wiadomości">${icon("pin")}</button>
     ${c.direct ? "" : `<button class="icon-btn" data-act="invite" title="Zaproś">${icon("key")}</button>
       <button class="icon-btn ${S.showMembers ? "on" : ""}" data-act="members-toggle" title="Lista członków">${icon("people")}</button>`}
@@ -1220,10 +1296,23 @@ function paintConv(rebuilt) {
   const shell = $("#shell");
   if (!host) return;
 
+  const phone = NARROW_Q.matches;
   if (!c) {
     const home = S.space === "home";
+    if (phone && S.tab === "you") {
+      shell?.classList.add("in-chat", "page");
+      shell?.classList.remove("with-members", "searching", "voice-view");
+      paintYou();
+      return;
+    }
+    shell?.classList.toggle("page", phone && home && S.fpage);
+    // phone: the chat that was open stays in the DOM so it can slide away
+    if (phone && !(home && S.fpage)) {
+      shell?.classList.remove("in-chat", "with-members", "searching", "voice-view");
+      return;
+    }
     shell?.classList.toggle("in-chat", home && S.fpage);
-    shell?.classList.toggle("with-members", home);
+    shell?.classList.toggle("with-members", home && !phone); // "Aktywne teraz" has no room on a phone
     shell?.classList.remove("searching");
     if (home) { paintFriends(); paintActive(); S.builtChat = "friends"; return; }
     if (S.builtChat !== null) { host.innerHTML = welcomeHTML; host.dataset.fsig = ""; host.dataset.vk = ""; S.builtChat = null; appear(host.firstElementChild); }
@@ -1231,7 +1320,8 @@ function paintConv(rebuilt) {
     return;
   }
   shell?.classList.add("in-chat");
-  shell?.classList.toggle("with-members", !c.direct && S.showMembers && !S.voice);
+  shell?.classList.remove("page");
+  shell?.classList.toggle("with-members", !c.direct && (phone ? S.mMembers : S.showMembers) && !S.voice);
   shell?.classList.toggle("searching", !!S.search);
 
   shell?.classList.toggle("voice-view", !!S.voice);
@@ -1923,7 +2013,7 @@ function wireComposer() {
     e.preventDefault();
     setFiles([...S.files, ...files]);
   });
-  input.focus();
+  autoFocus(input);
   setFiles(S.files);
   sync();
 }
@@ -2019,7 +2109,7 @@ function pickFiles() {
   input.onchange = () => {
     setFiles([...S.files, ...input.files]);
     input.remove();
-    $("#input")?.focus();
+    autoFocus($("#input"));
   };
   input.click();
 }
@@ -2280,7 +2370,7 @@ function emojiPicker(anchor, pick) {
       <div class="emoji-body">${all("")}</div></div>`, "top", "emoji-pop");
   if (!el) return;
   const q = $("input", el), b = $(".emoji-body", el);
-  q.focus();
+  autoFocus(q);
   q.addEventListener("input", () => { b.innerHTML = q.value.trim() ? `<div class="emoji-grid">${all(q.value)}</div>` : all(""); });
   q.addEventListener("keydown", (e) => { if (e.key === "Enter") $("[data-e]", b)?.click(); });
   el.addEventListener("click", (e) => {
@@ -2472,6 +2562,7 @@ function setupCrop(box, ratio) {
 const SECTIONS = [
   { g: "Ustawienia użytkownika" },
   { id: "profile", t: "Profil", d: "nazwa status awatar baner opis kod", i: "user" },
+  { id: "devices", t: "Urządzenia", d: "telefon komputer połącz kod qr odłącz", i: "device" },
   { id: "accounts", t: "Konta", d: "profile na tym urządzeniu katalog", i: "people" },
   { id: "security", t: "Hasło i kopia", d: "backup restore hasło", i: "shield" },
   { id: "connector", t: "Connector", d: "serwer spotkań listy ip przekaźnik", i: "server" },
@@ -2487,12 +2578,12 @@ const SECTIONS = [
 
 // Settings float over the app as one big sheet: the chat stays underneath and
 // keeps syncing, so closing it lands exactly where you were.
-async function openSettings(section = "profile") {
+async function openSettings(section = "profile", paged = false) {
   closeModal(null);
   S.screen = "settings";
   S.section = section;
   S.setQ = "";
-  S.setPaged = false;
+  S.setPaged = paged; // on a phone: straight into the section, not the list
   S.settings = await api("Settings");
   renderSettings();
 }
@@ -2643,8 +2734,8 @@ function settingsBody() {
       <div class="block">
         <div class="toggle"><div class="tx"><b>Powiadomienia systemowe</b><span>wiadomości prywatne i wzmianki (@ty, @everyone, @here), gdy nie patrzysz na ten czat</span></div>
           <button class="switch ${s.noNotify ? "" : "on"}" data-act="toggle-notify"></button></div>
-        <div class="toggle"><div class="tx"><b>Automatyczne aktualizacje</b><span>co kilka godzin pyta GitHuba o nową wersję podpisaną kluczem szepta i ją instaluje. Wyłączone: szept nie łączy się z GitHubem sam, sprawdzasz przyciskiem w zakładce O szepcie.</span></div>
-          <button class="switch ${s.noUpdate ? "" : "on"}" data-act="toggle-update"></button></div>
+        ${S.boot?.mobile ? "" : `<div class="toggle"><div class="tx"><b>Automatyczne aktualizacje</b><span>co kilka godzin pyta GitHuba o nową wersję podpisaną kluczem szepta i ją instaluje. Wyłączone: szept nie łączy się z GitHubem sam, sprawdzasz przyciskiem w zakładce O szepcie.</span></div>
+          <button class="switch ${s.noUpdate ? "" : "on"}" data-act="toggle-update"></button></div>`}
       </div>`;
     }
 
@@ -2680,6 +2771,8 @@ function settingsBody() {
           </select></div></div>
         <div class="btn-row"><button class="btn primary" data-act="save-settings">Zapisz</button></div>
       </div>`;
+
+    case "devices": return devicesBody(s);
 
     case "accounts": return `
       <h2>Konta</h2><p class="lead">Każde konto to osobny katalog danych i osobna tożsamość. Przełączenie restartuje aplikację.</p>
@@ -2739,7 +2832,7 @@ function settingsBody() {
         <div class="card-id" style="padding-top:16px;margin-top:0">
           <div class="nm">szept</div>
           <div class="st">wersja ${esc(S.version || "dev")}</div>
-          ${!S.update?.version ? `<div class="btn-row"><button class="btn" data-act="check-update">Sprawdź aktualizacje</button></div>`
+          ${S.boot?.mobile ? "" : !S.update?.version ? `<div class="btn-row"><button class="btn" data-act="check-update">Sprawdź aktualizacje</button></div>`
             : S.update.installed
             ? `<div class="st">${esc(S.update.version)} zainstalowana, działa od następnego uruchomienia</div>
                <div class="btn-row"><button class="btn primary" data-act="restart-app">Uruchom ponownie</button></div>`
@@ -2817,9 +2910,39 @@ function fxEditor(me) {
     </div>`;
 }
 
+function devicesBody(s) {
+  const when = (ts) => ts ? "połączone " + new Date(ts * 1000).toLocaleDateString("pl-PL") : "";
+  const rows = (s.devices || []).map((d) => `<div class="list-line">
+      <span class="dev"><b>${esc(d.name || "Urządzenie")}</b><span class="mono">${esc(d.pub.slice(0, 16))}</span><span>${esc(when(d.ts))}</span></span>
+      <span class="tag">${d.me ? "to urządzenie" : d.online ? "online" : "offline"}</span>
+      ${!s.linked && !d.me ? `<button class="btn ghost" data-act="unlink" data-pub="${d.pub}" data-name="${esc(d.name)}">Odłącz</button>` : ""}
+    </div>`).join("");
+  const code = S.linkCode;
+  return `
+    <h2>Urządzenia</h2>
+    <p class="lead">${s.linked
+      ? "To urządzenie należy do konta z pierwszego urządzenia. Nowe urządzenia łączy się i odłącza tam."
+      : "Jedno konto na kilku urządzeniach naraz. Każde ma własny klucz, a znajomi widzą jedną osobę."}</p>
+    <div class="block"><h4>Twoje urządzenia</h4>${rows}</div>
+    ${s.linked ? "" : `<div class="block">
+      <h4>Połącz nowe urządzenie</h4>
+      ${code ? `
+        <img class="qr" src="${code.qr}" alt="Kod QR łączenia urządzenia">
+        <div class="code-box">${esc(code.code)}</div>
+        <p class="hint-text">Na nowym urządzeniu wybierz „Mam już konto na innym urządzeniu” i zeskanuj kod. Działa raz, przez 10 minut. Kto go zeskanuje, dostanie dostęp do twoich rozmów, więc nie pokazuj go nikomu.</p>
+        <div class="btn-row">
+          <button class="btn" data-act="copy" data-text="${esc(code.code)}">${icon("copy")}Kopiuj</button>
+          <button class="btn ghost" data-act="link-new">Nowy kod</button></div>`
+      : `
+        <p class="hint-text">Pokaże kod QR do zeskanowania na telefonie albo do wklejenia na drugim komputerze.</p>
+        <div class="btn-row"><button class="btn primary" data-act="link-new">${icon("qr")}Pokaż kod</button></div>`}
+    </div>`}`;
+}
+
+const PHONE_OFF = new Set(["accounts", "bots"]);
 function setNav() {
   const q = S.setQ.toLowerCase();
-  const hit = (x) => !q || (x.t + " " + x.d).toLowerCase().includes(q);
+  const hit = (x) => (!q || (x.t + " " + x.d).toLowerCase().includes(q)) && !(S.boot?.mobile && PHONE_OFF.has(x.id));
   return SECTIONS.map((x, i) => {
     if ("g" in x) {
       const any = SECTIONS.slice(i + 1).find((y) => "g" in y || hit(y));
@@ -2916,6 +3039,7 @@ let meterTimer = 0;
 async function micTest(on) {
   clearInterval(meterTimer);
   S.micTest = on;
+  if (on && !(await micOK())) { S.micTest = false; return renderSettings(); }
   try { await api("MicTest", on); } catch (e) { S.micTest = false; fail(e); }
   if (S.screen === "settings") renderSettings();
   if (!S.micTest) return;
@@ -2955,11 +3079,205 @@ function applyAccent(hex) {
   css.setProperty("--accent-fill", pale ? "#" + clean : `color-mix(in oklab, #${clean} 82%, #000)`);
 }
 
+/* ============================ phone ============================ */
+
+// The phone works like Discord's app: four tabs at the bottom, a chat that
+// slides in over the list and can be pushed back with a thumb, the member list
+// as a sheet from the right. NARROW_Q decides the layout (a narrow desktop
+// window gets it too); S.boot.mobile marks the Android build itself.
+
+function curTab() {
+  if (S.tab === "you") return "you";
+  if (S.space !== "home") return "servers";
+  return S.fpage ? "friends" : "dms";
+}
+
+function goTab(t) {
+  S.tab = t === "you" ? "you" : "";
+  if (t === "servers") {
+    const g = S.snap.chats.find((c) => c.id === S.lastGroup && !c.direct) || S.snap.chats.find((c) => !c.direct);
+    return leaveChat({ space: g ? g.id : "servers", fpage: false });
+  }
+  leaveChat(t === "you" ? { fpage: false } : { space: "home", fpage: t === "friends" });
+}
+
+function paintTabbar() {
+  const host = $("#tabbar");
+  if (!host) return;
+  const me = S.snap.me, t = curTab();
+  $("#shell").dataset.tab = t;
+  const dms = S.snap.chats.reduce((n, c) => n + (c.direct ? c.unread : 0), 0);
+  const groups = S.snap.chats.reduce((n, c) => n + (c.direct ? 0 : c.unread), 0);
+  const online = S.snap.friends.filter((f) => f.online).length;
+  const sig = JSON.stringify([t, dms, groups, online, me.avatar, me.name, me.connUp]);
+  if (host.dataset.sig === sig) return;
+  host.dataset.sig = sig;
+  const tab = (id, label, ico, n = 0) => `<button class="tab ${t === id ? "on" : ""}" data-act="tab" data-tab="${id}" aria-current="${t === id ? "page" : "false"}">
+      <span class="tab-ico">${ico}${n ? `<span class="pip">${count(n)}</span>` : ""}</span><span class="tab-t">${label}</span></button>`;
+  host.innerHTML = tab("servers", "Serwery", LOGO, groups) + tab("dms", "Wiadomości", icon("chat"), dms)
+    + tab("friends", "Znajomi", icon("people")) + tab("you", "Ty", presenceAvatar(me.avatar, me.name, me.pub, me.connUp, "xs"));
+}
+
+function noServersSide() {
+  return `<div class="pane-head"><h2>Serwery</h2></div>
+    <div class="scroll"><div class="empty"><i class="empty-ico">${icon("server")}</i><strong>Nie jesteś jeszcze w żadnej grupie</strong>
+      Załóż własną albo wejdź z zaproszenia, które ktoś ci wysłał.
+      <div class="btn-row"><button class="btn primary" data-act="new-group">Nowa grupa</button>
+        <button class="btn ghost" data-act="join">Mam zaproszenie</button></div></div></div>`;
+}
+
+// The Ty tab: who you are on this device and the way into everything else.
+function paintYou() {
+  const host = $("#conv");
+  const me = S.snap.me;
+  const conn = me.connErr ? "brak połączenia z connectorem" : me.connUp ? "połączony z " + me.connector : "łączenie z connectorem…";
+  const sig = JSON.stringify([me, conn]);
+  if (S.builtChat === "you" && host.dataset.fsig === sig) return;
+  const fresh = S.builtChat !== "you";
+  S.builtChat = "you";
+  host.dataset.fsig = sig;
+  const row = (act, label, ic, sub = "", extra = "") => `<button class="you-row" data-act="${act}" ${extra}>${icon(ic)}
+      <span class="nm"><b>${esc(label)}</b>${sub ? `<span>${esc(sub)}</span>` : ""}</span>${icon("chev", "go")}</button>`;
+  host.innerHTML = `<div class="you scroll">
+      <div class="card-banner own" data-act="edit-banner" style="--tone:${tint(me.pub)};${me.banner ? `background-image:url('${esc(me.banner)}')` : ""}"></div>
+      <div class="card-id">
+        <button data-act="edit-avatar">${presenceAvatar(me.avatar, me.name, me.pub, me.connUp, "xl")}</button>
+        <div class="nm"${nameFx(me.pub)}>${esc(me.name)}</div>
+        <div class="st">${esc(me.status || "bez statusu")}</div>
+        <div class="btn-row"><button class="btn" data-act="edit-status">${icon("smile")}Ustaw status</button>
+          <button class="btn ghost" data-act="settings" data-section="profile">${icon("edit")}Edytuj profil</button></div>
+      </div>
+      <div class="you-sec">${keyBlock(me.pub)}</div>
+      <div class="you-list">
+        ${row("my-code", "Twój kod", "qr", me.code)}
+        ${row("settings", "Urządzenia", "device", "połącz komputer albo drugi telefon", `data-section="devices"`)}
+        ${row("settings", "Connector", "server", conn, `data-section="connector"`)}
+        ${row("settings", "Głos", "volume", "mikrofon, głośnik, powiadomienia", `data-section="voice"`)}
+        ${row("settings", "Wygląd", "palette", "motyw i kolor", `data-section="look"`)}
+        ${row("settings", "Hasło i kopia", "shield", "", `data-section="security"`)}
+        ${row("settings", "Wszystkie ustawienia", "gear")}
+      </div>
+    </div>`;
+  if (fresh) appear(host.firstElementChild);
+}
+
+// micOK: voice runs in Go, so Android's microphone permission has to be
+// asked for by the host before the first call. Desktop: always yes.
+async function micOK() {
+  const h = window.szeptHost;
+  if (!h || h.micGranted()) return true;
+  const got = new Promise((r) => addEventListener("szept-mic", (e) => r(e.detail), { once: true }));
+  h.askMic();
+  if (await got) return true;
+  toast("Bez dostępu do mikrofonu rozmowa nie ruszy. Zezwól na niego w ustawieniach systemu, w uprawnieniach szepta.", "err");
+  return false;
+}
+
+// exported: a file Go wrote. On Android it sits in the sandbox until the host
+// moves it to Downloads; on the desktop it is already where the user chose.
+function exported(path, mime = "") {
+  const h = window.szeptHost;
+  if (!h) return toast("Zapisane: " + path, "ok");
+  const where = h.exportFile(path, mime);
+  toast(where ? "Zapisane w " + where : "Nie udało się zapisać pliku w Pobranych", where ? "ok" : "err");
+}
+
+// Android draws the app under the status and navigation bars; the host
+// reports how much of the screen they cover.
+function applyInsets(i) {
+  if (!i) return;
+  const st = document.documentElement.style;
+  for (const k of ["top", "bottom", "left", "right"]) st.setProperty("--sa-" + k, (i[k] || 0) + "px");
+}
+if (window.szeptHost) {
+  document.documentElement.classList.add("mobile");
+  try { applyInsets(JSON.parse(window.szeptHost.insets())); } catch { /* defaults stay 0 */ }
+  addEventListener("szept-insets", (e) => applyInsets(e.detail));
+}
+
+// The system back button walks back through what is open, the way the
+// Discord app does; at the top it returns false and the host hides the app.
+window.szeptBack = () => {
+  if (popClose) return popClose(), true;
+  if ($(".lightbox")) return closeLightbox(), true;
+  if ($("#modal-root").innerHTML) return closeModal(null), true;
+  if (S.screen === "settings") {
+    if (S.setPaged && NARROW_Q.matches) { if (!holdUnsaved()) { S.setPaged = false; renderSettings(); } }
+    else closeSettings();
+    return true;
+  }
+  if (S.focus) return setFocus(S.full ? S.focus : null), true;
+  if (S.mMembers) { S.mMembers = false; paint(); return true; }
+  if (S.search) { HANDLERS["search-close"](); return true; }
+  if (S.chat || S.voice) { closeChatPhone(); return true; }
+  if (S.stage === "ready" && curTab() !== "servers") { goTab("servers"); return true; }
+  return false;
+};
+
+// closeChatPhone lets the chat slide out at once; the repaint that follows
+// leaveChat only confirms it.
+function closeChatPhone() {
+  const shell = $("#shell");
+  shell?.classList.remove("in-chat", "with-members");
+  HANDLERS.back();
+}
+
+// Swipes, phone only. In a chat: right drags it away to the list, left pulls
+// the member sheet. On the list: left brings the last chat back. The axis is
+// locked after 10px so a vertical scroll never turns into a swipe.
+(() => {
+  let x0 = 0, y0 = 0, t0 = 0, dx = 0, axis = null, mode = null, pane = null;
+  const busy = () => S.screen !== "app" || popClose || $("#modal-root").innerHTML || $(".lightbox");
+  document.addEventListener("touchstart", (e) => {
+    mode = null;
+    const shell = $("#shell");
+    if (!NARROW_Q.matches || !shell || e.touches.length !== 1 || busy()) return;
+    if (e.target.closest("input[type=range], textarea, .vtiles, .crop-stage, pre, .tabs, .menu-reacts")) return;
+    const t = e.touches[0];
+    x0 = t.clientX; y0 = t.clientY; t0 = e.timeStamp; dx = 0; axis = null;
+    const inChat = shell.classList.contains("in-chat") && !shell.classList.contains("page");
+    mode = shell.classList.contains("with-members") ? "members" : inChat ? "chat" : !shell.classList.contains("in-chat") && S.lastChat ? "list" : null;
+    pane = mode === "chat" ? $("#conv") : mode === "members" ? $("#members") : null;
+  }, { passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (!mode) return;
+    const t = e.touches[0];
+    dx = t.clientX - x0;
+    const dy = t.clientY - y0;
+    if (!axis) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      axis = Math.abs(dx) > Math.abs(dy) * 1.2 ? "x" : "y";
+      if (axis === "x" && pane) pane.style.transition = "none";
+    }
+    if (axis !== "x" || !pane || dx <= 0) return;
+    pane.style.transform = `translateX(${dx}px)`;
+  }, { passive: true });
+  const end = (e) => {
+    if (!mode || axis !== "x") { mode = null; return; }
+    const v = dx / Math.max(1, e.timeStamp - t0); // px per ms
+    const far = (w) => dx > w * 0.33 || (v > 0.45 && dx > 40);
+    const back = (el) => { if (el) { el.style.transition = ""; el.style.transform = ""; } };
+    if (mode === "chat" && far(pane.offsetWidth)) { closeChatPhone(); back(pane); }
+    else if (mode === "members" && far(pane.offsetWidth)) { back(pane); S.mMembers = false; paint(); }
+    else {
+      back(pane);
+      if (dx < -60 || v < -0.45) {
+        if (mode === "chat" && S.conv && !S.conv.direct && !S.voice) { S.mMembers = true; paint(); }
+        if (mode === "list" && S.lastChat && S.snap.chats.some((c) => c.id === S.lastChat[0])) openChat(...S.lastChat);
+      }
+    }
+    mode = null;
+  };
+  document.addEventListener("touchend", end);
+  document.addEventListener("touchcancel", end);
+})();
+
 /* ============================ actions ============================ */
 
 // leaveChat closes the open chat and lands on a sidebar or the friends page.
 function leaveChat(to) {
-  Object.assign(S, { chat: "", ch: "", voice: null, search: null, filter: "" }, to);
+  if (S.chat) S.lastChat = [S.chat, S.ch];
+  Object.assign(S, { chat: "", ch: "", voice: null, search: null, filter: "", mMembers: false }, to);
   if (S.focus) setFocus(null);
   api("Open", "").catch(() => {});
   refresh();
@@ -2990,7 +3308,7 @@ async function openChat(id, ch) {
   S.msgSig = "";
   await api("Open", id);
   await refresh();
-  $("#input")?.focus();
+  autoFocus($("#input"));
 }
 
 // afterEdit: a profile change is not pushed by core.Subscribe fast enough to
@@ -3099,6 +3417,11 @@ function paintStatus() {
     ? "Brak połączenia z connectorem"
     : me.connUp ? "połączony · " + (me.connVer ? me.connVer + " · " : "") + me.connector : "łączenie z connectorem…";
   bar.title = me.connErr || "";
+  // Android has no title bar: a strip over the top says the same while it is not connected
+  const strip = $("#conn-strip");
+  strip.hidden = state === "up";
+  strip.dataset.state = state;
+  strip.lastChild.textContent = me.connErr ? "Brak połączenia z connectorem" : "Łączenie z connectorem…";
   $("#tb-sub").textContent = me.profile ? "· " + me.profile : "";
   paintUserbar(me, state);
 }
@@ -3136,8 +3459,14 @@ function paint() {
   // (left the group) falls back home
   const cur = S.snap.chats.find((c) => c.id === S.chat);
   if (cur) S.space = cur.direct ? "home" : cur.id;
-  else if (S.space !== "home" && !S.snap.chats.some((c) => c.id === S.space)) S.space = "home";
+  else if (S.space !== "home" && S.space !== "servers" && !S.snap.chats.some((c) => c.id === S.space)) S.space = "home";
+  if (S.space === "servers") { // phone: the Serwery tab opens on a server as soon as there is one
+    const g = S.snap.chats.find((c) => !c.direct);
+    if (g) S.space = g.id;
+  }
+  if (S.space !== "home" && S.space !== "servers") S.lastGroup = S.space;
   paintRail();
+  paintTabbar();
   paintVoice();
 
   const listSig = JSON.stringify([S.space, S.filter, S.chat, S.ch, S.voice, S.snap.chats, S.snap.friends, [...S.collapsed],
@@ -3198,6 +3527,40 @@ const HANDLERS = {
       await boot();
     } catch (e) { gateError(errText(e)); }
   },
+  "gate-link": () => { S.gateLink = true; renderGate(); },
+  "gate-new": () => { S.gateLink = false; renderGate(); },
+  "scan-link": async () => {
+    const text = await scanQR();
+    if (text) $("#g-code").value = text;
+  },
+  "do-link": async () => {
+    const code = $("#g-code").value.trim(), pass = $("#g-pass").value;
+    if (!code) return gateError("Wklej albo zeskanuj kod z drugiego urządzenia.");
+    if (!pass && !(await confirmBox("Bez hasła?",
+      "Hasło szyfruje klucz tożsamości i historię rozmów zapisane na tym urządzeniu. Bez niego są przechowywane bez szyfrowania. Kontynuować bez hasła?"))) {
+      $("#g-pass").focus();
+      return;
+    }
+    try { await api("LinkSetup", code, pass); await boot(); } catch (e) { gateError(errText(e)); }
+  },
+  "retry-link": async () => {
+    const code = $("#g-code").value.trim();
+    if (!code) return gateError("Wklej nowy kod z drugiego urządzenia.");
+    try { await api("RetryLink", code); toast("Wysłano. Czekam na odpowiedź.", "ok"); } catch (e) { gateError(errText(e)); }
+  },
+  "link-new": async () => {
+    try { S.linkCode = await api("NewLinkCode"); renderSettings(); } catch (e) { fail(e); }
+  },
+  unlink: async (el) => {
+    if (!await confirmBox(`Odłączyć „${el.dataset.name || "urządzenie"}”?`,
+      "Urządzenie wypadnie ze wszystkich rozmów, a klucze rozmów się zmienią, więc nie przeczyta nic nowego. W grupach innych osób stanie się to, gdy ich właściciel będzie online. To, co już jest zapisane na tamtym urządzeniu, tam zostaje.")) return;
+    try {
+      await api("Unlink", el.dataset.pub);
+      S.settings = await api("Settings");
+      renderSettings();
+      toast("Odłączono.", "ok");
+    } catch (e) { fail(e); }
+  },
   "do-unlock": async () => {
     try { await api("Unlock", $("#g-pass").value); await boot(); }
     catch (e) { gateError(errText(e)); }
@@ -3224,7 +3587,7 @@ const HANDLERS = {
   },
   friends: () => leaveChat({ space: "home", fpage: true }),
   back: () => leaveChat({ fpage: false }),
-  ftab: (el) => { S.ftab = el.dataset.v; paint(); $("#fr-code")?.focus(); },
+  ftab: (el) => { S.ftab = el.dataset.v; paint(); autoFocus($("#fr-code")); },
   "fr-add": async () => {
     const code = $("#fr-code").value.trim();
     if (!code) return $("#fr-code").focus();
@@ -3235,7 +3598,12 @@ const HANDLERS = {
     S.collapsed.has(id) ? S.collapsed.delete(id) : S.collapsed.add(id);
     el.closest(".cat").classList.toggle("shut"); // fold now, the repaint just agrees
   },
-  "members-toggle": () => { S.showMembers = !S.showMembers; paint(); },
+  "members-toggle": () => {
+    if (NARROW_Q.matches) S.mMembers = !S.mMembers; else S.showMembers = !S.showMembers;
+    paint();
+  },
+  tab: (el) => goTab(el.dataset.tab),
+  "head-search": () => { $("#shell")?.classList.add("hs-open"); $("#hs")?.focus(); },
   "g-menu": async (el) => {
     if (S.chat !== S.space) await openChat(S.space);
     chatMenu($(".g-head") || el);
@@ -3255,7 +3623,7 @@ const HANDLERS = {
     $("#unsaved").classList.remove("show");
     b?.click();
   },
-  settings: (el) => openSettings(el.dataset.section || "profile"),
+  settings: (el) => openSettings(el.dataset.section || "profile", !!el.dataset.section),
   "close-settings": () => closeSettings(),
   section: (el) => { if (holdUnsaved()) return; S.section = el.dataset.id; S.setPaged = true; renderSettings(); },
   "set-back": () => { S.setPaged = false; renderSettings(); },
@@ -3377,7 +3745,7 @@ const HANDLERS = {
   save: async (el) => {
     try {
       const p = await api("SaveAs", el.dataset.blob, el.dataset.name);
-      if (p) toast("Zapisane: " + p, "ok");
+      if (p) exported(p, el.dataset.mime);
     } catch (e) { fail(e); }
   },
   attach: () => pickFiles(),
@@ -3391,6 +3759,7 @@ const HANDLERS = {
     const key = el.dataset.chat + el.dataset.ch;
     const g = S.snap.chats.find((c) => c.id === el.dataset.chat);
     if (g?.callKey !== key) {
+      if (!(await micOK())) return;
       await act("JoinCall", key);
       reapplyPeers();
       if (S.selfMute) await act("ToggleMic", key);
@@ -3562,7 +3931,7 @@ const HANDLERS = {
     } catch (e) { fail(e); }
   },
   backup: async () => {
-    try { const p = await api("Backup"); if (p) toast("Kopia zapisana: " + p, "ok"); } catch (e) { fail(e); }
+    try { const p = await api("Backup"); if (p) exported(p, "application/zip"); } catch (e) { fail(e); }
   },
   restore: async () => {
     try {
@@ -3697,12 +4066,14 @@ function spatialDialog() {
 
 async function boot() {
   S.boot = await api("Boot");
+  document.documentElement.classList.toggle("mobile", !!S.boot.mobile);
   S.version = await api("Version");
   $("#tb-ver").textContent = S.version;
   applyAccent(S.boot.accent);
   if (S.boot.stage === "ready") {
     S.stage = "ready";
     S.update = await api("Update");
+    if (NARROW_Q.matches) S.space = "servers"; // the phone starts on Serwery, like Discord
     renderShell();
     await refresh();
   } else {
@@ -3725,10 +4096,23 @@ Events.On("files-dropped", async (e) => {
     try { got.push(dataURLFile(await api("ReadDropped", p), p.split(/[\\/]/).pop())); } catch (err) { fail(err); }
   }
   setFiles([...S.files, ...got]);
-  $("#input")?.focus();
+  autoFocus($("#input"));
 });
 
-Events.On("sync", () => { if (S.stage === "ready") refresh(); });
+Events.On("sync", async () => {
+  if (S.stage !== "ready") return;
+  refresh();
+  // the device list changes when a device links in or comes online
+  if (S.screen === "settings" && S.section === "devices") {
+    const s = await api("Settings").catch(() => null);
+    if (!s) return;
+    const sig = (x) => JSON.stringify(x.devices);
+    if (sig(s) === sig(S.settings)) return;
+    if ((s.devices || []).length > (S.settings.devices || []).length) S.linkCode = null; // the code was used
+    S.settings = s;
+    $("#set-wrap").innerHTML = settingsBody();
+  }
+});
 
 let callRaf = 0;
 Events.On("frame", (e) => {

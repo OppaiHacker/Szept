@@ -102,6 +102,12 @@ type Ctrl struct {
 	Idx   int    `json:"idx,omitempty"`
 	Total int    `json:"total,omitempty"`
 	Need  []int  `json:"need,omitempty"` // blobreq: only these parts (resume)
+
+	// linked devices (devices.go)
+	Link    []byte         `json:"link,omitempty"`    // link: device signature; linked: the proof
+	Devs    []Device       `json:"devs,omitempty"`    // linked/devices: the account's device list
+	Friends []store.Friend `json:"friends,omitempty"` // linked: the account's friends
+	Pub     []byte         `json:"pub,omitempty"`     // unlink: the device to remove
 }
 
 type pendingRedeem struct {
@@ -133,6 +139,11 @@ type Core struct {
 	folders    map[string]*event.Folder      // chatKey -> fold behind states (see checkout)
 	foldGen    map[string]uint64
 	redeem     *pendingRedeem
+	devMu      sync.Mutex   // guards the four below; never held while calling out
+	acct       []byte       // account this device belongs to (devices.go)
+	devs       []Device     // the account's linked devices
+	linkOffer  *linkOffer   // account: open link code
+	linkReq    *linkRequest // new device: waiting for the account
 	calls      map[string]*Call
 	chanSel    map[string][]byte // chat -> channel picked with SetChannel
 	stopTest   func()            // microphone test in the settings
@@ -202,6 +213,7 @@ func Open(cfg Config, id *identity.Identity) (*Core, error) {
 	conn.OnUp = func() { c.connectAll(); c.Notify() }
 	conn.OnDown = c.Notify
 	c.cleanTempDir() // plaintext a crash left behind
+	c.loadDevices()
 	return c, nil
 }
 
@@ -272,6 +284,8 @@ func (c *Core) Start() {
 			c.connectAll()
 			c.retryWants(false)
 			c.announceProfile() // chats where profile hasn't arrived yet
+			c.ensureSiblings()
+			c.enforceUnlinks()
 		}
 	}()
 }
@@ -310,7 +324,7 @@ func (c *Core) Notify() {
 // ---- trust boundary ----
 
 func (c *Core) acceptPeer(pub, ticket []byte) bool {
-	if c.St.IsFriend(pub) {
+	if c.St.IsFriend(pub) || c.Mine(pub) || c.pendingLink(pub) != nil {
 		return true
 	}
 	c.mu.Lock()
@@ -329,11 +343,16 @@ func (c *Core) acceptPeer(pub, ticket []byte) bool {
 	// so the offer carries the hash of the invite secret. Without it a
 	// stranger gets nothing, not even our ICE candidates (IP). Secret+PIN
 	// still gate membership in handleRedeem.
-	return len(ticket) == sha256.Size && c.St.InviteOpen(ticket)
+	// the same for a new device holding our link code (devices.go)
+	return len(ticket) == sha256.Size && (c.St.InviteOpen(ticket) || c.linkTicket(ticket))
 }
 
 // inviteTicket: offers to the inviter of a pending redeem carry the secret hash.
 func (c *Core) inviteTicket(pub []byte) []byte {
+	if r := c.pendingLink(pub); r != nil {
+		h := sha256.Sum256(r.Secret)
+		return h[:]
+	}
 	c.mu.Lock()
 	r := c.redeem
 	c.mu.Unlock()
@@ -512,6 +531,8 @@ type ChatInfo struct {
 	Icon, Banner []byte
 	Style        string
 	NoHistory    bool // members added now do not see earlier messages
+	// Devices: person pub -> their other devices in this chat (see person)
+	Devices map[string][][]byte
 }
 
 // directPeer: the other person of a 1:1 chat (unnamed, two members), else nil.
@@ -519,17 +540,25 @@ func (c *Core) directPeer(st *event.State) []byte {
 	if st.Name != "" {
 		return nil
 	}
+	// people, not devices: my devices count as me, a linked device as its
+	// account (see devices.go)
 	var other []byte
-	n := 0
+	me := false
 	for _, m := range st.Members {
-		if !m.Removed {
-			n++
-			if !bytes.Equal(m.Pub, c.ID.Pub) {
-				other = m.Pub
-			}
+		if m.Removed {
+			continue
+		}
+		p := c.person(st, m.Pub)
+		switch {
+		case c.Mine(p):
+			me = true
+		case other == nil:
+			other = p
+		case !bytes.Equal(other, p):
+			return nil // a third person
 		}
 	}
-	if n != 2 {
+	if !me {
 		return nil
 	}
 	return other
@@ -583,17 +612,31 @@ func (c *Core) Chats() []ChatInfo {
 		}
 		ci := ChatInfo{ID: id, Name: c.displayName(st), Owner: st.Owner, Epoch: st.Epoch, Channels: st.Channels,
 			Icon: st.Icon, Banner: st.Banner, Style: st.Style, NoHistory: st.NoHistory}
+		online := map[string]bool{}
 		for _, m := range st.Members {
 			if m.Removed {
 				continue
 			}
+			p := c.person(st, m.Pub)
+			if !c.Mine(m.Pub) && c.P2P.Peer(m.Pub) != nil {
+				online[string(p)] = true
+			}
+			// a person's devices show as one member: the account's entry, or
+			// this device's own when the account is not in the chat
+			if !bytes.Equal(p, m.Pub) {
+				if ci.Devices == nil {
+					ci.Devices = map[string][][]byte{}
+				}
+				ci.Devices[string(p)] = append(ci.Devices[string(p)], m.Pub)
+				if st.IsMember(p) {
+					continue
+				}
+			}
 			mem := *m
 			mem.Name = safeName(mem.Name)
 			ci.Members = append(ci.Members, mem)
-			if !bytes.Equal(m.Pub, c.ID.Pub) && c.P2P.Peer(m.Pub) != nil {
-				ci.Online++
-			}
 		}
+		ci.Online = len(online)
 		ci.Direct = c.directPeer(st) != nil
 		sort.Slice(ci.Members, func(i, j int) bool { return ci.Members[i].Name < ci.Members[j].Name })
 		c.mu.Lock()
@@ -635,8 +678,10 @@ func (c *Core) displayName(st *event.State) string {
 		return safeName(st.Name)
 	}
 	var others []string
+	seen := map[string]bool{}
 	for _, m := range st.Members {
-		if !m.Removed && !bytes.Equal(m.Pub, c.ID.Pub) {
+		if p := c.person(st, m.Pub); !m.Removed && !c.Mine(m.Pub) && !seen[string(p)] {
+			seen[string(p)] = true
 			others = append(others, c.memberName(st, m.Pub))
 		}
 	}
@@ -650,10 +695,16 @@ func (c *Core) displayName(st *event.State) string {
 func (c *Core) PeerName(pub []byte) string { return c.memberName(nil, pub) }
 
 func (c *Core) memberName(st *event.State, pub []byte) string {
-	if bytes.Equal(pub, c.ID.Pub) {
+	if c.Mine(pub) {
 		return c.ID.Name
 	}
 	if st != nil {
+		// a linked device goes by its account's name where the account is in
+		if m, ok := st.Members[string(pub)]; ok && m.Of != nil {
+			if a, ok := st.Members[string(m.Of)]; ok && a.Name != "" {
+				return safeName(a.Name)
+			}
+		}
 		if m, ok := st.Members[string(pub)]; ok && m.Name != "" {
 			return safeName(m.Name)
 		}
@@ -726,6 +777,7 @@ func (c *Core) NickHistory(pub []byte) []NickEntry {
 
 type Msg struct {
 	ID        []byte // event ID — key for "hide locally"
+	Who       []byte // the person: Author, or its account for a linked device
 	Author    []byte
 	Name      string
 	Text      string
@@ -792,7 +844,7 @@ func (c *Core) messages(chat []byte) []Msg {
 			continue
 		}
 		name := c.memberName(st, e.Author)
-		m := Msg{ID: id, Author: e.Author, Name: name, TS: time.Unix(b.TS, 0), Ch: b.Ch}
+		m := Msg{ID: id, Author: e.Author, Who: c.person(st, e.Author), Name: name, TS: time.Unix(b.TS, 0), Ch: b.Ch}
 		switch e.Kind {
 		case event.KindMsg:
 			m.Kind, m.Text, m.Reply = "msg", safeText(b.Text), b.Target
@@ -829,7 +881,7 @@ func (c *Core) messages(chat []byte) []Msg {
 		if st.Reactions != nil && st.Reactions[string(id)] != nil {
 			m.Reactions = st.Reactions[string(id)]
 		}
-		if bytes.Equal(e.Author, c.ID.Pub) {
+		if c.Mine(e.Author) {
 			m.ACK = c.AckStatus(id)
 		}
 		out = append(out, m)
@@ -846,7 +898,7 @@ func (c *Core) SendTyping(chat []byte, active bool) {
 		return
 	}
 	for _, m := range st.Members {
-		if !m.Removed && !bytes.Equal(m.Pub, c.ID.Pub) {
+		if !m.Removed && !c.Mine(m.Pub) {
 			if p := c.P2P.Peer(m.Pub); p != nil {
 				p.SendCtrl(Ctrl{T: "typing", Chat: chat, Typing: active})
 			}
@@ -921,7 +973,7 @@ func (c *Core) MarkChatRead(chat []byte) {
 			continue
 		}
 		for _, e := range evs {
-			if !bytes.Equal(e.Author, c.ID.Pub) {
+			if !c.Mine(e.Author) {
 				c.SendAck(t, e.ID(), "read")
 			}
 		}
@@ -1008,6 +1060,7 @@ func (c *Core) SetNick(name string) error {
 		return err
 	}
 	c.ID.Name = name
+	go c.pushDevices()
 	var lastErr error
 	for idStr := range c.chatIDs() {
 		chat := []byte(idStr)
@@ -1015,7 +1068,7 @@ func (c *Core) SetNick(name string) error {
 			continue
 		}
 		if _, err := c.appendEvent(chat, event.KindNick,
-			event.Body{Name: name, TS: time.Now().Unix()}); err != nil {
+			event.Body{Name: name, Link: c.St.Meta(proofKey), TS: time.Now().Unix()}); err != nil {
 			lastErr = err
 		}
 	}
@@ -1054,9 +1107,10 @@ func (c *Core) announceProfile() {
 		if me.Status != av.Status || me.Bio != av.Bio || me.Style != av.Style || !bytes.Equal(me.Banner, av.Banner) {
 			c.appendEvent(chat, event.KindProfile, cardBody(av))
 		}
-		if nick != "" && me.Name != nick {
+		proof := c.St.Meta(proofKey)
+		if nick != "" && (me.Name != nick || (c.Linked() && me.Of == nil)) {
 			c.appendEvent(chat, event.KindNick,
-				event.Body{Name: nick, TS: time.Now().Unix()})
+				event.Body{Name: nick, Link: proof, TS: time.Now().Unix()})
 		}
 	}
 }
@@ -1166,8 +1220,34 @@ func (c *Core) CreateDirect(friend store.Friend) ([]byte, error) {
 	if _, err := c.appendEvent(chat, event.KindAdd, event.Body{Pub: friend.Pub, Name: name, TS: time.Now().Unix()}); err != nil {
 		return nil, err
 	}
+	// the friend's other devices we know of, so the DM reaches them even
+	// while the friend's account device is offline
+	for _, d := range c.devicesOf(friend.Pub) {
+		if _, err := c.appendEvent(chat, event.KindAdd, event.Body{Pub: d.Pub, Name: name, Link: d.Link, TS: time.Now().Unix()}); err != nil {
+			return nil, err
+		}
+	}
 	go c.ensurePeer(friend.Pub)
 	return chat, nil
+}
+
+// devicesOf: linked devices of account acct seen in any of our chats.
+func (c *Core) devicesOf(acct []byte) []event.Member {
+	var out []event.Member
+	seen := map[string]bool{}
+	for idStr := range c.chatIDs() {
+		st, err := c.ChatState([]byte(idStr))
+		if err != nil {
+			continue
+		}
+		for _, m := range st.Members {
+			if !m.Removed && bytes.Equal(m.Of, acct) && !seen[string(m.Pub)] {
+				seen[string(m.Pub)] = true
+				out = append(out, *m)
+			}
+		}
+	}
+	return out
 }
 
 func (c *Core) Send(chat []byte, text string) error { return c.SendReply(chat, text, nil) }
@@ -1547,6 +1627,12 @@ func (c *Core) lookupTargets() [][]byte {
 	c.mu.Unlock()
 	if r != nil && !seen[string(r.Inviter)] {
 		want = append([][]byte{r.Inviter}, want...) // the invite must not wait
+	}
+	c.devMu.Lock()
+	lr := c.linkReq
+	c.devMu.Unlock()
+	if lr != nil && c.P2P.Peer(lr.Account) == nil {
+		want = append([][]byte{lr.Account}, want...) // nor the account we link to
 	}
 	return want[:min(len(want), lookupsPerRound)]
 }

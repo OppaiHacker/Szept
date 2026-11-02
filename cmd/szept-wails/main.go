@@ -16,7 +16,6 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
-	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"szept/internal/boot"
 	"szept/internal/core"
@@ -48,7 +47,7 @@ func main() {
 		os.Setenv("WEBKIT_GST_DISABLE_GL_SINK", "1")
 	}
 
-	cfgFile, dataDir := boot.Dirs()
+	cfgFile, dataDir := dirs()
 	if *dataFlag != "" {
 		dataDir = *dataFlag
 	}
@@ -61,19 +60,18 @@ func main() {
 	}
 	cfg.DataDir = dataDir
 
-	api := newApp(cfg, cfgFile, dataDir, *dataFlag != "")
-	notifier := notifications.New()
-	api.notify = notifier
+	// one fixed directory with -data, and always on Android (the app sandbox)
+	api := newApp(cfg, cfgFile, dataDir, *dataFlag != "" || mobile)
+	nsvc, notify := notifier()
+	services := append([]application.Service{application.NewService(api)}, nsvc...)
+	api.notify = notify
 
 	app := application.New(application.Options{
 		Name:        "szept",
 		Description: "szyfrowany komunikator P2P",
 		Icon:        iconPNG,
 		LogLevel:    slog.LevelWarn,
-		Services: []application.Service{
-			application.NewService(api),
-			application.NewService(notifier),
-		},
+		Services:    services,
 		Assets: application.AssetOptions{
 			Handler:        application.BundledAssetFileServer(assets),
 			Middleware:     api.routes,
@@ -82,6 +80,7 @@ func main() {
 		OnShutdown: api.shutdown,
 	})
 	api.app = app
+	lifecycle(app, api)
 
 	// Frameless: the title bar is drawn in HTML (see .titlebar) so the window
 	// chrome matches the app instead of the desktop theme.
@@ -114,7 +113,9 @@ func main() {
 		api.filesDropped(e.Context().DroppedFiles())
 	})
 
-	go api.updates()
+	if !mobile { // an APK is not a binary we can swap in place
+		go api.updates()
+	}
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)

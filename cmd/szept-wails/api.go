@@ -15,6 +15,7 @@ import (
 	"image"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -24,7 +25,6 @@ import (
 
 	"github.com/skip2/go-qrcode"
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"szept/internal/attach"
 	"szept/internal/boot"
@@ -38,7 +38,7 @@ import (
 type App struct {
 	app    *application.App
 	win    application.Window
-	notify *notifications.NotificationService
+	notify func(id, title, body string) error // nil = no notifications here
 
 	mu      sync.Mutex
 	c       *core.Core
@@ -53,6 +53,8 @@ type App struct {
 	seen   map[string]int            // chat hex -> event count already shown
 	booted bool
 	prev   map[string]prevEntry // chat hex -> sidebar preview, see preview()
+	bg     bool                 // Android activity stopped, see bgping.go
+	bgSeen map[string]int       // chat hex -> event count when last checked in the background
 
 	frames  map[string]*frame // live video tiles, see media.go
 	frameNo uint64
@@ -131,6 +133,7 @@ type BootInfo struct {
 	Connector string   `json:"connector"`
 	Accent    string   `json:"accent"`
 	Pinned    bool     `json:"pinned"`
+	Mobile    bool     `json:"mobile"` // Android: no window chrome, no self-update
 }
 
 // Boot: which screen to show. Safe to call again after a profile switch.
@@ -138,12 +141,16 @@ func (a *App) Boot() BootInfo {
 	b := BootInfo{
 		Profile: a.cfg.Profile, Connector: a.cfg.Connector,
 		Accent: a.cfg.Accent, Pinned: a.pinned, Profiles: []string{},
+		Mobile: mobile,
 	}
 	if !a.pinned {
 		b.Profiles = boot.Profiles()
 	}
-	if _, err := a.live(); err == nil {
+	if c, err := a.live(); err == nil {
 		b.Stage = "ready"
+		if c.Linking() {
+			b.Stage = "link" // waiting for the account device, see LinkSetup
+		}
 		return b
 	}
 	dir := a.profileDir()
@@ -230,6 +237,7 @@ func (a *App) watch(c *core.Core) {
 				drained = true
 			}
 		}
+		a.bgPings(c)
 		a.app.Event.Emit("sync")
 	}
 }
@@ -347,7 +355,7 @@ func (a *App) updates() {
 			body = "Nie udało się jej zainstalować, pobierz ją z github.com/OppaiHacker/Szept/releases."
 		}
 		if a.notify != nil && !a.cfg.NoNotify {
-			_ = a.notify.SendNotification(notifications.NotificationOptions{ID: "szept-update", Title: "Nowa wersja szepta: " + info.Version, Body: body})
+			_ = a.notify("szept-update", "Nowa wersja szepta: "+info.Version, body)
 		}
 	}
 }
@@ -438,9 +446,10 @@ func (a *App) Snapshot() (Snapshot, error) {
 
 	card, _ := c.St.Profile(c.ID.Pub)
 	s := Snapshot{Me: Me{
-		Pub: hexs(c.ID.Pub), Name: c.ID.Name, Code: c.FriendCode(),
+		// a linked device shows the account: the key friends know, its face
+		Pub: hexs(c.Account()), Name: c.ID.Name, Code: c.FriendCode(),
 		Status: card.Status, Bio: card.Bio, Style: card.Style,
-		Avatar: avatarURL(c, c.ID.Pub), Banner: bannerURL(c, c.ID.Pub),
+		Avatar: avatarURL(c, c.Account()), Banner: bannerURL(c, c.Account()),
 		Profile: a.cfg.Profile, Connector: c.Cfg.Connector,
 		ConnUp: c.ConnUp(), ConnErr: c.ConnErr(), ConnVer: c.ConnVersion(), ConnRelay: c.ConnRelay(), Lang: c.Lang(), Accent: a.cfg.Accent, Dev: a.cfg.DevMode,
 	}, Chats: []Chat{}, Friends: []Friend{}}
@@ -478,7 +487,7 @@ func (a *App) Snapshot() (Snapshot, error) {
 		}
 		if ci.Direct { // a named group of two is still a group
 			for _, m := range ci.Members {
-				if !equalBytes(m.Pub, c.ID.Pub) {
+				if !c.Mine(m.Pub) {
 					ch.Direct, ch.Peer = true, hexs(m.Pub)
 					ch.Avatar = avatarURL(c, m.Pub)
 					direct[ch.Peer] = id
@@ -549,7 +558,7 @@ func (a *App) preview(c *core.Core, ci core.ChatInfo) prevEntry {
 	p := prevEntry{rev: rev, inCh: map[string]int{}}
 	p.text, p.ts = preview(c, ci, msgs)
 	for _, m := range msgs {
-		if m.Kind != "info" && !equalBytes(m.Author, c.ID.Pub) {
+		if m.Kind != "info" && !c.Mine(m.Author) {
 			p.inCh[hexs(m.Ch)]++
 		}
 	}
@@ -566,7 +575,7 @@ func preview(c *core.Core, ci core.ChatInfo, msgs []core.Msg) (string, int64) {
 		}
 		who := ""
 		switch {
-		case equalBytes(m.Author, c.ID.Pub):
+		case c.Mine(m.Author):
 			who = "Ty: "
 		case len(ci.Members) > 2:
 			who = m.Name + ": "
@@ -751,22 +760,28 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 			Joined: call.Joined, Mic: call.Mic, Deaf: call.Deaf,
 			Cam: call.Cam, Screen: call.Screen, Members: []string{},
 		}
+		// devices show as their person, like in the member list
 		for pub := range call.Members {
-			inCall[hexs([]byte(pub))] = true
-			flags[hexs([]byte(pub))] = c.PeerFlags(key, []byte(pub))
-			conv.Call.Members = append(conv.Call.Members, hexs([]byte(pub)))
+			who := hexs(c.Person(id, []byte(pub)))
+			inCall[who] = true
+			flags[who] = c.PeerFlags(key, []byte(pub))
+			conv.Call.Members = append(conv.Call.Members, who)
 		}
 		if call.Joined {
-			inCall[hexs(c.ID.Pub)] = true
-			flags[hexs(c.ID.Pub)] = call.State()
+			inCall[hexs(c.Account())] = true
+			flags[hexs(c.Account())] = call.State()
 		}
 	}
 	for _, m := range ci.Members {
-		mine := equalBytes(m.Pub, c.ID.Pub)
+		mine := c.Mine(m.Pub)
 		status, _ := c.StatusOf(m.Pub)
+		online := mine || c.Online(m.Pub)
+		for _, d := range ci.Devices[string(m.Pub)] {
+			online = online || c.Online(d)
+		}
 		conv.Members = append(conv.Members, Member{
 			Pub: hexs(m.Pub), Name: m.Name, Avatar: avatarURL(c, m.Pub),
-			Status: status, Style: c.StyleOf(m.Pub), Online: mine || c.Online(m.Pub),
+			Status: status, Style: c.StyleOf(m.Pub), Online: online,
 			Owner: equalBytes(m.Pub, ci.Owner), Me: mine,
 			InCall: inCall[hexs(m.Pub)], Flags: flags[hexs(m.Pub)], Relay: c.Relay(m.Pub),
 		})
@@ -810,10 +825,10 @@ func (a *App) Conversation(chat string, limit int) (Conversation, error) {
 
 func toMsg(c *core.Core, m core.Msg) Msg {
 	out := Msg{
-		ID: hexs(m.ID), Author: hexs(m.Author), Name: m.Name, Text: m.Text,
+		ID: hexs(m.ID), Author: hexs(m.Who), Name: m.Name, Text: m.Text,
 		TS: m.TS.Unix(), Kind: m.Kind, Info: m.Info, Deleted: m.Deleted, Pinned: m.Pinned, Reply: hexs(m.Reply),
-		ACK: m.ACK, Mine: equalBytes(m.Author, c.ID.Pub),
-		Avatar: avatarURL(c, m.Author),
+		ACK: m.ACK, Mine: c.Mine(m.Author),
+		Avatar: avatarURL(c, m.Who),
 	}
 	if m.Kind == "file" {
 		out.Blob, out.Mime, out.File = hexs(m.Blob), m.Mime, m.File
@@ -1090,7 +1105,7 @@ func (a *App) ProfileOf(pub string) (ProfileCard, error) {
 		Pub: pub, Status: status, Bio: bio, Style: c.StyleOf(p),
 		Avatar: avatarURL(c, p), Banner: bannerURL(c, p),
 		Online: c.Online(p), IsFriend: c.St.IsFriend(p),
-		IsMe: equalBytes(p, c.ID.Pub), History: []NickEntry{}, Version: c.PeerVersion(p),
+		IsMe: c.Mine(p), History: []NickEntry{}, Version: c.PeerVersion(p),
 	}
 	if card.IsMe {
 		card.Name, card.Online, card.Version = c.ID.Name, true, version.String()
@@ -1220,10 +1235,13 @@ func (a *App) SetServerImage(chat, which, dataURL string, crop Crop) error {
 // Notify shows a system notification unless they are turned off. One ID per
 // chat, so a burst of pings replaces itself instead of piling up.
 func (a *App) Notify(chat, title, body string) error {
-	if a.notify == nil || a.cfg.NoNotify {
+	a.mu.Lock()
+	bg := a.bg // Go posts its own pings then, see bgping.go
+	a.mu.Unlock()
+	if a.notify == nil || a.cfg.NoNotify || bg {
 		return nil
 	}
-	return a.notify.SendNotification(notifications.NotificationOptions{ID: "szept-" + chat, Title: title, Body: body})
+	return a.notify("szept-"+chat, title, body)
 }
 
 // SetHistory: owner only; on = people added from now on see earlier messages.
@@ -1304,6 +1322,14 @@ func (a *App) SaveAs(hashHex, name string) (string, error) {
 	c, err := a.live()
 	if err != nil {
 		return "", err
+	}
+	if mobile {
+		// no directory picker on Android: stage the file, the frontend hands it to Downloads
+		dir, err := outDir()
+		if err != nil {
+			return "", err
+		}
+		return c.SaveAttachment(unhex(hashHex), name, dir)
 	}
 	dir, err := a.app.Dialog.OpenFile().
 		AttachToWindow(a.win).
@@ -1525,6 +1551,8 @@ type Settings struct {
 	SpeakerDevice  string          `json:"speakerDevice"`
 	MicGain        float64         `json:"micGain"`
 	Voice          media.VoiceOpts `json:"voice"`
+	Devices        []DeviceInfo    `json:"devices"`
+	Linked         bool            `json:"linked"` // this device joined another device's account
 }
 
 // AudioDevices: microphones and speakers for the voice settings.
@@ -1556,6 +1584,7 @@ func (a *App) Settings() Settings {
 	if c, err := a.live(); err == nil {
 		s.Lang = c.Lang()
 		s.WebhookToken = c.WebhookToken()
+		s.Devices, s.Linked = devices(c), c.Linked()
 	}
 	return s
 }
@@ -1652,12 +1681,19 @@ func (a *App) Backup() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path, err := a.app.Dialog.SaveFile().
+	file := "szept-" + time.Now().Format("2006-01-02") + ".zip"
+	var path string
+	if mobile {
+		dir, err := outDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(dir, file)
+	} else if path, err = a.app.Dialog.SaveFile().
 		AttachToWindow(a.win).
-		SetFilename("szept-" + time.Now().Format("2006-01-02") + ".zip").
+		SetFilename(file).
 		SetMessage("Zapisz kopię").
-		PromptForSingleSelection()
-	if err != nil || path == "" {
+		PromptForSingleSelection(); err != nil || path == "" {
 		return "", nil
 	}
 	f, err := os.Create(path)
@@ -1699,3 +1735,101 @@ func (a *App) CloseApp()  { a.app.Quit() }
 
 // Version reports the build stamp shown in the About panel.
 func (a *App) Version() string { return version.String() }
+
+// ---- linked devices (docs/multi-device.md) ----
+
+type DeviceInfo struct {
+	Pub    string `json:"pub"`
+	Name   string `json:"name"`
+	TS     int64  `json:"ts"` // linked at, 0 for the account's first device
+	Online bool   `json:"online"`
+	Me     bool   `json:"me"` // the device this app runs on
+}
+
+// devices: the account's first device, then the linked ones.
+func devices(c *core.Core) []DeviceInfo {
+	acct := c.Account()
+	out := []DeviceInfo{{Pub: hexs(acct), Name: "Pierwsze urządzenie", Online: true, Me: equalBytes(acct, c.ID.Pub)}}
+	if !out[0].Me {
+		out[0].Online = c.Online(acct)
+	}
+	for _, d := range c.Devices() {
+		me := equalBytes(d.Pub, c.ID.Pub)
+		out = append(out, DeviceInfo{Pub: hexs(d.Pub), Name: d.Name, TS: d.TS, Online: me || c.Online(d.Pub), Me: me})
+	}
+	return out
+}
+
+type LinkCode struct {
+	Code string `json:"code"`
+	QR   string `json:"qr"` // data URL
+}
+
+// NewLinkCode: a one-time code, also as a QR code, for linking a new device.
+func (a *App) NewLinkCode() (LinkCode, error) {
+	c, err := a.live()
+	if err != nil {
+		return LinkCode{}, err
+	}
+	code, err := c.NewLinkCode()
+	if err != nil {
+		return LinkCode{}, err
+	}
+	return LinkCode{Code: code, QR: a.QR(code)}, nil
+}
+
+func (a *App) Unlink(pub string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.Unlink(unhex(pub))
+}
+
+// LinkSetup: first run on a new device that joins an existing account. It
+// gets its own key (name and friends come from the account) and asks the
+// account device, which must be online, to link it. Boot reports "link"
+// until the answer arrives.
+func (a *App) LinkSetup(code, pass string) error {
+	_, _, conn, err := core.ParseLinkCode(code)
+	if err != nil {
+		return err
+	}
+	if conn == "" {
+		return errors.New("kod nie podaje connectora")
+	}
+	a.cfg.Connector = conn
+	a.cfg.DataDir = a.profileDir()
+	if boot.HasIdentity(a.cfg.DataDir) {
+		return errors.New("to konto ma już klucz: połącz nowe konto albo nowe urządzenie")
+	}
+	id, err := boot.CreateIdentity(a.cfg.DataDir, "nowe urządzenie", []byte(pass))
+	if err != nil {
+		return err
+	}
+	a.saveCfg()
+	if err := a.enter(id); err != nil {
+		return err
+	}
+	return a.RetryLink(code)
+}
+
+// RetryLink sends the link request again, with a new code if the old expired.
+func (a *App) RetryLink(code string) error {
+	c, err := a.live()
+	if err != nil {
+		return err
+	}
+	return c.JoinAccount(code, deviceName())
+}
+
+// deviceName labels this device in the account's list.
+func deviceName() string {
+	if mobile {
+		return "Telefon"
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "Komputer"
+}

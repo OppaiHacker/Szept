@@ -1,0 +1,93 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.wails.app'
+    compileSdk 35
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    defaultConfig {
+        // chat.szept: the Fyne build's id, so this installs over it as an update
+        applicationId "chat.szept"
+        minSdk 26
+        targetSdk 35
+        // the Makefile passes both; the Fyne build ended at versionCode 26
+        versionCode((project.findProperty("szeptVersionCode") ?: "27") as int)
+        versionName(project.findProperty("szeptVersionName") ?: "dev")
+
+        // Configure supported ABIs
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    def keystoreFile = System.getenv("ANDROID_KEYSTORE_FILE")
+    def hasKeystore = keystoreFile != null && !keystoreFile.trim().isEmpty()
+
+    signingConfigs {
+        // A real keystore can be provided via environment variables; without
+        // one, release builds are signed with the debug keystore so they can
+        // be installed for testing (not suitable for Play Store uploads).
+        release {
+            if (hasKeystore) {
+                storeFile file(keystoreFile)
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug
+        }
+        debug {
+            debuggable true
+        }
+    }
+
+    // AGP 8.7's lint cannot parse a JDK 25 version string and fails the release
+    // build; lint still runs on demand with `./gradlew lint` under an older JDK
+    lint {
+        checkReleaseBuilds false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    // Source sets configuration
+    sourceSets {
+        main {
+            // JNI libraries are in jniLibs folder
+            jniLibs.srcDirs = ['src/main/jniLibs']
+            // Assets for the WebView
+            assets.srcDirs = ['src/main/assets']
+        }
+    }
+
+    // Packaging options
+    packagingOptions {
+        // Don't strip Go symbols in debug builds
+        doNotStrip '*/arm64-v8a/libwails.so'
+        doNotStrip '*/x86_64/libwails.so'
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.webkit:webkit:1.9.0'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.biometric:biometric:1.1.0'
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    // QR scanner for linking a device (ZXing, no Google Play services needed)
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+}
