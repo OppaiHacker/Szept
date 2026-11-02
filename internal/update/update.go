@@ -45,13 +45,13 @@ type Release struct {
 	sums    map[string]string
 }
 
-// Asset: the desktop binary built for this platform.
+// Asset: the desktop binary built for this platform. On Windows it is named
+// "portable" so people do not take it for the installer (szept-setup-*).
 func Asset() string {
-	ext := ""
 	if runtime.GOOS == "windows" {
-		ext = ".exe"
+		return "szept-portable-windows-" + runtime.GOARCH + ".exe"
 	}
-	return "szept-wails-" + runtime.GOOS + "-" + runtime.GOARCH + ext
+	return "szept-wails-" + runtime.GOOS + "-" + runtime.GOARCH
 }
 
 // Latest fetches and verifies the newest release's metadata.

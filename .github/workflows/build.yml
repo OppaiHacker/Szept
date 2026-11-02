@@ -41,14 +41,18 @@ jobs:
       # Ubuntu ships ImageMagick 6, whose `convert` takes the same arguments
       - run: command -v magick || sudo ln -s "$(command -v convert)" /usr/local/bin/magick
       - run: make bin/szept-setup.exe VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-      # the bare exe is what installed copies update themselves from
-      - run: mv bin/szept-wails.exe szept-wails-windows-amd64.exe && mv bin/szept-setup.exe szept-setup-windows-amd64.exe
+      # the portable exe is what installed copies update themselves from
+      - run: mv bin/szept-wails.exe szept-portable-windows-amd64.exe && mv bin/szept-setup.exe szept-setup-windows-amd64.exe
+      # v0.3.0 and older update from the pre-rename name.
+      # ponytail: drop this copy once those versions are no longer in use
+      - run: cp szept-portable-windows-amd64.exe szept-wails-windows-amd64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: szept-wails-windows-amd64
           path: |
-            szept-wails-windows-amd64.exe
+            szept-portable-windows-amd64.exe
             szept-setup-windows-amd64.exe
+            szept-wails-windows-amd64.exe
 
   connector:
     runs-on: ubuntu-24.04
@@ -79,4 +83,6 @@ jobs:
       - run: echo "$GITHUB_REF_NAME" > VERSION && sha256sum GOVERSION VERSION szept-* > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" szept-* GOVERSION VERSION SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: >-
+          gh release create "$GITHUB_REF_NAME" szept-* GOVERSION VERSION SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
+          --notes "Windows: szept-setup-windows-amd64.exe is the installer, szept-portable-windows-amd64.exe runs without installing. szept-wails-windows-amd64.exe is the same portable build, kept only so older versions can update themselves."
