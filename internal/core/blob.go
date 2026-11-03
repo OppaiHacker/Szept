@@ -636,17 +636,20 @@ func (c *Core) rescanAttachments() {
 
 // ---- transport ----
 
-// serveBlob: someone requested an attachment. Two conditions, both required —
-// the asker is a member of the chat they name, AND that chat is one the blob was
-// announced in. Membership alone was not enough: bBlobs is global, so any shared
-// chat used to be a pass to files from every other chat (the hash is guessable
-// for a known document, which also made it a confirmation oracle).
+// blobBufLimit: how much file data may wait in the send buffer. Small during
+// a call, so voice packets do not queue behind it.
 func (c *Core) blobBufLimit() uint64 {
 	if c.JoinedCall() != nil {
 		return 64 << 10 // 64 KB during calls to prevent SCTP queuing on voice packets
 	}
 	return sendBufHigh // 1 MB otherwise
 }
+
+// serveBlob: someone requested an attachment. Two conditions, both required —
+// the asker is a member of the chat they name, AND that chat is one the blob was
+// announced in. Membership alone was not enough: bBlobs is global, so any shared
+// chat used to be a pass to files from every other chat (the hash is guessable
+// for a known document, which also made it a confirmation oracle).
 func (c *Core) serveBlob(p *p2p.Peer, m Ctrl) {
 	st, err := c.ChatState(m.Chat)
 	if err != nil || !st.IsMember(p.Pub) {

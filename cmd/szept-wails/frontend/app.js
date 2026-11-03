@@ -2711,7 +2711,7 @@ function settingsBody() {
         ${voiceOpt("no_agc", "Automatyczna głośność (AGC)", "łagodne wyrównywanie poziomu mowy w tle (+4 dB/s)")}
         ${voiceOpt("no_comp", "Kompresor dynamiki", "wygładza nagłe okrzyki i podbija cichsze sylaby (transparentny lookahead)")}
         <div class="field" style="margin-left: 16px; margin-right: 16px;"><label>Profil kompresora</label><div class="select-wrap"><select class="input" id="s-comp-preset" ${v.no_comp ? "disabled" : ""}>
-          ${[["natural", "Naturalny (łagodny)"], ["subtle", "Delikatny (minimalny)"], ["radio", "Radio / Podcast (wyrazisty)"], ["custom", "Własny (zaawansowane)"]]
+          ${[["natural", "Naturalny (łagodny)"], ["gentle", "Delikatny (minimalny)"], ["radio", "Radio / Podcast (wyrazisty)"], ["custom", "Własny (zaawansowane)"]]
             .map(([p, l]) => `<option value="${p}" ${(v.comp_preset || "natural") === p ? "selected" : ""}>${l}</option>`).join("")}
         </select></div></div>
         <div id="comp-custom-params" style="display:${(!v.no_comp && v.comp_preset === 'custom') ? 'block' : 'none'}; padding: 0 16px; margin-bottom: 12px; background: rgba(0,0,0,0.15); border-radius: 8px; padding: 12px;">
@@ -3038,10 +3038,10 @@ function renderSettings() {
   const bindCompSlider = (id, key, format) => {
     const el = $("#" + id);
     if (!el) return;
-    el.addEventListener("input", () => {
-      $("#" + id + "-l").textContent = format(el.value);
-      saveSettings({ voice: { ...(S.settings.voice || {}), [key]: parseFloat(el.value) } });
-    });
+    // label follows the drag; saving re-renders the page, so only on release
+    el.addEventListener("input", () => ($("#" + id + "-l").textContent = format(el.value)));
+    el.addEventListener("change", () =>
+      saveSettings({ voice: { ...(S.settings.voice || {}), [key]: parseFloat(el.value) } }));
   };
   bindCompSlider("s-cthr", "comp_thresh", (v) => v + " dB");
   bindCompSlider("s-crat", "comp_ratio", (v) => v + ":1");

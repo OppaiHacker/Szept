@@ -136,21 +136,21 @@ const (
 
 // voiceSrc: one remote speaker in the mix.
 type voiceSrc struct {
-	buf      []int16
-	gain     float32 // 0..2, default 1
-	pan      float32 // -1 (left) .. +1 (right)
-	mute     bool
-	live     bool
-	peak     float32
-	at       time.Time
-	rxComp   *lookaheadCompressor
-	rxLim    *peakLimiter
-	itdBufL  [itdMaxDelay]float32
-	itdPosL  int
-	itdBufR  [itdMaxDelay]float32
-	itdPosR  int
-	shadowL  *headShadowLPF
-	shadowR  *headShadowLPF
+	buf     []int16
+	gain    float32 // 0..2, default 1
+	pan     float32 // -1 (left) .. +1 (right)
+	mute    bool
+	live    bool
+	peak    float32
+	at      time.Time
+	rxComp  *lookaheadCompressor
+	rxLim   *peakLimiter
+	itdBufL [itdMaxDelay]float32
+	itdPosL int
+	itdBufR [itdMaxDelay]float32
+	itdPosR int
+	shadowL *headShadowLPF
+	shadowR *headShadowLPF
 }
 
 func newVoiceSrc() *voiceSrc {

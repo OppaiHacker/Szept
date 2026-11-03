@@ -127,10 +127,11 @@ func (d *denoiser) block(emit func([]byte)) {
 	}
 
 	// 3. Smooth Noise Gate with envelope
+	// with the gate off nothing is faded out: everything is sent as is
 	d.gate.update(d.vad)
-	activeVoice := d.gate.processBlock(d.blk[:])
-	if o.NoGate {
-		activeVoice = true
+	activeVoice := true
+	if !o.NoGate {
+		activeVoice = d.gate.processBlock(d.blk[:])
 	}
 
 	// 4. Slow AGC Leveler (update step + smooth per-sample application)

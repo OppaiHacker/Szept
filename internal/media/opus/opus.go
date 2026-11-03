@@ -29,6 +29,7 @@ import "C"
 
 import (
 	"errors"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -43,11 +44,13 @@ const (
 type Encoder struct {
 	st      []byte
 	bitrate int
-	loss    int
+	loss    int          // applied to libopus, touched only by Encode
+	want    atomic.Int32 // set from any goroutine by SetPacketLoss
 }
 
 func NewEncoder() (*Encoder, error) {
 	e := &Encoder{st: make([]byte, C.opus_encoder_get_size(1)), bitrate: Bitrate, loss: 2}
+	e.want.Store(2)
 	if C.opus_encoder_init(e.ptr(), Rate, 1, C.OPUS_APPLICATION_VOIP) != C.OPUS_OK ||
 		C.enc_setup(e.ptr(), Bitrate) != C.OPUS_OK {
 		return nil, errors.New("opus: encoder init")
@@ -67,16 +70,15 @@ func (e *Encoder) SetBitrate(b int) {
 	}
 }
 
-// SetPacketLoss updates expected packet loss percentage (0..25) for inband FEC.
-func (e *Encoder) SetPacketLoss(perc int) {
-	if perc < 0 {
-		perc = 0
-	} else if perc > 25 {
-		perc = 25
-	}
-	if perc != e.loss {
-		e.loss = perc
-		C.enc_loss(e.ptr(), C.int(perc))
+// SetPacketLoss sets the expected packet loss (0..25 %) for inband FEC. Safe
+// from any goroutine: the next Encode applies it, so libopus is never touched
+// by two threads at once.
+func (e *Encoder) SetPacketLoss(perc int) { e.want.Store(int32(min(max(perc, 0), 25))) }
+
+func (e *Encoder) applyLoss() {
+	if l := int(e.want.Load()); l != e.loss {
+		e.loss = l
+		C.enc_loss(e.ptr(), C.int(l))
 	}
 }
 
@@ -84,6 +86,7 @@ func (e *Encoder) ptr() *C.OpusEncoder { return (*C.OpusEncoder)(unsafe.Pointer(
 
 // Encode one 20 ms frame of s16le mono PCM (Frame samples).
 func (e *Encoder) Encode(pcm []byte) ([]byte, error) {
+	e.applyLoss()
 	if len(pcm) != Frame*2 {
 		return nil, errors.New("opus: frame size")
 	}
@@ -98,6 +101,7 @@ func (e *Encoder) Encode(pcm []byte) ([]byte, error) {
 
 // EncodeFloat encodes one 20 ms frame of normalized [-1.0, 1.0] float32 mono PCM.
 func (e *Encoder) EncodeFloat(pcm []float32) ([]byte, error) {
+	e.applyLoss()
 	if len(pcm) != Frame {
 		return nil, errors.New("opus: frame size")
 	}

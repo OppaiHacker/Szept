@@ -130,20 +130,21 @@ func (c *Core) handleCallCtrl(p *p2p.Peer, m Ctrl) {
 	}
 	c.mu.Lock()
 	call := c.calls[string(m.Chat)]
+	// "loss": a listener's packet loss, tunes our FEC. Not a call event, so it
+	// never creates one. ponytail: the last reporter wins, max over peers if FEC lags
+	if m.Action == "loss" {
+		n, err := strconv.Atoi(m.Status)
+		if err == nil && n >= 0 && n <= 25 && call != nil && call.Joined && c.voiceEnc != nil {
+			c.voiceEnc.SetPacketLoss(n)
+		}
+		c.mu.Unlock()
+		return
+	}
 	if call == nil {
 		call = &Call{Chat: m.Chat, Members: map[string]bool{}}
 		c.calls[string(m.Chat)] = call
 	}
 	switch m.Action {
-	case "loss":
-		if n, err := strconv.Atoi(m.Status); err == nil && n >= 0 && n <= 25 {
-			c.mu.Lock()
-			enc := c.voiceEnc
-			c.mu.Unlock()
-			if enc != nil {
-				enc.SetPacketLoss(n)
-			}
-		}
 	case "join", "state": // "state": mic/sound/camera/screen changed
 		call.Members[string(p.Pub)] = true
 		if call.Flags == nil {
@@ -508,11 +509,7 @@ func (c *Core) MicTest(on bool) error {
 	media.SetMicGain(float32(c.Cfg.MicGain))
 	enc, err := opus.NewEncoder()
 	if err != nil {
-		log.Printf("call: opus: %v", err)
-	} else {
-		c.mu.Lock()
-		c.voiceEnc = enc
-		c.mu.Unlock()
+		return err
 	}
 	dec := opus.NewDecoder()
 	player, err := media.StartPlayer(c.Cfg.SpeakerDevice)
