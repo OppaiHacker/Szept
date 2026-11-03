@@ -2707,15 +2707,33 @@ function settingsBody() {
       <div class="block">
         <h4>Przetwarzanie dźwięku</h4>
         <p class="hint-text" style="padding:0 16px">Działa od razu, także w trwającej rozmowie i w teście mikrofonu.</p>
-        ${voiceOpt("no_denoise", "Odszumianie", "usuwa wentylator, klawiaturę i szum ulicy (RNNoise)")}
-        ${voiceOpt("no_agc", "Automatyczna głośność", "podciąga cichy mikrofon i ścisza głośny, żeby każdy brzmiał równo")}
-        ${voiceOpt("no_gate", "Wysyłaj tylko mowę", "w ciszy nic nie idzie do sieci, a pierścień świeci tylko gdy mówisz")}
-        ${voiceOpt("no_monitor", "Odsłuch w teście mikrofonu", "słyszysz siebie podczas testu")}
-        <div class="field"><label>Jakość dźwięku</label><div class="select-wrap"><select class="input" id="s-bitrate">
-          ${[[24000, "Oszczędna, 24 kbit/s"], [32000, "Standardowa, 32 kbit/s"], [64000, "Wysoka, 64 kbit/s"], [96000, "Najwyższa, 96 kbit/s"]]
-            .map(([b, l]) => `<option value="${b}" ${(v.bitrate || 32000) === b ? "selected" : ""}>${l}</option>`).join("")}
+        ${voiceOpt("no_denoise", "Odszumianie", "usuwa wentylator, klawiaturę i szum ulicy (RNNoise 48 kHz)")}
+        ${voiceOpt("no_agc", "Automatyczna głośność (AGC)", "łagodne wyrównywanie poziomu mowy w tle (+4 dB/s)")}
+        ${voiceOpt("no_comp", "Kompresor dynamiki", "wygładza nagłe okrzyki i podbija cichsze sylaby (transparentny lookahead)")}
+        <div class="field" style="margin-left: 16px; margin-right: 16px;"><label>Profil kompresora</label><div class="select-wrap"><select class="input" id="s-comp-preset" ${v.no_comp ? "disabled" : ""}>
+          ${[["natural", "Naturalny (łagodny)"], ["gentle", "Delikatny (minimalny)"], ["radio", "Radio / Podcast (wyrazisty)"], ["custom", "Własny (zaawansowane)"]]
+            .map(([p, l]) => `<option value="${p}" ${(v.comp_preset || "natural") === p ? "selected" : ""}>${l}</option>`).join("")}
         </select></div></div>
-        <p class="hint-text" style="padding:0 16px 8px">Tyle wysyłasz do każdej osoby w rozmowie. Przy słabym łączu wybierz niższą.</p>
+        <div id="comp-custom-params" style="display:${(!v.no_comp && v.comp_preset === 'custom') ? 'block' : 'none'}; padding: 0 16px; margin-bottom: 12px; background: rgba(0,0,0,0.15); border-radius: 8px; padding: 12px;">
+          <div style="font-size:12px; margin-bottom:4px;">Próg (Threshold): <span id="s-cthr-l">${v.comp_thresh || -18} dB</span></div>
+          <input class="slider" id="s-cthr" type="range" min="-36" max="-6" step="1" value="${v.comp_thresh || -18}">
+          <div style="font-size:12px; margin-top:8px; margin-bottom:4px;">Współczynnik (Ratio): <span id="s-crat-l">${v.comp_ratio || 3}:1</span></div>
+          <input class="slider" id="s-crat" type="range" min="1.5" max="8" step="0.5" value="${v.comp_ratio || 3}">
+          <div style="font-size:12px; margin-top:8px; margin-bottom:4px;">Czas ataku (Attack): <span id="s-catk-l">${v.comp_attack || 12} ms</span></div>
+          <input class="slider" id="s-catk" type="range" min="2" max="50" step="1" value="${v.comp_attack || 12}">
+          <div style="font-size:12px; margin-top:8px; margin-bottom:4px;">Czas powrotu (Release): <span id="s-crel-l">${v.comp_release || 100} ms</span></div>
+          <input class="slider" id="s-crel" type="range" min="20" max="300" step="10" value="${v.comp_release || 100}">
+          <div style="font-size:12px; margin-top:8px; margin-bottom:4px;">Wzmocnienie (Makeup): <span id="s-cmak-l">+${v.comp_makeup || 2} dB</span></div>
+          <input class="slider" id="s-cmak" type="range" min="0" max="12" step="0.5" value="${v.comp_makeup || 2}">
+        </div>
+        ${voiceOpt("no_gate", "Wysyłaj tylko mowę", "w ciszy nic nie idzie do sieci, a pierścień świeci tylko gdy mówisz")}
+        ${voiceOpt("no_rx_protect", "Ochrona słuchu (odbiornik)", "kompresor i limiter wygładzający zbyt głośnych rozmówców")}
+        ${voiceOpt("no_monitor", "Odsłuch w teście mikrofonu", "słyszysz siebie podczas testu")}
+        <div class="field"><label>Jakość dźwięku (Opus)</label><div class="select-wrap"><select class="input" id="s-bitrate">
+          ${[[24000, "Oszczędna, 24 kbit/s"], [32000, "Niska, 32 kbit/s"], [48000, "Standardowa, 48 kbit/s (zalecana)"], [64000, "Wysoka, 64 kbit/s"], [96000, "Bardzo wysoka, 96 kbit/s"], [128000, "Studyjna / Muzyka, 128 kbit/s"]]
+            .map(([b, l]) => `<option value="${b}" ${(v.bitrate || 48000) === b ? "selected" : ""}>${l}</option>`).join("")}
+        </select></div></div>
+        <p class="hint-text" style="padding:0 16px 8px">Tyle wysyłasz do każdej osoby w rozmowie. 48 kbit/s zapewnia pełne pasmo mowy (Fullband 48 kHz) z minimalnym narzutem.</p>
       </div>
       <div class="block">
         <h4>Głośność rozmowy</h4>
@@ -3015,6 +3033,21 @@ function renderSettings() {
   if (S.camTest && S.section !== "voice") camTest(false);
   $("#s-bitrate")?.addEventListener("change", (e) =>
     saveSettings({ voice: { ...(S.settings.voice || {}), bitrate: +e.target.value } }));
+  $("#s-comp-preset")?.addEventListener("change", (e) =>
+    saveSettings({ voice: { ...(S.settings.voice || {}), comp_preset: e.target.value } }));
+  const bindCompSlider = (id, key, format) => {
+    const el = $("#" + id);
+    if (!el) return;
+    // label follows the drag; saving re-renders the page, so only on release
+    el.addEventListener("input", () => ($("#" + id + "-l").textContent = format(el.value)));
+    el.addEventListener("change", () =>
+      saveSettings({ voice: { ...(S.settings.voice || {}), [key]: parseFloat(el.value) } }));
+  };
+  bindCompSlider("s-cthr", "comp_thresh", (v) => v + " dB");
+  bindCompSlider("s-crat", "comp_ratio", (v) => v + ":1");
+  bindCompSlider("s-catk", "comp_attack", (v) => v + " ms");
+  bindCompSlider("s-crel", "comp_release", (v) => v + " ms");
+  bindCompSlider("s-cmak", "comp_makeup", (v) => "+" + v + " dB");
 
   const vol = $("#s-vol");
   vol?.addEventListener("input", () => {

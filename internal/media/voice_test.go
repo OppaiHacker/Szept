@@ -2,6 +2,7 @@ package media
 
 import (
 	"testing"
+	"time"
 
 	"szept/internal/media/opus"
 )
@@ -29,5 +30,26 @@ func TestReceiver(t *testing.T) {
 		if got := frames(c.seq); got != c.want {
 			t.Fatalf("seq %d: %d frames, want %d", c.seq, got, c.want)
 		}
+	}
+}
+
+// Every 10th packet lost: the window reports about 10%.
+func TestReceiverLoss(t *testing.T) {
+	enc, err := opus.NewEncoder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt, _ := enc.Encode(make([]byte, FrameSamps*2))
+	r := NewReceiver()
+	for seq := uint32(1); seq <= 200; seq++ {
+		if seq%10 == 0 {
+			continue
+		}
+		r.Decode("a", seq, pkt)
+	}
+	r.srcs["a"].since = time.Now().Add(-lossWindow - time.Second)
+	r.Decode("a", 201, pkt)
+	if l := r.LossReport()["a"]; l < 8 || l > 12 {
+		t.Fatalf("loss %d%%, want ~10", l)
 	}
 }

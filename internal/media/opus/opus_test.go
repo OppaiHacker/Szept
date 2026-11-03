@@ -30,7 +30,7 @@ func TestRoundTrip(t *testing.T) {
 			t.Fatalf("decode: %v, %d bytes", err, len(last))
 		}
 	}
-	if kbps := bytes * 8 / 1000; kbps > 40 { // 50 packets = 1 s
+	if kbps := bytes * 8 / 1000; kbps > 60 { // 50 packets = 1 s, default 48k
 		t.Fatalf("%d kbit/s", kbps)
 	}
 	var peak int16
@@ -42,5 +42,47 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if plc, err := d.Decode(nil, false); err != nil || len(plc) != Frame*2 {
 		t.Fatalf("plc: %v, %d bytes", err, len(plc))
+	}
+}
+
+func TestFloatRoundTripAndHighFreq(t *testing.T) {
+	e, err := NewEncoder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetBitrate(48000)
+	e.SetPacketLoss(5)
+	d := NewDecoder()
+
+	// 12 kHz tone at -6 dBFS (0.5 amp)
+	pcm := make([]float32, Frame)
+	var last []float32
+	for k := 0; k < 50; k++ {
+		for i := 0; i < Frame; i++ {
+			pcm[i] = float32(0.5 * math.Sin(2*math.Pi*12000*float64(k*Frame+i)/Rate))
+		}
+		pkt, err := e.EncodeFloat(pcm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if last, err = d.DecodeFloat(pkt, false); err != nil || len(last) != Frame {
+			t.Fatalf("decode float: %v", err)
+		}
+	}
+
+	var peak float32
+	for _, v := range last {
+		if math.Abs(float64(v)) > float64(peak) {
+			peak = float32(math.Abs(float64(v)))
+		}
+	}
+	// Verify that high frequency 12 kHz is preserved cleanly (> 0.35 amp)
+	if peak < 0.35 {
+		t.Fatalf("12 kHz tone peak %f too attenuated, want >= 0.35", peak)
+	}
+
+	// Test PLC in float32
+	if plc, err := d.DecodeFloat(nil, false); err != nil || len(plc) != Frame {
+		t.Fatalf("float plc: %v", err)
 	}
 }

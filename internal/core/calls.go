@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +130,16 @@ func (c *Core) handleCallCtrl(p *p2p.Peer, m Ctrl) {
 	}
 	c.mu.Lock()
 	call := c.calls[string(m.Chat)]
+	// "loss": a listener's packet loss, tunes our FEC. Not a call event, so it
+	// never creates one. ponytail: the last reporter wins, max over peers if FEC lags
+	if m.Action == "loss" {
+		n, err := strconv.Atoi(m.Status)
+		if err == nil && n >= 0 && n <= 25 && call != nil && call.Joined && c.voiceEnc != nil {
+			c.voiceEnc.SetPacketLoss(n)
+		}
+		c.mu.Unlock()
+		return
+	}
 	if call == nil {
 		call = &Call{Chat: m.Chat, Members: map[string]bool{}}
 		c.calls[string(m.Chat)] = call
@@ -269,9 +280,14 @@ func (c *Core) JoinCall(chat []byte) error {
 	var seq uint32
 	lbl := chatLabel("v", chat) // once per call, not base64 per 20 ms frame
 	media.SetVoiceOpts(c.Cfg.Voice)
-	enc, err := opus.NewEncoder() // used only from the mic callback below
+	media.SetMicGain(float32(c.Cfg.MicGain))
+	enc, err := opus.NewEncoder()
 	if err != nil {
 		log.Printf("call: opus: %v", err)
+	} else {
+		c.mu.Lock()
+		c.voiceEnc = enc
+		c.mu.Unlock()
 	}
 	startMic := func(cb func([]byte)) (func(), error) { return media.StartVoice(c.Cfg.MicDevice, cb) }
 	if c.VoiceIn != nil {
@@ -283,9 +299,6 @@ func (c *Core) JoinCall(chat []byte) error {
 		c.mu.Unlock()
 		if muted {
 			return
-		}
-		if g := float32(c.Cfg.MicGain); g > 0 && g != 1 {
-			media.ApplyGain(pcm, g)
 		}
 		samps := make([]int16, len(pcm)/2)
 		for i := range samps {
@@ -322,7 +335,46 @@ func (c *Core) JoinCall(chat []byte) error {
 	if stopMic != nil {
 		stop = stopMic
 	}
-	c.stopVoice = func() { stop(); prevPlayerClose() }
+	lossDone := make(chan struct{})
+	go func() {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		lastSent := map[string]int{}
+		for {
+			select {
+			case <-lossDone:
+				return
+			case <-t.C:
+				c.mu.Lock()
+				rx := c.voiceRx
+				c.mu.Unlock()
+				if rx == nil {
+					continue
+				}
+				for pub, loss := range rx.LossReport() {
+					prev := lastSent[pub]
+					diff := loss - prev
+					if diff < 0 {
+						diff = -diff
+					}
+					if diff >= 2 {
+						lastSent[pub] = loss
+						if p := c.P2P.Peer([]byte(pub)); p != nil {
+							p.SendCtrl(Ctrl{T: "call", Chat: chat, Action: "loss", Status: strconv.Itoa(loss)})
+						}
+					}
+				}
+			}
+		}
+	}()
+	c.stopVoice = func() {
+		close(lossDone)
+		stop()
+		prevPlayerClose()
+		c.mu.Lock()
+		c.voiceEnc = nil
+		c.mu.Unlock()
+	}
 	c.mu.Unlock()
 
 	c.callBroadcast(chat, "join")
@@ -454,6 +506,7 @@ func (c *Core) MicTest(on bool) error {
 		return nil
 	}
 	media.SetVoiceOpts(c.Cfg.Voice)
+	media.SetMicGain(float32(c.Cfg.MicGain))
 	enc, err := opus.NewEncoder()
 	if err != nil {
 		return err
@@ -467,9 +520,6 @@ func (c *Core) MicTest(on bool) error {
 		player.SetMaster(float32(v))
 	}
 	stopMic, err := media.StartVoice(c.Cfg.MicDevice, func(pcm []byte) {
-		if g := float32(c.Cfg.MicGain); g > 0 && g != 1 {
-			media.ApplyGain(pcm, g)
-		}
 		samps := make([]int16, len(pcm)/2)
 		for i := range samps {
 			samps[i] = int16(uint16(pcm[2*i]) | uint16(pcm[2*i+1])<<8)
@@ -668,7 +718,7 @@ var (
 const chunkSize = 12 * 1024
 
 // maxVideoBacklog: about two frames still waiting for the link.
-const maxVideoBacklog = 256 * 1024
+const maxVideoBacklog = 64 * 1024
 
 func (c *Core) sendVideoFrame(chat []byte, kind string, frameID uint32, jpeg []byte) {
 	total := (len(jpeg) + chunkSize - 1) / chunkSize

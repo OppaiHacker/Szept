@@ -12,25 +12,31 @@ package opus
 static int enc_setup(OpusEncoder *e, int bitrate) {
 	opus_encoder_ctl(e, OPUS_SET_BITRATE(bitrate));
 	opus_encoder_ctl(e, OPUS_SET_COMPLEXITY(10));
-	opus_encoder_ctl(e, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+	opus_encoder_ctl(e, OPUS_SET_LSB_DEPTH(24));
+	opus_encoder_ctl(e, OPUS_SET_SIGNAL(bitrate >= 128000 ? OPUS_SIGNAL_MUSIC : (bitrate > 32000 ? OPUS_AUTO : OPUS_SIGNAL_VOICE)));
 	opus_encoder_ctl(e, OPUS_SET_INBAND_FEC(1));
-	return opus_encoder_ctl(e, OPUS_SET_PACKET_LOSS_PERC(10));
+	return opus_encoder_ctl(e, OPUS_SET_PACKET_LOSS_PERC(2));
 }
 static void enc_bitrate(OpusEncoder *e, int bitrate) {
 	opus_encoder_ctl(e, OPUS_SET_BITRATE(bitrate));
+	opus_encoder_ctl(e, OPUS_SET_SIGNAL(bitrate >= 128000 ? OPUS_SIGNAL_MUSIC : (bitrate > 32000 ? OPUS_AUTO : OPUS_SIGNAL_VOICE)));
+}
+static void enc_loss(OpusEncoder *e, int perc) {
+	opus_encoder_ctl(e, OPUS_SET_PACKET_LOSS_PERC(perc));
 }
 */
 import "C"
 
 import (
 	"errors"
+	"sync/atomic"
 	"unsafe"
 )
 
 const (
 	Rate    = 48000
 	Frame   = 960   // samples per 20 ms packet
-	Bitrate = 32000 // Discord's default is 64k stereo; 32k mono is full-band speech
+	Bitrate = 48000 // 48k mono gives transparent fullband speech/audio without choking FEC
 )
 
 // Encoder and Decoder keep libopus state in Go memory (opus_*_init on a
@@ -38,10 +44,13 @@ const (
 type Encoder struct {
 	st      []byte
 	bitrate int
+	loss    int          // applied to libopus, touched only by Encode
+	want    atomic.Int32 // set from any goroutine by SetPacketLoss
 }
 
 func NewEncoder() (*Encoder, error) {
-	e := &Encoder{st: make([]byte, C.opus_encoder_get_size(1)), bitrate: Bitrate}
+	e := &Encoder{st: make([]byte, C.opus_encoder_get_size(1)), bitrate: Bitrate, loss: 2}
+	e.want.Store(2)
 	if C.opus_encoder_init(e.ptr(), Rate, 1, C.OPUS_APPLICATION_VOIP) != C.OPUS_OK ||
 		C.enc_setup(e.ptr(), Bitrate) != C.OPUS_OK {
 		return nil, errors.New("opus: encoder init")
@@ -61,10 +70,23 @@ func (e *Encoder) SetBitrate(b int) {
 	}
 }
 
+// SetPacketLoss sets the expected packet loss (0..25 %) for inband FEC. Safe
+// from any goroutine: the next Encode applies it, so libopus is never touched
+// by two threads at once.
+func (e *Encoder) SetPacketLoss(perc int) { e.want.Store(int32(min(max(perc, 0), 25))) }
+
+func (e *Encoder) applyLoss() {
+	if l := int(e.want.Load()); l != e.loss {
+		e.loss = l
+		C.enc_loss(e.ptr(), C.int(l))
+	}
+}
+
 func (e *Encoder) ptr() *C.OpusEncoder { return (*C.OpusEncoder)(unsafe.Pointer(&e.st[0])) }
 
 // Encode one 20 ms frame of s16le mono PCM (Frame samples).
 func (e *Encoder) Encode(pcm []byte) ([]byte, error) {
+	e.applyLoss()
 	if len(pcm) != Frame*2 {
 		return nil, errors.New("opus: frame size")
 	}
@@ -73,6 +95,21 @@ func (e *Encoder) Encode(pcm []byte) ([]byte, error) {
 		(*C.uchar)(unsafe.Pointer(&out[0])), C.opus_int32(len(out)))
 	if n < 0 {
 		return nil, errors.New("opus: encode")
+	}
+	return out[:n], nil
+}
+
+// EncodeFloat encodes one 20 ms frame of normalized [-1.0, 1.0] float32 mono PCM.
+func (e *Encoder) EncodeFloat(pcm []float32) ([]byte, error) {
+	e.applyLoss()
+	if len(pcm) != Frame {
+		return nil, errors.New("opus: frame size")
+	}
+	out := make([]byte, 1275)
+	n := C.opus_encode_float(e.ptr(), (*C.float)(unsafe.Pointer(&pcm[0])), Frame,
+		(*C.uchar)(unsafe.Pointer(&out[0])), C.opus_int32(len(out)))
+	if n < 0 {
+		return nil, errors.New("opus: encode_float")
 	}
 	return out[:n], nil
 }
@@ -105,4 +142,23 @@ func (d *Decoder) Decode(pkt []byte, fec bool) ([]byte, error) {
 		return nil, errors.New("opus: decode")
 	}
 	return out[:2*n], nil
+}
+
+// DecodeFloat decodes one packet to normalized float32 mono PCM.
+func (d *Decoder) DecodeFloat(pkt []byte, fec bool) ([]float32, error) {
+	out := make([]float32, Frame)
+	var p *C.uchar
+	if len(pkt) > 0 {
+		p = (*C.uchar)(unsafe.Pointer(&pkt[0]))
+	}
+	f := C.int(0)
+	if fec {
+		f = 1
+	}
+	n := C.opus_decode_float(d.ptr(), p, C.opus_int32(len(pkt)),
+		(*C.float)(unsafe.Pointer(&out[0])), Frame, f)
+	if n < 0 {
+		return nil, errors.New("opus: decode_float")
+	}
+	return out[:n], nil
 }

@@ -636,6 +636,15 @@ func (c *Core) rescanAttachments() {
 
 // ---- transport ----
 
+// blobBufLimit: how much file data may wait in the send buffer. Small during
+// a call, so voice packets do not queue behind it.
+func (c *Core) blobBufLimit() uint64 {
+	if c.JoinedCall() != nil {
+		return 64 << 10 // 64 KB during calls to prevent SCTP queuing on voice packets
+	}
+	return sendBufHigh // 1 MB otherwise
+}
+
 // serveBlob: someone requested an attachment. Two conditions, both required —
 // the asker is a member of the chat they name, AND that chat is one the blob was
 // announced in. Membership alone was not enough: bBlobs is global, so any shared
@@ -684,7 +693,7 @@ func (c *Core) serveBlob(p *p2p.Peer, m Ctrl) {
 				end = len(data)
 			}
 			// backpressure check: don't push 32 MB at once
-			for i := 0; p.BufferedCtrl() > sendBufHigh && i < 500; i++ {
+			for i := 0; p.BufferedCtrl() > c.blobBufLimit() && i < 500; i++ {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if err := p.SendRaw(blobFrame(m.Chat, m.Blob, idx, total, data[idx*blobChunk:end])); err != nil {
