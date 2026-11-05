@@ -94,3 +94,17 @@ func TestNewer(t *testing.T) {
 		}
 	}
 }
+
+// A binary the loader cannot start must not replace the working one.
+func TestStarts(t *testing.T) {
+	dir := t.TempDir()
+	ok, bad := filepath.Join(dir, "ok"), filepath.Join(dir, "bad")
+	os.WriteFile(ok, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	os.WriteFile(bad, []byte("#!/bin/sh\necho 'libwebkit2gtk-4.1.so.0: cannot open' >&2; exit 127\n"), 0o755)
+	if err := starts(context.Background(), ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := starts(context.Background(), bad); err == nil || !strings.Contains(err.Error(), "libwebkit2gtk") {
+		t.Fatal("broken binary accepted:", err)
+	}
+}

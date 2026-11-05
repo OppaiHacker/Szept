@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -46,12 +47,13 @@ type Release struct {
 }
 
 // Asset: the desktop binary built for this platform. On Windows it is named
-// "portable" so people do not take it for the installer (szept-setup-*).
+// "portable" so people do not take it for the installer (szept-setup-*). On
+// Linux it follows the GTK the running build links (flavor_gtk*.go).
 func Asset() string {
 	if runtime.GOOS == "windows" {
 		return "szept-portable-windows-" + runtime.GOARCH + ".exe"
 	}
-	return "szept-wails-" + runtime.GOOS + "-" + runtime.GOARCH
+	return "szept-wails-" + runtime.GOOS + "-" + runtime.GOARCH + flavor
 }
 
 // Latest fetches and verifies the newest release's metadata.
@@ -135,6 +137,14 @@ func (r *Release) Install(ctx context.Context) error {
 	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
 		return err
 	}
+	// A build linked against libraries this system lacks dies in the dynamic
+	// loader before main. Find out now, while the working binary is in place.
+	if runtime.GOOS == "linux" {
+		if err := starts(ctx, tmp); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+	}
 	// Windows won't overwrite a running .exe but will rename it.
 	if runtime.GOOS == "windows" {
 		os.Remove(exe + ".old")
@@ -149,6 +159,18 @@ func (r *Release) Install(ctx context.Context) error {
 			os.Rename(exe+".old", exe)
 		}
 		return err
+	}
+	return nil
+}
+
+// starts runs the binary with -h, which exits 0 from flag parsing before any
+// window opens.
+func starts(ctx context.Context, path string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "-h").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nowa wersja nie uruchamia się na tym systemie: %v %s", err, bytes.TrimSpace(out))
 	}
 	return nil
 }

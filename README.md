@@ -262,7 +262,9 @@ Requirements: **Go ≥ 1.22**, gcc, **Bun ≥ 1.3** (builds the UI) and GTK + We
 | GTK3 | `webkit2gtk-4.1` / `libwebkit2gtk-4.1-dev` | `gtk3` |
 
 The Makefile probes `pkg-config` and adds `-tags gtk3` by itself; override with
-`make WAILS_TAGS=gtk3` (or `WAILS_TAGS=` to force GTK4).
+`make WAILS_TAGS=gtk3` (or `WAILS_TAGS=` to force GTK4). Releases ship both:
+`szept-wails-linux-amd64` (GTK3) and `szept-wails-linux-amd64-gtk4`, and a
+client updates itself to the one matching its own build.
 
 The desktop client is pinned to `github.com/wailsapp/wails/v3` — the v3 line is
 an alpha, but it is the newest one there is (there is no v4), and v2 has no
@@ -705,7 +707,9 @@ Wymagania: **Go ≥ 1.22**, gcc, **Bun ≥ 1.3** (buduje interfejs) oraz GTK + W
 | GTK3 | `webkit2gtk-4.1` / `libwebkit2gtk-4.1-dev` | `gtk3` |
 
 Makefile sam sprawdza `pkg-config` i w razie potrzeby dokłada `-tags gtk3`;
-nadpiszesz to przez `make WAILS_TAGS=gtk3` (albo `WAILS_TAGS=` dla GTK4).
+nadpiszesz to przez `make WAILS_TAGS=gtk3` (albo `WAILS_TAGS=` dla GTK4). Wydania mają oba:
+`szept-wails-linux-amd64` (GTK3) i `szept-wails-linux-amd64-gtk4`, a klient
+aktualizuje się do tego, z którym sam był zbudowany.
 
 Klient pulpitowy stoi na `github.com/wailsapp/wails/v3` — linia v3 jest alfą,
 ale nowszej nie ma (v4 nie istnieje), a v2 nie ma bindowania serwisów, na
