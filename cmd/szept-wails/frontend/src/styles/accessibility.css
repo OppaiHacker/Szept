@@ -1,0 +1,60 @@
+/* ---------------------------- accessibility ---------------------------- */
+
+/* Reduced motion is not "no feedback": presses and state changes still need to
+   read, they just stop travelling across the screen. */
+@media (prefers-reduced-motion: reduce) {
+  /* fades stay, travel and loops go */
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-property: opacity, background, color, box-shadow !important;
+  }
+  .pop, .tip, .unsaved, .jump, .msg-tools { scale: none !important; translate: none !important; }
+  .msgs { scroll-behavior: auto; }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --line: color-mix(in srgb, var(--fg) 34%, transparent);
+    --line-2: color-mix(in srgb, var(--fg) 50%, transparent);
+    --muted: var(--fg-2);
+    --faint: var(--fg-2);
+  }
+  .btn, .input, .search, .composer { box-shadow: 0 0 0 1px var(--line-2); }
+}
+
+/* relayed link: a quiet but tappable marker in the chat header */
+.relay-tag { all: unset; cursor: pointer; color: var(--amber); font-weight: 600; text-decoration: underline dotted; text-underline-offset: 2px; }
+.relay-tag:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 3px; }
+.relay-facts { margin: 0 16px 12px; padding-left: 18px; color: var(--fg-2); font-size: var(--t-sm); line-height: 1.6; }
+.relay-facts li + li { margin-top: 6px; }
+
+/* sound space: you at the bottom, rings mark how loud a spot is */
+.room {
+  position: relative; height: 320px; margin: 0 16px 12px; overflow: hidden;
+  border-radius: var(--r-m); background: var(--sunk); box-shadow: inset 0 0 0 1px var(--line);
+  touch-action: none; user-select: none;
+}
+.room-ring {
+  position: absolute; left: 50%; top: 86%; width: calc(var(--r) * 200%); aspect-ratio: 1;
+  translate: -50% -50%; border-radius: 50%; border: 1px solid var(--line); pointer-events: none;
+}
+.room-side { position: absolute; top: 12px; font: 500 var(--t-xs) var(--mono); color: var(--faint); }
+.room-side.l { left: 16px; }
+.room-side.r { right: 16px; }
+.room-me, .room-peer {
+  position: absolute; translate: -50% -50%; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  font-size: var(--t-xs); color: var(--fg-2); white-space: nowrap;
+}
+.room-me b, .room-peer b { font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+.room-me { pointer-events: none; color: var(--muted); }
+.room-me .avatar { box-shadow: 0 0 0 2px var(--accent-line); }
+.room .avatar { width: 48px; height: 48px; font-size: var(--t-md); }
+.room-peer { cursor: grab; touch-action: none; z-index: 1; }
+.room-peer img { -webkit-user-drag: none; pointer-events: none; }
+.room-peer .mono { color: var(--muted); font-size: var(--t-xs); }
+.room-peer.held { cursor: grabbing; z-index: 2; }
+.room-peer.held .avatar { box-shadow: 0 0 0 2px var(--accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .room-peer .avatar { transition: box-shadow var(--fast); }
+}

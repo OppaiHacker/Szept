@@ -1,0 +1,23 @@
+/* ---------------------------- crop overlay ---------------------------- */
+
+.crop-stage {
+  position: relative;
+  margin: 0 16px 12px;
+  background: var(--video-bg);
+  border-radius: var(--r-m);
+  overflow: hidden;
+  height: 300px;
+  display: grid; place-items: center;
+  touch-action: none;
+  cursor: grab;
+}
+.crop-stage:active { cursor: grabbing; }
+.crop-stage img { position: absolute; transform-origin: center; user-select: none; -webkit-user-drag: none; }
+/* the white hairline keeps the frame readable over a picture that happens to
+   sit in the same hue as the accent */
+.crop-mask {
+  position: absolute; inset: 0; pointer-events: none;
+  box-shadow: 0 0 0 9999px rgb(4 5 9 / 72%), inset 0 0 0 1px rgb(255 255 255 / 65%);
+  border: 2px solid var(--accent);
+}
+.crop-mask.round { border-radius: 50%; }

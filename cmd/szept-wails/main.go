@@ -1,15 +1,15 @@
 // szept-wails: desktop client rendered by a webview (Wails v3) instead of Fyne.
 //
-// The whole UI lives in frontend/ as plain HTML/CSS/JS — no bundler, no npm.
-// Go keeps doing what it did before: it owns core and exposes it through the
-// App service (api.go) plus a few HTTP routes for bytes too big for the
-// JSON bridge (media.go).
+// The UI is a Vue + TypeScript app in frontend/, built by Vite into
+// frontend/dist (make builds it first) and embedded here. Go owns core and
+// exposes it through the App service (api.go) plus a few HTTP routes for
+// bytes too big for the JSON bridge (media.go).
 package main
 
 import (
 	"embed"
-	_ "embed"
 	"flag"
+	"io/fs"
 	"log"
 	"log/slog"
 	"os"
@@ -21,8 +21,11 @@ import (
 	"szept/internal/core"
 )
 
-//go:embed all:frontend
-var assets embed.FS
+// all: keeps dist/.gitkeep, so the package compiles before the first
+// frontend build; the window is then blank until `make` builds it.
+//
+//go:embed all:frontend/dist
+var dist embed.FS
 
 //go:embed Icon.png
 var iconPNG []byte
@@ -61,6 +64,8 @@ func main() {
 	cfg.DataDir = dataDir
 
 	// one fixed directory with -data, and always on Android (the app sandbox)
+	assets, _ := fs.Sub(dist, "frontend/dist")
+
 	api := newApp(cfg, cfgFile, dataDir, *dataFlag != "" || mobile)
 	nsvc, notify := notifier()
 	services := append([]application.Service{application.NewService(api)}, nsvc...)

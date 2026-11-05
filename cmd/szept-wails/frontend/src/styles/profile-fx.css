@@ -1,0 +1,127 @@
+/* ---------------------------- profile effects ---------------------------- */
+/* Names: data-nf picks the face, data-ne the effect; --na/--nb are palette colors. */
+[data-nf="1"] { font-family: var(--mono); letter-spacing: -.01em; }
+[data-nf="2"] { font-family: "Noto Serif", Georgia, "Times New Roman", serif; }
+[data-nf="3"] { font-variant: small-caps; letter-spacing: .06em; }
+[data-nf="4"] { font-family: "Oswald", "Bahnschrift", "Arial Narrow", "Nimbus Sans Narrow", "Roboto Condensed", "DejaVu Sans Condensed", sans-serif; font-stretch: condensed; letter-spacing: .02em; }
+[data-ne="1"] { color: var(--na); }
+[data-ne="2"], [data-ne="5"] {
+  background: linear-gradient(90deg, var(--na), var(--nb)); background-clip: text; -webkit-background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+}
+[data-ne="3"] { color: var(--na); text-shadow: 0 0 4px color-mix(in oklab, var(--na) 70%, transparent), 0 0 12px color-mix(in oklab, var(--na) 45%, transparent); }
+[data-ne="4"] { color: var(--na); text-shadow: 0 2px 0 color-mix(in oklab, var(--nb) 70%, #000), 0 0 1px #000; }
+[data-ne="5"] { background-image: linear-gradient(90deg, var(--na) 0%, var(--nb) 35%, #fff 50%, var(--nb) 65%, var(--na) 100%); background-size: 200% 100%; animation: fx-shine 3.2s linear infinite; }
+@keyframes fx-shine { to { background-position: -200% 0; } }
+
+/* Avatar decorations: sprites placed in the avatar's own box, spilling out. */
+.avd { position: relative; display: inline-grid; flex: none; border-radius: 50%; }
+.avd > .deco { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.deco > .ring { position: absolute; inset: -12%; width: 124%; height: 124%; overflow: visible; }
+.deco > img { position: absolute; height: auto; max-width: none; filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / 35%)); user-select: none; }
+.deco .m-sway { transform-origin: 50% 90%; animation: fx-sway 3.6s ease-in-out infinite; }
+.deco .m-swing { transform-origin: 50% 0; animation: fx-swing 2.8s ease-in-out infinite; }
+.deco .m-bob { animation: fx-bob 3.2s ease-in-out infinite; }
+.deco .m-pulse { animation: fx-pulse 1.1s cubic-bezier(.3, 0, .2, 1) infinite; }
+.deco .m-tw { animation: fx-twinkle 2.4s ease-in-out infinite; }
+.deco .m-flick { transform-origin: 50% 100%; animation: fx-flick .5s ease-in-out infinite alternate; }
+.deco .m-rise { animation: fx-up 3.2s linear infinite; }
+.deco .m-fall { animation: fx-fall 4.6s linear infinite; }
+.deco .m-glow { animation: fx-glow 4s ease-in-out infinite; }
+.deco .m-spin { animation: fx-spin 9s linear infinite; }
+.deco .m-drift { animation: fx-drift 5s ease-in-out infinite; }
+.deco .m-drip { animation: fx-drip 2.2s ease-in infinite; }
+.deco .m-pop { transform-origin: 30% 100%; animation: fx-pop 2.6s cubic-bezier(.2, .7, .3, 1) infinite; }
+.deco .m-flap { animation: fx-flap .7s ease-in-out infinite alternate; }
+@keyframes fx-sway { 50% { transform: rotate(7deg); } }
+@keyframes fx-swing { 0%, 100% { transform: rotate(-6deg); } 50% { transform: rotate(6deg); } }
+@keyframes fx-bob { 50% { transform: translateY(-6%); } }
+@keyframes fx-pulse { 0%, 40%, 100% { transform: scale(1); } 15% { transform: scale(1.18); } 28% { transform: scale(.94); } }
+@keyframes fx-twinkle { 50% { transform: scale(.7) rotate(12deg); opacity: .55; } }
+@keyframes fx-flick { from { transform: scale(1, .86); } to { transform: scale(.94, 1.08); } }
+@keyframes fx-up { from { transform: translateY(20%) scale(.7); opacity: 0; } 20% { opacity: 1; } to { transform: translateY(-110%) scale(1); opacity: 0; } }
+@keyframes fx-fall { from { transform: translate(0, -40%) rotate(0); opacity: 0; } 15%, 80% { opacity: 1; } to { transform: translate(-60%, 380%) rotate(200deg); opacity: 0; } }
+@keyframes fx-glow { 50% { filter: drop-shadow(0 0 6px rgb(255 230 150 / 70%)); } }
+@keyframes fx-spin { to { transform: rotate(1turn); } }
+@keyframes fx-drift { 50% { transform: translate(-8%, -10%) rotate(-6deg); } }
+@keyframes fx-drip { 0%, 30% { transform: translateY(0); } 70% { transform: translateY(14%); opacity: 1; } 100% { transform: translateY(22%); opacity: 0; } }
+@keyframes fx-pop { 0%, 55%, 100% { transform: scale(1); } 8% { transform: scale(1.3) rotate(-8deg); } 16% { transform: scale(.92); } 24% { transform: scale(1); } }
+@keyframes fx-flap { to { transform: scaleX(.55) translateY(-4%); } }
+/* in long lists a decoration moves only under the pointer, like Discord */
+:is(.msg, .member, .dock, .userbar) .deco > img { animation-play-state: paused; }
+:is(.msg, .member, .userbar):hover .deco > img { animation-play-state: running; }
+
+/* Card frame (data-fr) and particle effect (data-fx, a tsParticles canvas). */
+.pcard { position: relative; border-radius: inherit; isolation: isolate; }
+.pcard::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 3; }
+.pcard > .fxl { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; border-radius: inherit; }
+.pcard > .fxl canvas { position: absolute !important; inset: 0; width: 100% !important; height: 100% !important; }
+.pcard[data-fr="1"]::before { box-shadow: inset 0 0 0 2px var(--fa); }
+.pcard[data-fr="2"]::before { box-shadow: inset 0 0 0 2px var(--fa), inset 0 0 0 5px transparent, inset 0 0 0 6px var(--fb); }
+.pcard[data-fr="3"]::before {
+  padding: 2px; background: linear-gradient(135deg, var(--fa), var(--fb));
+  -webkit-mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+.pcard[data-fr="4"]::before {
+  --l: 18px;
+  background:
+    linear-gradient(var(--fa) 0 0) top left / var(--l) 2px, linear-gradient(var(--fa) 0 0) top left / 2px var(--l),
+    linear-gradient(var(--fa) 0 0) top right / var(--l) 2px, linear-gradient(var(--fa) 0 0) top right / 2px var(--l),
+    linear-gradient(var(--fb) 0 0) bottom left / var(--l) 2px, linear-gradient(var(--fb) 0 0) bottom left / 2px var(--l),
+    linear-gradient(var(--fb) 0 0) bottom right / var(--l) 2px, linear-gradient(var(--fb) 0 0) bottom right / 2px var(--l);
+  background-repeat: no-repeat;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-ne="5"], .deco * { animation: none !important; }
+}
+
+/* the editor */
+.fx-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; padding: 8px 16px; align-items: start; }
+.fx-row { margin-bottom: 16px; }
+.fx-row > label { display: block; margin-bottom: 8px; font-size: var(--t-s); font-weight: 600; color: var(--fg-2); }
+.fx-tiles { display: flex; flex-wrap: wrap; gap: 8px; }
+.fx-tile {
+  width: 76px; padding: 12px 4px 8px; border-radius: var(--r-m);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  background: var(--layer-2); box-shadow: inset 0 0 0 1px var(--line);
+  transition: background var(--fast), box-shadow var(--fast), scale 100ms var(--ease-out);
+}
+.fx-tile:hover { background: var(--layer-3); }
+.fx-tile:active { scale: .97; }
+.fx-tile.on { box-shadow: inset 0 0 0 2px var(--accent); }
+.fx-tile > span { font-size: var(--t-xs); color: var(--muted); line-height: 1.2; text-align: center; }
+.fx-tile.on > span { color: var(--fg-strong); }
+.fx-tile .avd, .fx-tile > .avatar { margin: 6px 0 4px; }
+.fx-tile:has(.deco) { padding-top: 20px; }
+.fx-name { font-size: 1.25rem; font-weight: 600; line-height: 32px; color: var(--fg-strong); }
+.fx-mini { display: block; width: 44px; height: 36px; border-radius: var(--r-s); background: var(--layer-4); overflow: hidden; }
+.fx-cols { display: flex; flex-direction: column; gap: 8px; }
+.fx-sw { display: flex; flex-wrap: wrap; gap: 5px; }
+.fx-sw button { width: 22px; height: 22px; border-radius: 50%; background: var(--c); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 20%); transition: scale 100ms var(--ease-out); }
+.fx-sw button.on { box-shadow: 0 0 0 2px var(--layer-1), 0 0 0 4px var(--fg-strong); }
+.fx-sw button:active { scale: .92; }
+.block.fx { overflow: visible; }
+.fx-preview { position: sticky; top: 16px; border-radius: var(--r-m); overflow: hidden; background: var(--pop); box-shadow: var(--sh-2); --card-ground: var(--pop); }
+.fx-preview .card-banner { height: 72px; }
+.fx-preview .card-id { margin-top: -40px; padding-bottom: 16px; }
+.fx-preview .avatar.xl { width: 80px; height: 80px; font-size: 1.75rem; }
+@media (max-width: 900px) { .fx-grid { grid-template-columns: minmax(0, 1fr); } .fx-preview { position: static; order: -1; } }
+
+/* saved GIFs */
+.gif-btn { font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.gif-pop { width: 360px; }
+.gifs { max-height: 380px; overflow-y: auto; padding: 8px; }
+.gif-grid { columns: 2; column-gap: 8px; }
+.gif-cell { position: relative; break-inside: avoid; margin-bottom: 8px; }
+.gif-send { display: block; width: 100%; border-radius: var(--r-s); overflow: hidden; background: var(--layer-3); transition: scale 100ms var(--ease-out); }
+.gif-send:active { scale: .98; }
+.gif-send img { display: block; width: 100%; height: auto; }
+.gif-x {
+  position: absolute; top: 4px; right: 4px; width: 24px; height: 24px;
+  display: grid; place-items: center; border-radius: var(--r-s);
+  background: rgb(0 0 0 / 60%); color: #fff; opacity: 0; transition: opacity var(--fast);
+}
+.gif-x svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.gif-cell:hover .gif-x, .gif-x:focus-visible { opacity: 1; }
+.fx-tile .avatar { width: 48px; height: 48px; }

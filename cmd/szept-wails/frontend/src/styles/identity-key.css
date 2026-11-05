@@ -1,0 +1,30 @@
+/* ---------------------------- identity key ---------------------------- */
+
+/* The one rich moment of a profile: the public key typed out like a carbon
+   copy, in mono on a recessed sheet. People read it aloud to each other. */
+.key-block {
+  margin: 0 16px 12px;
+  padding: 12px 16px;
+  border-radius: var(--r-s);
+  background: var(--sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.key-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: var(--t-s); font-weight: 500; color: var(--muted); }
+.key-head svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.key-block code {
+  display: block;
+  white-space: pre;
+  font: 400 var(--t-sm)/1.6 var(--mono);
+  letter-spacing: .04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-ink);
+  user-select: text;
+}
+/* signature: the first two groups of the key next to a name */
+.key-chip {
+  margin-left: 4px;
+  font: 400 var(--t-xs) var(--mono);
+  letter-spacing: .04em;
+  color: var(--muted);
+  vertical-align: 1px;
+}

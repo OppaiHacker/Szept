@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- app.css bg and accent: the window shows these before the page paints -->
+    <!-- frontend styles/tokens.css bg and accent: the window shows these before the page paints -->
     <color name="szept_bg">#16181B</color>
     <color name="szept_accent">#2F8A8A</color>
 </resources>

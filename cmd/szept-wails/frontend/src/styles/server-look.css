@@ -1,0 +1,39 @@
+/* ---------------------------- server look ---------------------------- */
+
+.rail-btn > .deco, .sl-icon > .deco { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+/* a decorated icon stays round: the ring is a circle and has to hug it */
+.rail-btn.decorated, .rail-btn.decorated:hover { border-radius: 50%; }
+/* the rail is tight: sprites shrink around their own centre, the ring does not */
+.rail-btn > .deco { --ds: .72; }
+.rail-btn > .deco > img { animation-play-state: paused; }
+.rail-btn:hover > .deco > img { animation-play-state: running; }
+
+/* a banner under the group name; the shade keeps the name readable on any picture */
+.g-head.has-banner {
+  height: 96px; align-items: flex-end; padding-bottom: 10px;
+  background-size: cover; background-position: center;
+  box-shadow: inset 0 -48px 32px -16px rgb(0 0 0 / 55%);
+}
+.g-head.has-banner h2, .g-head.has-banner .dd { color: #fff; stroke: #fff; }
+.g-head.has-banner:hover { background-color: transparent; filter: brightness(1.06); }
+
+.sl { padding: 0 16px 8px; }
+.sl-banner {
+  height: 120px; border-radius: var(--r-m); margin-bottom: 40px; position: relative;
+  background-color: color-mix(in oklab, var(--tone, var(--layer-4)) 62%, var(--layer-2));
+  background-size: cover; background-position: center;
+}
+.sl-icon {
+  position: relative; width: 48px; height: 48px; border-radius: 50%;
+  display: grid; place-items: center; background: var(--layer-3); color: var(--fg);
+}
+.sl-icon > img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.sl-icon .ini { font-weight: 600; }
+.sl-icon.big { position: absolute; left: 16px; bottom: -32px; width: 72px; height: 72px; box-shadow: 0 0 0 5px var(--card-ground, var(--layer-1)); }
+.sl .btn-row { padding: 0 0 16px; flex-wrap: wrap; }
+
+/* camera / screen start: how to send it */
+.vpick { display: grid; gap: 8px; padding: 10px; width: 300px; }
+.vp-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 8px; font-size: var(--t-sm); color: var(--fg-2); }
+.vp-row .input { height: 30px; padding: 0 8px; font-size: var(--t-sm); min-width: 0; }
+.vpick .btn { margin-top: 4px; justify-content: center; }

@@ -1,0 +1,72 @@
+/* ---------------------------- replies, pins, message menu ---------------------------- */
+.quote {
+  display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%;
+  margin: 2px 0 2px; padding: 0; text-align: left;
+  color: var(--muted); font-size: var(--t-s); line-height: 18px;
+}
+.quote svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.quote b { flex: none; color: var(--fg-2); font-weight: 600; }
+.quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quote:hover span, .quote:hover b { color: var(--fg-strong); }
+.msg.grouped .quote { margin-top: 4px; }
+
+.replying {
+  display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 4px 0 12px;
+  border-radius: var(--r-m) var(--r-m) 0 0;
+  background: var(--layer-3); color: var(--muted); font-size: var(--t-s);
+  box-shadow: inset 0 -1px 0 var(--line-2);
+}
+.replying[hidden] { display: none; }
+.replying > svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.replying span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.replying b { color: var(--fg-strong); font-weight: 600; }
+.replying .icon-btn { width: 24px; height: 24px; }
+.replying:not([hidden]) + .composer { border-top-left-radius: 0; border-top-right-radius: 0; }
+
+.staged {
+  display: flex; gap: 8px; overflow-x: auto;
+  padding: 8px; border-radius: var(--r-m) var(--r-m) 0 0;
+  background: var(--layer-3); box-shadow: inset 0 -1px 0 var(--line-2);
+}
+.staged[hidden] { display: none; }
+.pend {
+  position: relative; flex: none; display: flex; flex-direction: column; gap: 4px;
+  width: 112px; padding: 6px; border-radius: var(--r-s);
+  background: var(--hover); font-size: var(--t-s); color: var(--muted);
+}
+.pend img, .pend > svg { width: 100%; height: 72px; border-radius: var(--r-s); object-fit: cover; }
+.pend > svg { padding: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.pend span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pend .icon-btn { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; background: var(--layer-3); }
+.staged:not([hidden]) + .replying { border-radius: 0; }
+.staged:not([hidden]) + .composer { border-top-left-radius: 0; border-top-right-radius: 0; }
+
+.menu-reacts { display: flex; gap: 4px; padding: 2px 0 6px; }
+.menu-reacts button {
+  flex: 1; height: 36px; border-radius: var(--r-s);
+  background: var(--hover); font-size: 18px; line-height: 1;
+  transition: background var(--fast), scale 100ms var(--ease-out);
+}
+.menu-reacts button:hover { background: color-mix(in srgb, var(--fg) 14%, transparent); }
+.menu-reacts button:active { scale: .97; }
+
+.pins-pop { width: 360px; max-height: min(480px, 70vh); overflow-y: auto; }
+.pins { padding: 8px; }
+.pins h3 { margin: 4px 8px 8px; font-size: var(--t-base); font-weight: 600; color: var(--fg-strong); }
+.pin-row { display: flex; align-items: flex-start; gap: 4px; border-radius: var(--r-s); }
+.pin-row:hover { background: var(--hover); }
+.pin-go { flex: 1; min-width: 0; text-align: left; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.pin-who { display: flex; align-items: baseline; gap: 8px; }
+.pin-who b { color: var(--fg-strong); font-weight: 600; font-size: var(--t-sm); }
+.pin-who .t { color: var(--muted); font-size: var(--t-s); font-variant-numeric: tabular-nums; }
+.pin-tx { color: var(--fg); font-size: var(--t-sm); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.pin-row .icon-btn { margin: 6px 4px 0 0; opacity: 0; }
+.pin-row:hover .icon-btn, .pin-row .icon-btn:focus-visible { opacity: 1; }
+
+.emoji { width: 288px; }
+.emoji-q { margin: 8px 8px 0; }
+.emoji-body { max-height: 300px; overflow-y: auto; }
+.emoji-body h4 { margin: 8px 12px 0; font-size: var(--t-s); font-weight: 600; color: var(--muted); }
+.emoji-body .emoji-grid { padding: 4px 8px 8px; }
+.emoji-none { padding: 16px; color: var(--muted); font-size: var(--t-sm); text-align: center; grid-column: 1 / -1; }

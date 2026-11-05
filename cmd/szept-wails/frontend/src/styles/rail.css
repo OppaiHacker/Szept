@@ -1,0 +1,88 @@
+/* ---------------------------- rail ---------------------------- */
+
+.rail {
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.rail::-webkit-scrollbar { display: none; }
+
+/* Circles that square off under the pointer or when open; the pill on the
+   left edge grows from a dot (unread) to half (hover) to full (open). */
+.rail-btn {
+  position: relative;
+  flex: 0 0 auto;
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  color: var(--fg);
+  background: var(--layer-3);
+  transition: border-radius var(--med), background var(--fast), color var(--fast), scale 100ms var(--ease-out);
+}
+.rail-btn > svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.rail-btn.home > svg { fill: currentColor; stroke: none; width: 26px; height: 26px; }
+.rail-btn > img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.rail-btn .ini { font-size: var(--t-base); font-weight: 600; letter-spacing: var(--tr-flat); white-space: nowrap; }
+.rail-btn:hover, .rail-btn.active { border-radius: 16px; background: var(--accent-fill); color: var(--on-accent); }
+.rail-btn:active { scale: .97; }
+.rail-btn.add { color: var(--muted); }
+.rail-btn.add:hover { background: var(--accent-fill); color: var(--on-accent); }
+
+.rail-btn::before {
+  content: "";
+  position: absolute; left: -12px; top: 50%;
+  width: 4px; height: 40px;
+  translate: 0 -50%;
+  scale: 1 0;
+  border-radius: 0 4px 4px 0;
+  background: var(--fg-strong);
+  transition: scale var(--med);
+}
+.rail-btn.unread::before { scale: 1 .2; }
+.rail-btn:hover::before { scale: 1 .5; }
+.rail-btn.active::before { scale: 1 1; }
+.rail-btn.add::before { display: none; }
+.rail-sep { flex: 0 0 auto; width: 32px; height: 2px; border-radius: 1px; background: var(--layer-4); }
+
+.rail-btn .pip {
+  position: absolute; bottom: -4px; right: -4px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--fg-strong); color: var(--bg);
+  font-size: 11px; font-weight: 600; line-height: 16px;
+  font-family: var(--mono);
+  text-align: center;
+  border: 3px solid var(--bg);
+  box-sizing: content-box;
+}
+.rail-btn .live {
+  position: absolute; top: -3px; right: -3px;
+  width: 16px; height: 16px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--green); color: #fff;
+  border: 3px solid var(--bg);
+  box-sizing: content-box;
+}
+.rail-btn .live svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+
+/* rail tooltip, placed by RailTip.vue */
+.tip {
+  position: fixed; z-index: 90;
+  translate: 0 -50%;
+  padding: 6px 10px;
+  border-radius: var(--r-s);
+  background: var(--pop); color: var(--fg-strong);
+  font-size: var(--t-sm); font-weight: 500;
+  box-shadow: var(--sh-2), 0 0 0 1px var(--line-2);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0; scale: .96;
+  transform-origin: left center;
+  transition: opacity var(--d-fast) var(--ease-out), scale var(--d-fast) var(--ease-out);
+}
+.tip.on { opacity: 1; scale: 1; }

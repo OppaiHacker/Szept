@@ -10,7 +10,7 @@ import (
 // Background pings, Android only. While the activity is stopped the page may
 // be gone (Android destroys activities freely; the foreground service keeps
 // the process and Go alive), so Go posts the notifications that notifyPings
-// in app.js would. While a.bg is set the page's own Notify calls are dropped,
+// in the frontend (store/notify.ts) would. While a.bg is set the page's own Notify calls are dropped,
 // so a ping is never shown twice.
 
 // setBG is called on android:ActivityStopped (true) and ActivityStarted (false).
@@ -55,7 +55,7 @@ func (a *App) bgPings(c *core.Core) {
 	}
 }
 
-// pingsMe mirrors pingsMe in app.js: @name or @everyone/@here as a whole word.
+// pingsMe mirrors pingsMe in frontend/src/lib/text.ts: @name or @everyone/@here as a whole word.
 func pingsMe(text, me string) bool {
 	if !strings.Contains(text, "@") {
 		return false

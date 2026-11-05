@@ -87,8 +87,8 @@ func TestRoutes(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/app.js", nil))
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/assets/index.js", nil))
 	if w.Body.String() != "frontend" {
-		t.Errorf("/app.js nie trafiło do frontendu: %q", w.Body.String())
+		t.Errorf("/assets/index.js nie trafiło do frontendu: %q", w.Body.String())
 	}
 }

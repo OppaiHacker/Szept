@@ -1,0 +1,254 @@
+/* a rule across the log with the date sitting in a gap in the middle */
+.day {
+  display: flex; align-items: center; gap: 8px;
+  margin: 24px 16px 8px;
+  font-size: var(--t-s); font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.day::before, .day::after { content: ""; flex: 1; height: 1px; background: var(--line-2); }
+
+.sys {
+  margin: 8px 0 0;
+  padding: 2px 48px 2px 72px;
+  font-size: var(--t-base);
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.sys b { color: var(--fg-2); font-weight: 600; }
+
+/* A log, not a chat of bubbles: every message is a full-width row, the
+   first of a block carries avatar, name and clock, the rest hang under it. */
+.msg {
+  display: flex;
+  gap: 16px;
+  padding: 2px 48px 2px 16px;
+  position: relative;
+  transition: background 60ms linear;
+}
+.msg:not(.grouped) { margin-top: 16px; padding-top: 2px; }
+.day + .msg, .sys + .msg, .new-line + .msg { margin-top: 4px; }
+/* a mention gets a tinted row; no side stripe */
+.ping { color: var(--accent-ink); background: var(--accent-soft); border-radius: 4px; padding: 0 3px; font-weight: 600; }
+.msg.mention .ping { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+.msg.mention { background: color-mix(in srgb, var(--amber) 8%, transparent); }
+.msg.mention:hover { background: color-mix(in srgb, var(--amber) 12%, transparent); }
+/* sent but nobody has it yet */
+.msg.pending .meta { opacity: .6; }
+
+/* speaking: a solid green ring while the voice gate is open (Speak.vue sets
+   .talking). On at once, off with a short fade so word gaps do not flicker. */
+.spk { position: relative; display: inline-grid; flex: none; border-radius: 50%; }
+.spk::after {
+  content: ""; position: absolute; inset: -2px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px var(--green); /* 2px gap, then 3px ring */
+  opacity: 0;
+  transition: opacity 200ms linear;
+  pointer-events: none;
+}
+.spk.talking::after { opacity: 1; transition: none; }
+@media (prefers-reduced-motion: reduce) { .spk::after { transition: none; } }
+.msg .gutter > button { border-radius: 50%; display: block; transition: scale 100ms var(--ease-out); }
+.msg .gutter > button:active { scale: .97; }
+.msg-who button.n { padding: 0; cursor: pointer; }
+.msg-who button.n:hover { text-decoration: underline; }
+
+/* "nowe": where unread starts when you open the chat */
+.new-line {
+  position: relative; height: 0; margin: 12px 16px 0;
+  border-top: 1px solid var(--accent-line);
+}
+.new-line span {
+  position: absolute; right: 0; top: -8px;
+  height: 16px; padding: 0 6px;
+  border-radius: var(--r-xs);
+  background: var(--accent-fill); color: var(--on-accent);
+  font-size: var(--t-xs); font-weight: 600; line-height: 16px;
+}
+.msg:hover { background: color-mix(in srgb, var(--bg) 22%, transparent); }
+.msg:hover .msg-tools, .msg:focus-within .msg-tools { opacity: 1; translate: 0 0; pointer-events: auto; }
+.msg .gutter { width: 40px; flex: 0 0 auto; }
+.msg .gt {
+  display: block; height: 22px;
+  font-size: 11px; line-height: 22px; text-align: right;
+  color: var(--faint); font-variant-numeric: tabular-nums;
+  visibility: hidden;
+}
+.msg:hover .gt { visibility: visible; }
+
+.msg-col { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+
+.msg-who {
+  display: flex; align-items: baseline; gap: 8px;
+  line-height: 22px;
+}
+.msg-who .n { font-size: .9375rem; font-weight: 600; color: var(--fg-strong); }
+.msg-who .t { font-size: var(--t-s); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.bubble {
+  position: relative;
+  color: var(--fg);
+  font-size: .9375rem;
+  line-height: 1.47;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+/* Only messages that just arrived animate. Repainting the list must not make
+   the whole history fly in again — see MessageList.vue. */
+.msg.fresh { animation: msg-in var(--d-mid) var(--ease-out); }
+@keyframes msg-in { from { opacity: 0; translate: 0 6px; } }
+
+.msg.deleted .bubble { color: var(--faint); font-style: italic; }
+
+.bubble .meta {
+  margin-left: 6px;
+  vertical-align: -2px;
+  color: var(--faint);
+  display: inline-flex; align-items: center;
+}
+.bubble .meta svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.bubble .meta .read { stroke: var(--accent-ink); }
+
+.msg mark { background: color-mix(in srgb, var(--amber) 40%, transparent); color: inherit; border-radius: 3px; }
+
+.attach { display: block; width: fit-content; max-width: min(550px, 100%); margin: 2px 0 4px; border-radius: var(--r-m); overflow: hidden; }
+.attach img {
+  display: block; max-width: 100%; max-height: 350px;
+  object-fit: cover; cursor: zoom-in; background: var(--sunk);
+  transition: scale var(--med);
+}
+.attach img:active { scale: .99; }
+.attach.pending img { opacity: .6; }
+.attach { position: relative; }
+/* .bubble keeps text whitespace (pre-wrap); template indentation must not show */
+.bubble > .attach, .bubble > .file, .bubble > .video { white-space: normal; }
+.file.audio { flex-direction: column; align-items: stretch; gap: 4px; padding: 12px 12px 6px; }
+.file.audio:hover { background: var(--layer-1); }
+.video {
+  width: fit-content; max-width: min(550px, 100%); margin: 4px 0;
+  border-radius: var(--r-m); overflow: hidden;
+  background: var(--layer-1); border: 1px solid var(--line);
+}
+.video video { display: block; max-width: 100%; max-height: 350px; min-width: 320px; background: var(--video-bg); cursor: pointer; }
+.video:fullscreen { display: flex; flex-direction: column; max-width: none; border: 0; border-radius: 0; background: #000; }
+.video:fullscreen video { flex: 1; min-height: 0; width: 100%; max-height: none; }
+.mbar { display: flex; align-items: center; gap: 8px; padding: 4px 6px; color: var(--muted); font: var(--t-xs) var(--mono); }
+.file.audio .mbar { padding: 0; margin-left: -6px; }
+.mbar button { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: var(--r-s); color: var(--fg-2); transition: background var(--fast), color var(--fast); }
+.mbar button:hover { background: var(--hover); color: var(--fg-strong); }
+.mbar svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.mbar .mb-play svg { fill: currentColor; }
+.mbar .mb-seek { flex: 1; min-width: 60px; }
+/* the volume slides out from the speaker on hover or keyboard focus */
+.mb-v { display: flex; align-items: center; }
+.mbar .mb-vol { width: 0; flex: none; opacity: 0; transition: width var(--fast), opacity var(--fast), margin var(--fast); }
+.mb-v:hover .mb-vol, .mb-v:focus-within .mb-vol { width: 72px; opacity: 1; margin: 0 4px; }
+@media (prefers-reduced-motion: reduce) { .mbar .mb-vol { transition: none; } }
+.gif-star {
+  position: absolute; top: 6px; right: 6px;
+  width: 30px; height: 30px; display: grid; place-items: center;
+  border-radius: var(--r-s); background: rgb(0 0 0 / .6); color: #fff;
+  opacity: 0; transition: opacity var(--fast);
+}
+.attach:hover .gif-star, .gif-star:focus-visible { opacity: 1; }
+.gif-star svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linejoin: round; }
+.gif-star.on svg { fill: currentColor; }
+
+.file {
+  display: flex; align-items: center; gap: 12px;
+  margin: 4px 0;
+  padding: 12px;
+  width: min(432px, 100%);
+  border-radius: var(--r-m);
+  background: var(--layer-1);
+  border: 1px solid var(--line);
+  transition: background var(--fast);
+}
+.file:hover { background: color-mix(in srgb, var(--layer-1), var(--layer-3)); }
+.file .ico { width: 32px; height: 40px; display: grid; place-items: center; flex: 0 0 auto; }
+.file .ico svg { width: 24px; height: 24px; fill: none; stroke: var(--accent-ink); stroke-width: 1.75; }
+.file .nm { flex: 1; min-width: 0; text-align: left; }
+.file .nm b { display: block; font-weight: 500; font-size: 1rem; color: var(--accent-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .nm span { font-size: var(--t-s); color: var(--muted); }
+
+.reactions:empty { display: none; }
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px; }
+.reaction {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 6px;
+  border-radius: var(--r-m);
+  background: var(--layer-1);
+  border: 1px solid transparent;
+  font-size: var(--t-base);
+  transition: background var(--fast), border-color var(--fast), scale 100ms var(--ease-out);
+}
+/* the one overshoot in the app: a reaction lands */
+/* the log is rebuilt on every change, so only a message that just landed pops */
+.msg.fresh .reaction { animation: react-pop 220ms var(--ease-out); }
+@keyframes react-pop { 0% { scale: .9; opacity: 0; } 60% { scale: 1.08; opacity: 1; } }
+.reaction:hover { border-color: var(--line-2); }
+.reaction:active { scale: .97; }
+.reaction.mine { background: var(--accent-soft); border-color: var(--accent); }
+.reaction .n { color: var(--fg-2); font-size: var(--t-sm); font-weight: 600; font-variant-numeric: tabular-nums; }
+.reaction.mine .n { color: var(--fg-strong); }
+
+/* Hover tools materialise towards the bubble they belong to. */
+.msg-tools {
+  position: absolute;
+  top: -16px; right: 14px;
+  display: flex;
+  padding: 0;
+  border-radius: var(--r-m);
+  background: var(--layer-2);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--sh-1);
+  z-index: 3;
+  opacity: 0; translate: 0 2px;
+  pointer-events: none;
+  transition: opacity var(--fast), translate var(--fast);
+}
+.msg-tools button {
+  width: 32px; height: 32px; border-radius: var(--r-s);
+  display: grid; place-items: center;
+  font-size: var(--t-md); color: var(--fg-2);
+  transition: background var(--fast), scale var(--fast);
+}
+.msg-tools button:hover { background: var(--hover); color: var(--fg-strong); }
+.msg-tools button:active { scale: .97; }
+.msg-tools button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+.typing {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 16px;
+  font-size: var(--t-s); color: var(--fg-2);
+  height: 24px;
+}
+.typing .dots { display: inline-flex; gap: 3px; }
+.typing .dots i {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--fg-2);
+  animation: typing 1.2s ease-in-out infinite;
+}
+.typing .dots i:nth-child(2) { animation-delay: .15s; }
+.typing .dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes typing { 0%, 60%, 100% { opacity: .25; translate: 0 0; } 30% { opacity: 1; translate: 0 -2px; } }
+
+/* scrolled up: a bar over the composer leads back down */
+.jump {
+  position: absolute; z-index: 4;
+  left: 16px; right: 16px; bottom: calc(100% - 4px);
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  height: 32px; padding: 0 12px 4px;
+  border-radius: var(--r-m) var(--r-m) 0 0;
+  background: var(--accent-fill); color: var(--on-accent);
+  font-size: var(--t-sm); font-weight: 500;
+  opacity: 0; translate: 0 8px; pointer-events: none;
+  transition: opacity 180ms var(--ease-out), translate 180ms var(--ease-out);
+}
+.jump.show { opacity: 1; translate: 0 0; pointer-events: auto; }
+.jump b { display: flex; align-items: center; gap: 4px; font-weight: 600; }
+.jump svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+.conv-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }

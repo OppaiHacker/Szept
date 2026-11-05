@@ -1,0 +1,32 @@
+/* ============================ layout ============================ */
+
+.view { flex: 1 1 auto; min-height: 0; display: flex; }
+
+.shell {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  /* one row, always: a hidden pane must not wrap into a second row and
+     halve everyone's height */
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-columns: var(--rail-w) var(--list-w) minmax(0, 1fr);
+  background: var(--bg);
+}
+.shell > .rail { grid-area: 1 / 1; }
+.shell > .side { grid-area: 1 / 2; }
+.shell > .conv, .shell > .members { grid-row: 1 / 3; }
+/* voice panel and account strip: one card under the rail and the channel
+   list, the way the pane above it ends */
+.dock {
+  grid-area: 2 / 1 / 3 / 3;
+  margin: 0 8px 8px;
+  border-radius: var(--r-m);
+  overflow: hidden;
+  background: var(--layer-2);
+  box-shadow: inset 0 0 0 1px var(--line-2), var(--sh-1);
+  display: flex; flex-direction: column;
+  position: relative; z-index: 2;
+}
+.side { padding-bottom: 8px; }
+.shell.with-members { grid-template-columns: var(--rail-w) var(--list-w) minmax(0, 1fr) var(--members-w); }
+.shell:not(.with-members) .members { display: none; }

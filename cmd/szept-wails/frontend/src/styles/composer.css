@@ -1,0 +1,88 @@
+/* ---------------------------- composer ---------------------------- */
+
+.composer-wrap { flex: 0 0 auto; padding: 0 16px 20px; position: relative; }
+
+.hints {
+  position: absolute;
+  left: 16px; right: 16px; bottom: calc(100% + 6px);
+  padding: 4px;
+  background: var(--layer-1);
+  border-radius: var(--r-m);
+  box-shadow: var(--sh-2);
+  overflow: hidden;
+  z-index: 6;
+  transform-origin: bottom center;
+  animation: hints-in 180ms var(--ease);
+}
+@keyframes hints-in { from { opacity: 0; scale: .97; translate: 0 6px; } }
+.hint {
+  display: flex; align-items: baseline; gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--r-xs);
+  text-align: left;
+  font-size: var(--t-sm);
+  transition: background var(--fast);
+}
+.hint b { font-weight: 600; color: var(--fg); font-family: var(--mono); font-size: var(--t-s); }
+.hint i { color: var(--faint); font-style: normal; font-family: var(--mono); font-size: var(--t-s); }
+.hint span { margin-left: auto; color: var(--muted); font-size: var(--t-s); }
+.hint:hover, .hint.sel { background: var(--layer-4); }
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 8px 0 4px;
+  position: relative; z-index: 5;
+  background: var(--layer-3);
+  border-radius: var(--r-m);
+}
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 168px;
+  padding: 11px 4px;
+  background: none; border: 0; outline: 0; resize: none;
+  /* Composer.vue sets the height from scrollHeight: field-sizing is missing from the
+     WebKitGTK builds several distros still ship */
+  font-size: 1rem; line-height: 1.375;
+  overflow-y: auto;
+}
+.composer textarea::placeholder { color: var(--faint); }
+.composer .icon-btn { width: 32px; height: 32px; margin: 6px 0; }
+.composer .add-btn {
+  width: 24px; height: 24px; margin: 10px 8px 10px 6px; flex: none;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--fg-2); color: var(--layer-3);
+  transition: background var(--fast), scale 100ms var(--ease-out);
+}
+.composer .add-btn:hover { background: var(--fg-strong); }
+.composer .add-btn:active { scale: .97; }
+.composer .add-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+.composer .send {
+  width: 32px; height: 32px; margin: 6px 0; border-radius: var(--r-s);
+  display: grid; place-items: center;
+  background: transparent; color: var(--accent-ink);
+  transition: scale 100ms var(--ease-out), background var(--fast), color var(--fast);
+}
+.composer .send svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.composer .send:hover { background: var(--hover); }
+.composer .send:active { scale: .97; }
+.composer .send:disabled { background: transparent; color: var(--faint); scale: 1; cursor: default; }
+
+.drop-hint {
+  position: absolute; inset: 8px;
+  border: 2px dashed var(--accent-line);
+  border-radius: var(--r-m);
+  background: color-mix(in srgb, var(--accent) 14%, var(--layer-2));
+  display: grid; place-items: center;
+  font-weight: 600; color: var(--accent-ink);
+  pointer-events: none;
+  z-index: 8;
+  animation: fade 140ms var(--ease);
+}
+/* the Wails runtime sets this class on the drop target while a file hovers */
+.conv-body:not(.file-drop-target-active) .drop-hint { display: none; }

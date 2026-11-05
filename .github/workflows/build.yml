@@ -29,6 +29,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # the client's UI is built by Vite (make frontend)
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: cmd/szept-wails/frontend/package.json
       # GTK3 + webkit2gtk-4.1: what most distros still ship (see WAILS_TAGS)
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - run: make bin/szept-wails WAILS_TAGS=gtk3 VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
@@ -46,6 +50,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # the client's UI is built by Vite (make frontend)
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: cmd/szept-wails/frontend/package.json
       - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 imagemagick nsis
       # Ubuntu ships ImageMagick 6, whose `convert` takes the same arguments
       - run: command -v magick || sudo ln -s "$(command -v convert)" /usr/local/bin/magick

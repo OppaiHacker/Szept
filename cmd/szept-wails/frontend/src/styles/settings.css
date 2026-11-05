@@ -1,0 +1,175 @@
+/* ---------------------------- settings ---------------------------- */
+
+/* A full layer over the app, below the title bar. It zooms in from the app
+   (scale 1.04 -> 1) and the chat keeps living underneath. */
+.set-layer {
+  position: fixed; inset: var(--titlebar-h) 0 0; z-index: 50;
+  display: flex;
+  background: var(--layer-2);
+  animation: set-in var(--d-slow) var(--ease-out);
+}
+.set-layer.out { pointer-events: none; animation: set-out 200ms var(--ease-in) forwards; }
+@keyframes set-in { from { opacity: 0; scale: 1.04; } }
+@keyframes set-out { to { opacity: 0; scale: 1.04; } }
+.settings {
+  position: relative;
+  flex: 1; min-width: 0;
+  display: grid; grid-template-columns: minmax(232px, 1fr) minmax(0, 2.2fr);
+}
+.set-nav {
+  background: var(--layer-1);
+  overflow-y: auto;
+  /* the nav hugs the content: a 218px column at the right edge of its half */
+  padding: 60px 8px 20px max(8px, calc(100% - 226px));
+}
+.set-me {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px; border-radius: var(--r-s); text-align: left;
+}
+.set-me:hover { background: var(--hover); }
+.set-me > span { min-width: 0; }
+.set-me b { display: block; font-weight: 600; color: var(--fg-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-me b + span { font-size: var(--t-s); color: var(--muted); }
+.set-nav .search { margin: 8px 0 12px; }
+.set-group { padding: 12px 8px 4px; font-size: var(--t-s); font-weight: 600; color: var(--muted); }
+.set-sep { height: 1px; margin: 8px; background: var(--line); }
+.set-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; margin-bottom: 2px;
+  border-radius: var(--r-s);
+  color: var(--fg-2); font-size: var(--t-md); font-weight: 500; text-align: left;
+}
+.set-row svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.set-row:hover { background: var(--hover); color: var(--fg); }
+.set-row.active { background: var(--layer-4); color: var(--fg-strong); }
+.set-body { position: relative; overflow-y: auto; padding: 60px 40px 96px; display: flex; align-items: flex-start; gap: 24px; }
+.set-close { position: sticky; top: 0; flex: none; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.set-close .round-btn { background: transparent; box-shadow: inset 0 0 0 2px var(--fg-2); }
+.set-close .round-btn:hover { background: var(--hover); }
+.set-close span { font-size: var(--t-s); font-weight: 600; color: var(--muted); }
+
+/* unsaved changes: floats in at the bottom, shakes when you try to leave */
+.unsaved {
+  position: absolute; z-index: 2;
+  /* lines up with the content column (the nav takes 1 of 3.2 parts) */
+  left: calc(100% / 3.2 + 40px); bottom: 20px;
+  width: min(740px, calc(100% / 3.2 * 2.2 - 80px));
+  translate: 0 16px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 10px 10px 16px;
+  border-radius: var(--r-m);
+  background: var(--pop); color: var(--fg-strong);
+  box-shadow: var(--sh-3);
+  font-weight: 500;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--d-mid) var(--ease-out), translate var(--d-mid) var(--ease-out), background var(--d-mid);
+}
+.unsaved.show { opacity: 1; translate: 0 0; pointer-events: auto; }
+.unsaved span { flex: 1; }
+.unsaved.shake { background: var(--red); color: #fff; animation: shake 400ms var(--ease-in-out); }
+@keyframes shake { 20%, 60% { translate: -6px 0; } 40%, 80% { translate: 6px 0; } }
+.btn.link { background: none; color: inherit; min-height: 32px; }
+.btn.link:hover { background: none; text-decoration: underline; }
+.btn.save { background: var(--accent-fill); color: var(--on-accent); min-height: 32px; }
+.btn.save:hover { background: color-mix(in oklab, var(--accent-fill) 85%, #000); }
+.set-back { display: none; position: absolute; top: 12px; left: 8px; }
+/* phone: the section list is a page of its own and needs its own way out */
+.set-nav-close { display: none; float: right; }
+.set-back svg { rotate: 180deg; }
+.set-body .wrap { flex: 0 1 740px; min-width: 0; }
+.set-body h2 {
+  font-size: var(--t-xl); font-weight: 600;
+  letter-spacing: var(--tr-tight); line-height: 1.15;
+  color: var(--fg-strong);
+  margin-bottom: 8px;
+}
+.set-body > .wrap > p.lead {
+  color: var(--muted); font-size: var(--t-sm);
+  margin-bottom: 24px; line-height: 1.6; max-width: 58ch; text-wrap: pretty;
+}
+
+.block {
+  --card-ground: var(--layer-1);
+  background: var(--layer-1);
+  border-radius: var(--r-m);
+  padding: 16px 0 8px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+/* a banner is the card's own lid — it starts at the edge, not inside the padding */
+.block > .card-banner:first-child { margin-top: -16px; }
+.block > h4 { padding: 0 16px 4px; font-size: var(--t-base); font-weight: 600; color: var(--fg-strong); }
+.block > .hint-text { padding: 0 16px; margin-bottom: 12px; }
+.block .field { padding: 10px 16px 0; }
+.block .btn-row { padding: 16px 16px 12px; }
+/* a row is a row wherever it lands — modal bodies use these outside a .block */
+.list-line {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 16px;
+  font-size: var(--t-sm);
+}
+.list-line + .list-line { box-shadow: inset 0 1px 0 var(--line); }
+.list-line .mono { font-family: var(--mono); font-size: var(--t-s); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+.list-line .tag { font-size: var(--t-xs); font-weight: 500; color: var(--muted); }
+.list-line .dev { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.list-line .dev b { font-weight: 600; }
+.list-line .dev .mono { flex: none; color: var(--muted); }
+.list-line .dev span:last-child:not(.mono) { font-size: var(--t-xs); color: var(--muted); }
+/* dates in a column: tabular figures so the digits line up row to row */
+.list-line .when { margin-left: auto; color: var(--muted); font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+
+.toggle { display: flex; align-items: center; gap: 12px; padding: 10px 16px; }
+.toggle .tx { flex: 1; }
+.toggle .tx b { display: block; font-size: var(--t-sm); font-weight: 500; color: var(--fg-strong); }
+.toggle .tx span { font-size: var(--t-s); color: var(--muted); }
+.switch {
+  width: 40px; height: 24px; border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  position: relative; flex: 0 0 auto;
+  transition: background var(--med);
+}
+.switch::after {
+  content: "";
+  position: absolute; top: 3px; left: 3px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fff;
+  transition: translate 200ms var(--ease);
+}
+.switch.on { background: var(--accent-fill); }
+.switch.on::after { translate: 16px 0; }
+.switch:active::after { width: 22px; }
+
+.swatches { display: flex; flex-wrap: wrap; gap: 12px; padding: 4px 16px 12px; }
+.swatch {
+  width: 32px; height: 32px; border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--line);
+  transition: scale var(--fast), box-shadow var(--med);
+}
+.swatch:hover { box-shadow: 0 0 0 2px var(--layer-3), 0 0 0 4px var(--line-2); }
+.swatch:active { scale: .95; }
+.swatch.sel { box-shadow: 0 0 0 2px var(--layer-3), 0 0 0 4px var(--fg-2); }
+
+.slider { width: 100%; accent-color: var(--accent); }
+
+/* Theme picker: three segments in one track, the way a platform control does
+   it — the choice and its alternatives are visible at once. */
+.segmented {
+  display: flex; gap: 2px;
+  margin: 4px 16px 12px;
+  padding: 3px;
+  background: var(--bg);
+  border-radius: var(--r-s);
+}
+.segmented button {
+  flex: 1;
+  padding: 4px 12px;
+  border-radius: var(--r-xs);
+  font-size: var(--t-sm); font-weight: 500;
+  color: var(--muted);
+  transition: background var(--fast), color var(--fast), scale var(--fast);
+}
+.segmented button:hover { color: var(--fg); }
+.segmented button:active { scale: .97; }
+.segmented button.sel {
+  background: var(--layer-4); color: var(--fg-strong);
+}

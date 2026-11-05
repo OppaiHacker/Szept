@@ -9,42 +9,9 @@
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>szept</title>
-<link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <header class="titlebar" style="--wails-draggable:drag">
-    <div class="tb-brand">
-      <svg class="tb-mark" viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="7" y="9.4" width="1.9" height="5.2" rx=".95"/><rect x="11.05" y="7" width="1.9" height="10" rx=".95"/><rect x="15.1" y="9.4" width="1.9" height="5.2" rx=".95"/>
-      </svg>
-      <span class="tb-name">szept</span>
-      <span class="tb-ver" id="tb-ver"></span>
-      <span class="tb-sub" id="tb-sub"></span>
-    </div>
-    <div class="tb-status" id="tb-status" hidden>
-      <span class="dot"></span><span class="txt"></span>
-    </div>
-    <div class="tb-buttons" style="--wails-draggable:no-drag">
-      <button class="tb-btn" data-win="min" title="Minimalizuj" aria-label="Minimalizuj">
-        <svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg>
-      </button>
-      <button class="tb-btn" data-win="max" title="Maksymalizuj" aria-label="Maksymalizuj">
-        <svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" rx="1.5"/></svg>
-      </button>
-      <button class="tb-btn danger" data-win="close" title="Zamknij" aria-label="Zamknij">
-        <svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6"/></svg>
-      </button>
-    </div>
-  </header>
-
-  <main id="view" class="view"></main>
-  <div class="conn-strip" id="conn-strip" role="status" hidden><span class="dot"></span><span></span></div>
-
-  <div id="set-root"></div>
-  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
-  <div id="modal-root"></div>
-
-  <script src="/fx/tsparticles.bundle.min.js"></script>
-  <script type="module" src="/app.js"></script>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

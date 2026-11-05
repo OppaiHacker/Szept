@@ -1,0 +1,75 @@
+/* friends page tabs */
+.tabs { display: flex; align-items: center; gap: 8px; min-width: 0; margin-left: 8px; }
+.tabs button {
+  padding: 4px 10px; border-radius: var(--r-s);
+  font-size: var(--t-base); font-weight: 500; color: var(--fg-2);
+  white-space: nowrap;
+  transition: background var(--fast), color var(--fast), scale 100ms var(--ease-out);
+}
+.tabs button:hover { background: var(--hover); color: var(--fg); }
+.tabs button.sel { background: var(--layer-4); color: var(--fg-strong); }
+.tabs button:active { scale: .97; }
+.tabs .add { color: var(--accent-ink); }
+.tabs .add:hover { color: var(--accent-ink); }
+.tabs .add.sel { background: var(--accent-soft); color: var(--accent-ink); }
+
+.fr-body { padding: 16px 24px 24px; }
+.fr-body h3 { font-size: var(--t-md); font-weight: 600; color: var(--fg-strong); margin: 4px 0 8px; }
+.fr-body h3 ~ h3 { margin-top: 32px; }
+.fr-body .lead { color: var(--muted); font-size: var(--t-sm); margin-bottom: 16px; }
+.fr-body .code-box, .fr-body .key-block { margin: 0 0 12px; max-width: 640px; }
+.fr-body .btn-row { padding-left: 0; max-width: 640px; }
+.add-line {
+  display: flex; gap: 8px; align-items: center;
+  max-width: 640px;
+  padding: 4px 4px 4px 0;
+  background: var(--bg);
+  border-radius: var(--r-m);
+  border: 1px solid var(--line);
+}
+.add-line:focus-within { border-color: var(--accent); }
+.add-line .input, .add-line .input:focus { background: transparent; box-shadow: none; outline: none; font-family: var(--mono); font-size: var(--t-base); }
+.add-line .btn { flex: none; min-height: 32px; }
+.fr-count { padding: 0 0 8px; font-size: var(--t-s); font-weight: 600; color: var(--muted); }
+.friend {
+  display: flex; align-items: center; gap: 12px;
+  height: 60px; padding: 0 12px; margin: 0 -12px;
+  border-radius: var(--r-m);
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+  transition: background var(--fast);
+}
+.friend:hover { background: var(--hover); border-top-color: transparent; }
+.friend:hover + .friend { border-top-color: transparent; }
+.friend .avatar { width: 32px; height: 32px; font-size: var(--t-s); }
+.friend .row-name { color: var(--fg-strong); font-weight: 500; font-size: .9375rem; }
+.friend .alias { color: var(--muted); font-weight: 400; font-size: var(--t-sm); }
+.friend:hover .round-btn { background: var(--layer-1); }
+
+.active-now { padding: 16px; box-shadow: inset 1px 0 0 var(--line); }
+.active-now h3 { font-size: var(--t-md); font-weight: 600; color: var(--fg-strong); margin: 4px 0 16px; }
+.live-card {
+  display: flex; flex-direction: column; gap: 2px;
+  width: 100%; padding: 12px; margin-bottom: 8px;
+  border-radius: var(--r-m); text-align: left;
+  background: var(--layer-1); border: 1px solid var(--line);
+  transition: background var(--fast);
+}
+.live-card:hover { background: var(--layer-3); }
+.live-card b { color: var(--fg-strong); font-weight: 600; }
+.live-card > span { color: var(--muted); font-size: var(--t-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vc-tag { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--green) !important; font-weight: 600; }
+.vc-tag svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+.quiet { text-align: center; color: var(--muted); font-size: var(--t-sm); padding: 16px 8px; text-wrap: pretty; }
+.quiet b { display: block; color: var(--fg-strong); font-size: 1rem; margin-bottom: 4px; }
+
+.msgs {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  scrollbar-gutter: stable;
+}

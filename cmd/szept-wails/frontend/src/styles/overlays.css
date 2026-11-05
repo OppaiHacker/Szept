@@ -1,0 +1,119 @@
+/* ---------------------------- floating layers ---------------------------- */
+
+.backdrop {
+  position: fixed; inset: 0;
+  background: var(--scrim);
+  display: grid; place-items: center;
+  padding: 32px;
+  z-index: 60;
+  animation: fade 240ms var(--ease-out);
+}
+@keyframes fade { from { opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
+
+/* ModalFrame.vue sets --ox/--oy to the click that opened it, so it grows out of what
+   you pressed */
+.modal {
+  --card-ground: var(--layer-2);
+  width: min(440px, 100%);
+  max-height: min(84vh, 720px);
+  display: flex; flex-direction: column;
+  background: var(--layer-2);
+  border-radius: var(--r-m);
+  box-shadow: var(--sh-3);
+  overflow: hidden;
+  transform-origin: var(--ox, 50%) var(--oy, 50%);
+  animation: pop 240ms var(--ease-out);
+}
+.modal.wide { width: min(720px, 100%); }
+@keyframes pop { from { opacity: 0; scale: .96; } }
+@keyframes pop-out { to { opacity: 0; scale: .96; } }
+.backdrop.out { pointer-events: none; animation: fade-out 170ms var(--ease-in) forwards; }
+.backdrop.out .modal { animation: pop-out 170ms var(--ease-in) forwards; }
+.modal header { display: flex; align-items: center; gap: 12px; padding: 16px 16px 8px; }
+.modal header h3 { font-size: var(--t-lg); font-weight: 600; letter-spacing: var(--tr-tight); flex: 1; color: var(--fg-strong); }
+.modal .body { padding: 4px 0 12px; overflow-y: auto; }
+.modal .body > p { padding: 0 16px 12px; color: var(--fg-2); font-size: var(--t-sm); line-height: 1.6; text-wrap: pretty; }
+.modal footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px; background: var(--layer-1); }
+.modal .card-banner:first-child { margin-top: -4px; }
+.modal.bare .body { padding: 0; border-radius: inherit; }
+.modal.bare .card-banner { border-radius: inherit; border-bottom-left-radius: 0; border-bottom-right-radius: 0; margin-top: 0; }
+.modal.bare .pcard { padding-bottom: 16px; }
+
+/* popovers: menus, emoji, profile cards. They scale out of their trigger
+   (transform-origin is set by PopoverHost.vue). */
+.pop {
+  position: fixed; z-index: 75;
+  background: var(--pop);
+  border-radius: var(--r-m);
+  box-shadow: var(--sh-3), 0 0 0 1px var(--line-2);
+  opacity: 1; scale: 1;
+  transition: opacity 160ms var(--ease-out), scale 160ms var(--ease-out);
+}
+@starting-style { .pop { opacity: 0; scale: .96; } }
+.pop.out { opacity: 0; scale: .96; pointer-events: none; transition-duration: 110ms; transition-timing-function: var(--ease-in); }
+
+.menu { padding: 6px 8px; min-width: 200px; display: flex; flex-direction: column; }
+.menu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 6px 8px; margin: 1px 0;
+  border-radius: var(--r-xs);
+  font-size: var(--t-sm); font-weight: 500; color: var(--fg-2);
+  text-align: left;
+}
+.menu-item svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.menu-item { transition: background 80ms linear, color 80ms linear; }
+.menu-item:hover { background: var(--hover); color: var(--fg-strong); }
+.menu-item.danger { color: var(--red); }
+.menu-item.danger:hover { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }
+.menu-sep { height: 1px; margin: 4px; background: var(--line-2); }
+.menu-pop { min-width: 220px; }
+
+.emoji-grid { display: grid; grid-template-columns: repeat(7, 36px); gap: 2px; padding: 8px; }
+.emoji-grid button {
+  width: 36px; height: 36px; border-radius: var(--r-s);
+  font-size: 22px; line-height: 1;
+  transition: background var(--fast), scale 100ms var(--ease-out);
+}
+.emoji-grid button:hover { background: var(--hover); }
+.emoji-grid button:active { scale: .97; }
+
+/* profile card: 340px, short banner, the avatar overlapping it */
+.pop.card {
+  --card-ground: var(--pop);
+  width: 340px; max-height: min(80vh, 640px);
+  overflow-y: auto;
+}
+.pop.card .card-banner { height: 72px; border-radius: var(--r-m) var(--r-m) 0 0; }
+.pop.card .card-id { margin-top: -40px; }
+.pop.card .avatar.xl { width: 80px; height: 80px; font-size: 1.75rem; }
+.pop.card .btn-row { padding: 4px 16px 16px; }
+
+.lightbox {
+  position: fixed; inset: 0;
+  background: rgb(0 0 0 / 86%);
+  display: grid; place-items: center;
+  z-index: 70; padding: 32px;
+  cursor: zoom-out;
+  animation: fade 200ms var(--ease-out);
+}
+.lightbox img { max-width: 100%; max-height: 100%; border-radius: var(--r-m); box-shadow: var(--sh-3); animation: pop 240ms var(--ease-out); }
+.lightbox.out { animation: fade-out 170ms var(--ease-in) forwards; }
+
+.toasts { position: fixed; left: 50%; bottom: 24px; translate: -50% 0; display: flex; flex-direction: column; gap: 8px; align-items: center; z-index: 80; pointer-events: none; }
+.toast {
+  padding: 10px 16px;
+  border-radius: var(--r-m);
+  background: var(--pop);
+  box-shadow: var(--sh-2), 0 0 0 1px var(--line-2);
+  font-size: var(--t-sm);
+  color: var(--fg-strong);
+  max-width: 60ch;
+  animation: toast-in 260ms var(--ease-out);
+  transition: opacity 180ms var(--ease-in), translate 180ms var(--ease-in);
+}
+.toast.ok::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--green); }
+.toast.err::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--red); }
+.toast.warn::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--amber); }
+.toast.out { opacity: 0; translate: 0 8px; }
+@keyframes toast-in { from { opacity: 0; translate: 0 12px; scale: .96; } }

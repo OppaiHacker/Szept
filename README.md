@@ -3,7 +3,7 @@
 > **No servers. No phone numbers. No metadata leaks.**
 >
 > *Szept* (Polish for *whisper*) is a peer-to-peer, end-to-end encrypted messenger written in Go.
-> Available as a terminal client (**TUI**), a desktop GUI (**Linux / Windows**), and a mobile app (**Android**).
+> One client (Wails) for desktop (**Linux / Windows**) and mobile (**Android**).
 
 ![Szept — desktop client](assets/shots/desktop-main.png)
 
@@ -254,8 +254,7 @@ Bound to `127.0.0.1` only, off by default, 32-byte token compared in constant ti
 
 ### Build from source
 
-Requirements: **Go ≥ 1.22**, gcc, X11/GL headers (fyne client), and
-GTK + WebKitGTK for the desktop client:
+Requirements: **Go ≥ 1.22**, gcc, **Bun ≥ 1.3** (builds the UI) and GTK + WebKitGTK for the desktop client:
 
 | Toolkit | Packages | Build tag |
 |---|---|---|
@@ -268,10 +267,15 @@ The Makefile probes `pkg-config` and adds `-tags gtk3` by itself; override with
 The desktop client is pinned to `github.com/wailsapp/wails/v3` — the v3 line is
 an alpha, but it is the newest one there is (there is no v4), and v2 has no
 service bindings this UI is built on. `go get github.com/wailsapp/wails/v3/pkg/application@latest`
-moves the pin; the frontend needs no build step either way.
+moves the pin. When it moves, bump `@wailsio/runtime` in
+`cmd/szept-wails/frontend/package.json` to the runtime that version bundles.
+
+The UI is Vue 3 + TypeScript in `cmd/szept-wails/frontend`. `make` runs
+`bun install` (once) and `bun --bun run build` (vue-tsc + Vite) into `frontend/dist`,
+which the Go binary embeds.
 
 ```bash
-make          # bin/szept-connector, bin/szept (TUI), bin/szept-wails, bin/szept-gui
+make          # bin/szept-connector, bin/szept-wails
 make test     # go vet + full test suite
 make install  # desktop entry + icon into ~/.local (re-run to update)
 ```
@@ -317,15 +321,15 @@ sha256sum -c SHA256SUMS
 
 ### Launch & add friends
 
-1. Start `./bin/szept` (TUI) or `./bin/szept-wails` (desktop).
+1. Start `./bin/szept-wails`.
 2. First run asks for a name, a connector and an optional passphrase.
 
    ![First run](assets/shots/first-run.png)
-3. Share your ID — `/mycode` in TUI, `/kod` or **Mój kod / QR** in GUI.
+3. Share your ID — `/kod` or **Mój kod / QR**.
 4. Add a friend — `/friend <code>`.
 5. Create a group — `/new <name>`, then invite with `/invite` (code + 6-digit PIN, valid 10 minutes, 5 attempts).
 
-Both clients take `-data <dir>` and `-connector <url>`.
+The client takes `-data <dir>` and `-connector <url>`.
 
 ---
 
@@ -362,37 +366,34 @@ Both clients take `-data <dir>` and `-connector <url>`.
 
 ## ⌨️ Commands
 
-Both clients accept English and Polish aliases. Availability differs where the UI already covers it — reactions, delete and hide are context-menu actions in the GUI, and slash commands in the TUI.
+Commands accept English and Polish aliases. Reactions, delete and hide are context-menu actions.
 
-| Command | Description | TUI | GUI |
-|---|---|:--:|:--:|
-| `/new <name>` · `/nowy` | Create group chat (people added later do not see earlier messages) | ✅ | ✅ |
-| `/dm <friend>` | Open 1:1 chat | ✅ | ✅ |
-| `/invite` · `/zapros` | One-time invite (code + PIN) | ✅ | ✅ |
-| `/join <code> <pin>` · `/dolacz` | Join group from invite | ✅ | ✅ |
-| `/friend <code>` · `/znajomy` | Add friend | ✅ | ✅ |
-| `/mycode` · `/mojkod` · `/code` | Show your friend code | ✅ | — |
-| `/kod` · `/code` | Your QR + field for someone else's code | — | ✅ |
-| `/search <q>` · `/szukaj` | Search encrypted history | ✅ | ✅ |
-| `/who` · `/kto` | List chat members | ✅ | ✅ |
-| `/kick <name\|fingerprint>` | Remove member (rotates the epoch key). A name shared by several members removes nobody; use the fingerprint from `/who` | ✅ | ✅ |
-| `/rekey` | Manual epoch key rotation | ✅ | ✅ |
-| `/rename <name>` · `/zmien` | Rename chat | ✅ | ✅ |
-| `/send <path>` · `/wyslij` | Send file (GUI opens the picker) | ✅ | ✅ |
-| `/save <n>` · `/zapisz` | Save attachment to disk | ✅ | — |
-| `/react <n> <emoji>` · `/r` | Emoji reaction | ✅ | menu |
-| `/delete <n>` · `/usun` | Delete for everyone (DAG event) | ✅ | menu |
-| `/hide <n>` · `/ukryj` | Hide locally | ✅ | menu |
-| `/avatar <path>` · `/awatar` | Set profile picture | ✅ | ✅ |
-| `/call` | Join voice call | ✅ | ✅ |
-| `/leave` · `/rozlacz` · `/hangup` | Leave call | ✅ | ✅ |
-| `/mic` · `/cam` · `/screen` · `/ekran` | Toggle mic / camera / screen share | ✅ | ✅ |
-| `/connector [url]` | Show or change connector | ✅ | ✅ |
-| `/lang <pl\|en>` · `/jezyk` | Interface language | ✅ | ✅ |
-| `/me` · `/ja` | Profile and settings | — | ✅ |
-| `/clear` · `/wyczysc` | Hide local system messages | — | ✅ |
-| `/help` · `/pomoc` | Command list | ✅ | ✅ |
-| `/quit` | Exit | ✅ | — |
+| Command | Description |
+|---|---|
+| `/new <name>` · `/nowy` | Create group chat (people added later do not see earlier messages) |
+| `/dm <friend>` | Open 1:1 chat |
+| `/invite` · `/zapros` | One-time invite (code + PIN) |
+| `/join <code> <pin>` · `/dolacz` | Join group from invite |
+| `/friend <code>` · `/znajomy` | Add friend |
+| `/kod` · `/code` | Your QR + field for someone else's code |
+| `/search <q>` · `/szukaj` | Search encrypted history |
+| `/who` · `/kto` | List chat members |
+| `/kick <name\|fingerprint>` | Remove member (rotates the epoch key). A name shared by several members removes nobody; use the fingerprint from `/who` |
+| `/rekey` | Manual epoch key rotation |
+| `/rename <name>` · `/zmien` | Rename chat |
+| `/send <path>` · `/wyslij` | Send file (GUI opens the picker) |
+| `/react <n> <emoji>` · `/r` | Emoji reaction |
+| `/delete <n>` · `/usun` | Delete for everyone (DAG event) |
+| `/hide <n>` · `/ukryj` | Hide locally |
+| `/avatar <path>` · `/awatar` | Set profile picture |
+| `/call` | Join voice call |
+| `/leave` · `/rozlacz` · `/hangup` | Leave call |
+| `/mic` · `/cam` · `/screen` · `/ekran` | Toggle mic / camera / screen share |
+| `/connector [url]` | Show or change connector |
+| `/lang <pl\|en>` · `/jezyk` | Interface language |
+| `/me` · `/ja` | Profile and settings |
+| `/clear` · `/wyczysc` | Hide local system messages |
+| `/help` · `/pomoc` | Command list |
 
 ---
 
@@ -400,9 +401,8 @@ Both clients accept English and Polish aliases. Availability differs where the U
 
 ```
 cmd/connector     the rendezvous relay (pure Go, cross-compiles anywhere)
-cmd/szept         terminal client (bubbletea)
-cmd/szept-wails   desktop client (wails v3 — webview UI in cmd/szept-wails/frontend)
-cmd/szept-gui     Android client, and the fyne desktop build it grew out of
+cmd/szept-wails   the client: Linux, Windows, Android (wails v3 — Vue + TS UI in cmd/szept-wails/frontend)
+archive/          retired clients (bubbletea TUI, fyne GUI), not built
 internal/core     the brain: identity, store, connector link, sync, invites, calls
 internal/event    the chat DAG — signed, hash-linked, epoch-encrypted events
 internal/store    bbolt persistence; every value encrypted and location-bound
@@ -427,12 +427,10 @@ make test    # go vet ./... && go test ./... -timeout 180s
 The screenshots in this README are produced by the app itself, so they cannot drift from the UI:
 
 ```bash
-tools/shots-wails.sh                                  # desktop (wails)
-SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots \
-  go test ./cmd/szept-gui -run TestShots -v           # mobile (fyne)
+tools/shots-wails.sh
 ```
 
-Both start from a throwaway data directory with sample chats. The mobile ones render through fyne's software canvas (no X11, no GL); the desktop ones drive a real build on a virtual `Xvfb` screen — your own desktop is never touched and never ends up in a picture. Layout regressions fail there before anyone sees them.
+It starts from a throwaway data directory with sample chats and drives a real build on a virtual `Xvfb` screen — your own desktop is never touched and never ends up in a picture. Layout regressions fail there before anyone sees them.
 
 ---
 
@@ -455,7 +453,7 @@ Szept is provided **as is, without any warranty** — including any warranty of 
 
 > **Brak centralnych serwerów. Bez numeru telefonu. Komunikacja odporna na cenzurę.**
 >
-> *Szept* to komunikator peer-to-peer z pełnym szyfrowaniem end-to-end, napisany w Go. Dostępny w wersji konsolowej (**TUI**), graficznej (**GUI**) na Linuksa i Windowsa, oraz mobilnej na **Androida**.
+> *Szept* to komunikator peer-to-peer z pełnym szyfrowaniem end-to-end, napisany w Go. Jeden klient (Wails) na pulpit (**Linux / Windows**) i telefon (**Android**).
 
 ![Szept — klient na pulpicie](assets/shots/desktop-main.png)
 
@@ -699,8 +697,7 @@ Nasłuch tylko na `127.0.0.1`, domyślnie wyłączony, 32-bajtowy token porówny
 
 ### Budowanie ze źródeł
 
-Wymagania: **Go ≥ 1.22**, gcc, nagłówki X11/GL (klient fyne) oraz
-GTK + WebKitGTK dla klienta pulpitowego:
+Wymagania: **Go ≥ 1.22**, gcc, **Bun ≥ 1.3** (buduje interfejs) oraz GTK + WebKitGTK dla klienta pulpitowego:
 
 | Toolkit | Pakiety | Tag budowania |
 |---|---|---|
@@ -713,10 +710,15 @@ nadpiszesz to przez `make WAILS_TAGS=gtk3` (albo `WAILS_TAGS=` dla GTK4).
 Klient pulpitowy stoi na `github.com/wailsapp/wails/v3` — linia v3 jest alfą,
 ale nowszej nie ma (v4 nie istnieje), a v2 nie ma bindowania serwisów, na
 którym opiera się ten interfejs. `go get github.com/wailsapp/wails/v3/pkg/application@latest`
-przesuwa wersję; frontend i tak nie potrzebuje żadnego kroku budowania.
+przesuwa wersję. Wtedy podbij też `@wailsio/runtime` w
+`cmd/szept-wails/frontend/package.json` do runtime'u z tej wersji.
+
+Interfejs to Vue 3 + TypeScript w `cmd/szept-wails/frontend`. `make` robi
+`bun install` (raz) i `bun --bun run build` (vue-tsc + Vite) do `frontend/dist`, który
+binarka Go osadza w sobie.
 
 ```bash
-make          # bin/szept-connector, bin/szept (TUI), bin/szept-wails, bin/szept-gui
+make          # bin/szept-connector, bin/szept-wails
 make test     # go vet + testy
 make install  # wpis w menu aplikacji i ikona w ~/.local
 ```
@@ -755,11 +757,11 @@ sha256sum -c SHA256SUMS
 
 ### Start i dodawanie znajomych
 
-1. Uruchom `./bin/szept` (TUI) albo `./bin/szept-wails` (pulpit).
+1. Uruchom `./bin/szept-wails`.
 2. Pierwsze uruchomienie pyta o nazwę, connector i opcjonalne hasło.
 
    ![Pierwsze uruchomienie](assets/shots/first-run.png)
-3. Pokaż swój kod — `/mojkod` w TUI, `/kod` albo **Mój kod / QR** w GUI.
+3. Pokaż swój kod — `/kod` albo **Mój kod / QR**.
 4. Dodaj znajomego — `/znajomy <kod>`.
 5. Załóż grupę — `/nowy <nazwa>`, zaproś przez `/zapros` (kod + 6-cyfrowy PIN, ważny 10 minut, 5 prób).
 
@@ -800,37 +802,34 @@ Pola `config.json`:
 
 ## ⌨️ Komendy
 
-Oba klienty przyjmują polskie i angielskie aliasy. Dostępność różni się tam, gdzie interfejs robi to sam — reakcje, usuwanie i ukrywanie są w GUI pozycjami menu, a w TUI komendami.
+Komendy przyjmują polskie i angielskie aliasy. Reakcje, usuwanie i ukrywanie są pozycjami menu kontekstowego.
 
-| Komenda | Opis | TUI | GUI |
-|---|---|:--:|:--:|
-| `/nowy <nazwa>` · `/new` | Utwórz grupę (osoby dodane później nie widzą wcześniejszych wiadomości) | ✅ | ✅ |
-| `/dm <znajomy>` | Czat na dwoje | ✅ | ✅ |
-| `/zapros` · `/invite` | Jednorazowe zaproszenie (kod + PIN) | ✅ | ✅ |
-| `/dolacz <kod> <pin>` · `/join` | Dołącz do grupy | ✅ | ✅ |
-| `/znajomy <kod>` · `/friend` | Dodaj znajomego | ✅ | ✅ |
-| `/mojkod` · `/mycode` · `/code` | Pokaż swój kod | ✅ | — |
-| `/kod` · `/code` | Twój QR i pole na cudzy kod | — | ✅ |
-| `/szukaj <fraza>` · `/search` | Szukaj w historii | ✅ | ✅ |
-| `/kto` · `/who` | Członkowie czatu | ✅ | ✅ |
-| `/kick <nazwa\|odcisk>` | Usuń członka (rotuje klucz epoki). Gdy nazwę ma kilka osób, nikt nie jest usuwany; podaj odcisk z `/kto` | ✅ | ✅ |
-| `/rekey` | Ręczna rotacja klucza epoki | ✅ | ✅ |
-| `/zmien <nazwa>` · `/rename` | Zmień nazwę czatu | ✅ | ✅ |
-| `/wyslij <ścieżka>` · `/send` | Wyślij plik (GUI otwiera wybierak) | ✅ | ✅ |
-| `/zapisz <nr>` · `/save` | Zapisz załącznik na dysk | ✅ | — |
-| `/r <nr> <emoji>` · `/react` | Reakcja emoji | ✅ | menu |
-| `/usun <nr>` · `/delete` | Usuń u wszystkich (zdarzenie DAG) | ✅ | menu |
-| `/ukryj <nr>` · `/hide` | Ukryj lokalnie | ✅ | menu |
-| `/awatar <ścieżka>` · `/avatar` | Ustaw awatar | ✅ | ✅ |
-| `/call` | Dołącz do rozmowy | ✅ | ✅ |
-| `/rozlacz` · `/leave` · `/hangup` | Wyjdź z rozmowy | ✅ | ✅ |
-| `/mic` · `/cam` · `/ekran` · `/screen` | Mikrofon / kamera / ekran | ✅ | ✅ |
-| `/connector [adres]` | Pokaż albo zmień connector | ✅ | ✅ |
-| `/lang <pl\|en>` · `/jezyk` | Język interfejsu | ✅ | ✅ |
-| `/ja` · `/me` | Profil i ustawienia | — | ✅ |
-| `/wyczysc` · `/clear` | Schowaj komunikaty systemowe | — | ✅ |
-| `/pomoc` · `/help` | Lista komend | ✅ | ✅ |
-| `/quit` | Wyjście | ✅ | — |
+| Komenda | Opis |
+|---|---|
+| `/nowy <nazwa>` · `/new` | Utwórz grupę (osoby dodane później nie widzą wcześniejszych wiadomości) |
+| `/dm <znajomy>` | Czat na dwoje |
+| `/zapros` · `/invite` | Jednorazowe zaproszenie (kod + PIN) |
+| `/dolacz <kod> <pin>` · `/join` | Dołącz do grupy |
+| `/znajomy <kod>` · `/friend` | Dodaj znajomego |
+| `/kod` · `/code` | Twój QR i pole na cudzy kod |
+| `/szukaj <fraza>` · `/search` | Szukaj w historii |
+| `/kto` · `/who` | Członkowie czatu |
+| `/kick <nazwa\|odcisk>` | Usuń członka (rotuje klucz epoki). Gdy nazwę ma kilka osób, nikt nie jest usuwany; podaj odcisk z `/kto` |
+| `/rekey` | Ręczna rotacja klucza epoki |
+| `/zmien <nazwa>` · `/rename` | Zmień nazwę czatu |
+| `/wyslij <ścieżka>` · `/send` | Wyślij plik (GUI otwiera wybierak) |
+| `/r <nr> <emoji>` · `/react` | Reakcja emoji |
+| `/usun <nr>` · `/delete` | Usuń u wszystkich (zdarzenie DAG) |
+| `/ukryj <nr>` · `/hide` | Ukryj lokalnie |
+| `/awatar <ścieżka>` · `/avatar` | Ustaw awatar |
+| `/call` | Dołącz do rozmowy |
+| `/rozlacz` · `/leave` · `/hangup` | Wyjdź z rozmowy |
+| `/mic` · `/cam` · `/ekran` · `/screen` | Mikrofon / kamera / ekran |
+| `/connector [adres]` | Pokaż albo zmień connector |
+| `/lang <pl\|en>` · `/jezyk` | Język interfejsu |
+| `/ja` · `/me` | Profil i ustawienia |
+| `/wyczysc` · `/clear` | Schowaj komunikaty systemowe |
+| `/pomoc` · `/help` | Lista komend |
 
 ---
 
@@ -838,9 +837,8 @@ Oba klienty przyjmują polskie i angielskie aliasy. Dostępność różni się t
 
 ```
 cmd/connector     relay spotkań (czysty Go, kompiluje się wszędzie)
-cmd/szept         klient terminalowy (bubbletea)
-cmd/szept-wails   klient pulpitowy (wails v3 — interfejs w cmd/szept-wails/frontend)
-cmd/szept-gui     klient Android i pulpitowa wersja fyne, z której wyrósł
+cmd/szept-wails   klient: Linux, Windows, Android (wails v3 — interfejs Vue + TS w cmd/szept-wails/frontend)
+archive/          wycofane klienty (TUI bubbletea, GUI fyne), nie są budowane
 internal/core     mózg: tożsamość, baza, łącze do connectora, sync, zaproszenia, rozmowy
 internal/event    DAG czatu — podpisane, powiązane hashami, szyfrowane zdarzenia
 internal/store    trwałość bbolt; każda wartość szyfrowana i związana z miejscem
@@ -865,12 +863,10 @@ make test    # go vet ./... && go test ./... -timeout 180s
 Zrzuty ekranu w tym README robi sama aplikacja, więc nie mogą się rozjechać z interfejsem:
 
 ```bash
-tools/shots-wails.sh                                  # pulpit (wails)
-SZEPT_SEED=/tmp/seed SZEPT_SHOTS=/tmp/shots \
-  go test ./cmd/szept-gui -run TestShots -v           # telefon (fyne)
+tools/shots-wails.sh
 ```
 
-Oba zaczynają od jednorazowego katalogu danych z przykładowymi czatami. Mobilne rysuje programowe płótno fyne (bez X11 i GL), a pulpitowe — prawdziwy klient na wirtualnym ekranie `Xvfb`: twój pulpit nie jest ruszany i nie trafia na żaden obrazek. Zepsuty układ wywala się tam, zanim ktokolwiek go zobaczy.
+Skrypt zaczyna od jednorazowego katalogu danych z przykładowymi czatami i uruchamia prawdziwego klienta na wirtualnym ekranie `Xvfb`: twój pulpit nie jest ruszany i nie trafia na żaden obrazek. Zepsuty układ wywala się tam, zanim ktokolwiek go zobaczy.
 
 ---
 

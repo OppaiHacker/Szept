@@ -1,0 +1,52 @@
+/* ---------------------------- voice + account ---------------------------- */
+
+/* the voice panel folds open above the account strip while you are in a call */
+.voice {
+  flex: 0 0 auto;
+  display: grid; grid-template-rows: 0fr;
+  background: transparent;
+  transition: grid-template-rows var(--d-mid) var(--ease-in-out);
+}
+.voice.open { grid-template-rows: 1fr; }
+.voice-in { overflow: hidden; min-height: 0; }
+.voice.open .voice-in { box-shadow: inset 0 -1px 0 var(--line); }
+.vc-top { display: flex; align-items: center; gap: 4px; padding: 8px 8px 4px; }
+.vc-tx { flex: 1; min-width: 0; text-align: left; line-height: 1.3; padding: 2px 4px; border-radius: var(--r-s); }
+.vc-tx b { display: block; color: var(--green); font-size: var(--t-sm); font-weight: 600; }
+.vc-tx span { display: block; color: var(--muted); font-size: var(--t-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vc-tx:hover span { color: var(--fg); text-decoration: underline; }
+.icon-btn.hang:hover { color: #fff; background: var(--red); }
+.vc-ctl { display: flex; gap: 8px; padding: 4px 8px 12px; }
+.vc-ctl button {
+  flex: 1; height: 32px;
+  display: grid; place-items: center;
+  border-radius: var(--r-s);
+  background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg);
+  transition: background var(--fast), color var(--fast), scale 100ms var(--ease-out);
+}
+.vc-ctl button:hover { background: color-mix(in srgb, var(--fg) 14%, transparent); }
+.vc-ctl button:active { scale: .97; }
+.vc-ctl button.off { color: var(--red); }
+.vc-ctl button.on { background: var(--accent-fill); color: var(--on-accent); }
+.vc-ctl svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+.userbar {
+  flex: 0 0 auto;
+  height: 52px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 8px;
+}
+.ub-id {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px 4px 4px;
+  border-radius: var(--r-s);
+  text-align: left;
+  transition: background var(--fast);
+}
+.ub-id:hover { background: var(--hover); }
+.ub-id .avatar { width: 32px; height: 32px; }
+.ub-id .presence { box-shadow: 0 0 0 3px var(--layer-2); }
+.ub-id .nm { min-width: 0; line-height: 1.25; }
+.ub-id .nm b { display: block; font-size: var(--t-sm); font-weight: 600; color: var(--fg-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ub-id .nm span { display: block; font-size: var(--t-s); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

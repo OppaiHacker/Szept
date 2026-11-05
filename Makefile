@@ -29,14 +29,12 @@ STAMP      := -X szept/internal/version.V=$(VERSION)
 
 # Binary name -> package. Every build rule below derives the package from the
 # target it is building, so a new client costs one line here and one in BINS.
-pkg-szept           := ./cmd/szept
-pkg-szept-gui       := ./cmd/szept-gui
 pkg-szept-wails     := ./cmd/szept-wails
 pkg-szept-connector := ./cmd/connector
 
-BINS    := szept szept-gui szept-wails szept-connector
+BINS    := szept-wails szept-connector
 NATIVE  := $(addprefix $(BIN)/,$(BINS))
-WINDOWS := $(addprefix $(BIN)/,szept.exe szept-gui.exe szept-wails.exe)
+WINDOWS := $(addprefix $(BIN)/,szept-wails.exe)
 
 # Every build starts from a clean slate: a failed `go build` must not leave the
 # previous binary sitting in bin/ looking freshly built.
@@ -46,9 +44,19 @@ fresh = mkdir -p $(@D) && rm -f $@
 # `make` after a code edit does nothing and keeps the old binary. Go's own
 # build cache is what keeps repeated builds cheap.
 .PHONY: all test clean windows connector-windows android install uninstall release sign-release windows-installer \
-	$(NATIVE) $(WINDOWS) $(BIN)/szept-connector.exe $(BIN)/szept.apk
+	frontend $(NATIVE) $(WINDOWS) $(BIN)/szept-connector.exe $(BIN)/szept.apk
 
 all: $(NATIVE)
+
+# The client's UI: Vue + TypeScript, type-checked by vue-tsc and bundled by
+# Vite into frontend/dist, which main.go embeds. Built with Bun (no Node.js
+# needed: --bun runs vite and vue-tsc on Bun too). bun install runs only when
+# node_modules is missing or older than the lock file.
+FRONT := cmd/szept-wails/frontend
+frontend:
+	cd $(FRONT) && { [ node_modules/.bun-tag -nt bun.lock ] || { bun install --frozen-lockfile --no-summary && touch node_modules/.bun-tag; }; } && bun --bun run --silent build
+
+$(BIN)/szept-wails $(WINDOWS) $(BIN)/szept.apk: frontend
 
 $(NATIVE): $(BIN)/%:
 	@$(fresh)
@@ -66,14 +74,12 @@ windows: $(WINDOWS)
 
 # Icon: a .syso next to main.go, which go build links into the .exe (Explorer,
 # taskbar). 32512 is IDI_APPLICATION, the ID Wails loads as its window icon.
-# The terminal client stays a console program: -H=windowsgui would leave it
-# with no console to read from or print to.
 $(WINDOWS): $(BIN)/%.exe:
 	@$(fresh)
 	magick cmd/szept-wails/Icon.png -define icon:auto-resize=256,64,48,32,16 $(BIN)/szept.ico
 	echo '32512 ICON "$(BIN)/szept.ico"' | $(WINDRES) -O coff -o $(pkg-$*)/rsrc_windows_amd64.syso
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=$(WINCC) \
-		go build -tags production -ldflags "$(STAMP) $(if $(filter szept,$*),,-H=windowsgui)" -o $@ $(pkg-$*)
+		go build -tags production -ldflags "$(STAMP) -H=windowsgui" -o $@ $(pkg-$*)
 
 # Installer: NSIS (Arch: yay -S nsis, Debian: apt install nsis), per-user, no
 # admin. Bundles Microsoft's WebView2 bootstrapper for bare Windows 10 boxes;
@@ -201,10 +207,11 @@ uninstall:
 	-update-desktop-database $(PREFIX)/share/applications
 	-gtk-update-icon-cache -qtf $(PREFIX)/share/icons/hicolor
 
-# `go build ./cmd/szept` with no -o drops the binary in the repo root, so clean
+# `go build ./cmd/...` with no -o drops the binary in the repo root, so clean
 # sweeps the strays too — otherwise a months-old copy sits next to the sources.
 clean:
 	rm -rf $(BIN)
 	rm -f cmd/*/rsrc_windows_amd64.syso
 	rm -f $(BINS) $(addsuffix .exe,$(BINS)) connector connector.exe \
 		cmd/szept-gui/szept.apk
+	find $(FRONT)/dist -mindepth 1 ! -name .gitkeep -delete

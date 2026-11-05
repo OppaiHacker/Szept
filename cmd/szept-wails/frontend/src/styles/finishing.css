@@ -1,0 +1,21 @@
+/* ---------------------------- finishing ---------------------------- */
+
+/* key groups arrive one after another when the block appears */
+.key-block code span { animation: key-type 1ms steps(1) both; animation-delay: calc(var(--i) * 22ms + 80ms); }
+@keyframes key-type { from { opacity: 0; } }
+
+/* a theme change crossfades the palette instead of flashing */
+html.theming, html.theming *, html.theming *::before, html.theming *::after {
+  transition: background-color 300ms var(--ease-in-out), color 300ms var(--ease-in-out), border-color 300ms var(--ease-in-out), box-shadow 300ms var(--ease-in-out) !important;
+}
+
+/* presence changes ease, they do not blink */
+.av-wrap .presence { transition: background var(--med), scale var(--med); }
+.av-wrap:not(.online) .presence { scale: .9; }
+
+/* icon buttons answer the press like every other control */
+.icon-btn { transition: background var(--fast), color var(--fast), scale 100ms var(--ease-out); }
+.icon-btn:active { scale: .94; }
+
+.member:active, .friend:active, .live-card:active { scale: .99; }
+.member, .friend, .live-card { transition: background var(--fast), color var(--fast), opacity var(--fast), scale 100ms var(--ease-out); }

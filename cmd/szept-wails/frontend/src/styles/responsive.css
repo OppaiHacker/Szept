@@ -1,0 +1,220 @@
+/* ---------------------------- responsive ---------------------------- */
+
+@media (max-width: 1080px) {
+  .shell.with-members { grid-template-columns: var(--rail-w) var(--list-w) minmax(0, 1fr); }
+  .members { display: none; }
+  .shell.searching { grid-template-columns: var(--rail-w) var(--list-w) minmax(0, 1fr); }
+  .shell.searching .members { position: absolute; top: var(--titlebar-h); right: 0; bottom: 0; width: min(420px, 100%); z-index: 20; box-shadow: var(--sh-3); }
+}
+@media (max-width: 820px) {
+  .settings { grid-template-columns: 200px minmax(0, 1fr); }
+  .set-nav { padding: 56px 8px 20px; }
+  .set-body { padding: 56px 16px 96px; }
+  .unsaved { left: 216px; width: calc(100% - 232px); }
+}
+/* Phone, the way Discord's app does it: four tabs at the bottom; Serwery is
+   the rail plus the channel list, Wiadomości the direct chats at full width.
+   A chat is a layer over all of it that slides in from the right and can be
+   pushed back with a thumb (store/phone.ts). The member list is a sheet from
+   the right. --sa-* are the Android system bars (0 elsewhere). */
+.tabbar, .m-scrim, .hs-btn, .vc-ctl .ph { display: none; }
+@media (max-width: 640px) {
+  .shell, .shell.with-members, .shell.searching {
+    grid-template-columns: var(--rail-w) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto auto;
+    position: relative; overflow: hidden;
+  }
+  .shell > .rail { grid-area: 1 / 1; }
+  .shell > .side { grid-area: 1 / 2; border-top-left-radius: var(--r-m); }
+  .shell[data-tab="dms"] > .rail { display: none; }
+  .shell[data-tab="dms"] > .side { grid-column: 1 / 3; border-radius: 0; }
+  .shell .side .row.nav[data-act="friends"] { display: none; }
+  .rail-btn.home { display: none; }
+  .rail-btn.home + .rail-sep { display: none; }
+
+  /* the dock keeps only the voice panel; Ty replaces the account strip */
+  .dock { grid-area: 2 / 1 / 3 / 3; margin: 0 8px 8px; }
+  .dock:not(:has(.voice.open)) { display: none; }
+  .userbar { display: none; }
+  .vc-ctl .ph { display: grid; } /* the account strip is gone, its mic and sound move here */
+
+  .tabbar {
+    grid-area: 3 / 1 / 4 / 3;
+    display: flex;
+    padding: 0 4px var(--sa-bottom, 0px);
+    background: var(--bg);
+    box-shadow: inset 0 1px 0 var(--line);
+  }
+  .tab {
+    flex: 1; min-width: 0; height: 56px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    color: var(--muted); font-size: var(--t-xs); font-weight: 500;
+    transition: color var(--fast);
+  }
+  .tab.on { color: var(--fg-strong); }
+  .tab:active .tab-ico { scale: .9; }
+  .tab-ico { position: relative; display: grid; place-items: center; width: 28px; height: 24px; transition: scale var(--fast); }
+  .tab-ico > svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+  .tab[data-tab="servers"] .tab-ico > svg { fill: currentColor; stroke: none; width: 26px; height: 26px; }
+  /* the active tab's mark sits on an ink tile, like the open server on the rail */
+  .tab-ico::before {
+    content: ""; position: absolute; inset: -4px -12px; z-index: -1;
+    border-radius: var(--r-pill); background: var(--layer-3);
+    opacity: 0; scale: .7; transition: opacity var(--med), scale var(--med);
+  }
+  .tab.on .tab-ico::before { opacity: 1; scale: 1; }
+  .tab-ico { isolation: isolate; }
+  .tab .av-wrap .presence { box-shadow: 0 0 0 2px var(--bg); width: 8px; height: 8px; }
+  .tab .pip {
+    position: absolute; top: -6px; left: 18px;
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill);
+    background: var(--fg-strong); color: var(--bg);
+    font: 600 11px/18px var(--font); text-align: center;
+    box-shadow: 0 0 0 3px var(--bg);
+  }
+
+  /* the chat: a layer over the whole shell, sliding in from the right */
+  /* grid-area auto: a positioned grid item with a placement would take its
+     grid area as the containing block instead of the whole shell */
+  .shell > .conv, .shell > .members { grid-area: auto; }
+  .shell > .conv {
+    position: absolute; inset: 0; z-index: 10;
+    translate: 100% 0; visibility: hidden;
+    box-shadow: -12px 0 32px -16px rgb(0 0 0 / 60%);
+    transition: translate 280ms var(--ease-out), visibility 0s linear 280ms;
+  }
+  .shell.in-chat > .conv { translate: none; visibility: visible; transition: translate 280ms var(--ease-out); }
+  /* a swipe drives transform, the class drives translate: they add up while
+     the finger is down and the inline transform is dropped on release */
+  .shell > .conv { transition-property: translate, transform, visibility; }
+  /* friends and Ty are tab pages: in the grid, the tab bar stays */
+  .shell.page > .conv {
+    position: static; grid-area: 1 / 1 / 2 / 3;
+    translate: none; visibility: visible; transition: none; box-shadow: none;
+  }
+  .shell.page > .rail, .shell.page > .side { display: none; }
+
+  .composer-wrap { padding: 0 8px calc(8px + var(--sa-bottom, 0px)); }
+  .vbar { padding-bottom: calc(20px + var(--sa-bottom, 0px)); }
+  .composer { min-height: 48px; border-radius: 24px; }
+  .composer .gif-btn { display: none; }
+  #input { font-size: 16px; }
+  #input::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .conv-head { padding: 0 4px; gap: 2px; height: 52px; }
+  .conv-head .back { display: grid; }
+  .conv-head .icon-btn { width: 40px; height: 40px; }
+  .conv-head .s, .conv-head .h-div, .conv-head [data-act="invite"] { display: none; }
+  .hs-btn { display: grid; }
+  .shell:not(.hs-open):not(.searching) .head-search { display: none; }
+  .shell.hs-open .head-search, .shell.searching .head-search {
+    position: absolute; left: 48px; right: 8px; top: 8px;
+    width: auto; height: 36px; z-index: 4;
+  }
+  .tabs { gap: 2px; margin-left: 0; overflow-x: auto; scrollbar-width: none; }
+  .conv-head:has(.tabs) :is(.h-t, .h-ico, .h-div), .tabs .long { display: none; }
+  .shell.page .conv-head .back { display: none; }
+  .fr-body { padding: 12px 16px 24px; }
+
+  /* touch: long press opens the message sheet, so the text must not select */
+  .msgs { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .msg { padding-right: 16px; }
+  .msg-tools { display: none; }
+
+  /* the member list as a sheet over the chat */
+  .shell > .members {
+    display: flex; position: absolute; top: 0; bottom: 0; right: 0; z-index: 12;
+    width: min(320px, 86%);
+    padding-bottom: var(--sa-bottom, 0px);
+    border-radius: var(--r-m) 0 0 var(--r-m);
+    box-shadow: var(--sh-3);
+    translate: 100% 0; visibility: hidden;
+    transition: translate 260ms var(--ease-out), transform 260ms var(--ease-out), visibility 0s linear 260ms;
+  }
+  .shell.with-members > .members, .shell.searching > .members {
+    translate: none; visibility: visible;
+    transition: translate 260ms var(--ease-out), transform 260ms var(--ease-out);
+  }
+  .shell.page > .members { display: none; }
+  .m-scrim {
+    display: block; position: absolute; inset: 0; z-index: 11;
+    background: rgb(0 0 0 / 50%);
+    opacity: 0; pointer-events: none; transition: opacity 260ms var(--ease-out);
+  }
+  .shell.with-members.in-chat > .m-scrim { opacity: 1; pointer-events: auto; }
+
+  /* menus come up from the bottom edge as a sheet */
+  .pop.menu-pop {
+    left: 0 !important; right: 0; top: auto !important; bottom: 0;
+    max-height: 72vh; overflow-y: auto;
+    border-radius: 12px 12px 0 0;
+    padding-bottom: var(--sa-bottom, 0px);
+    box-shadow: 0 0 0 100vmax rgb(0 0 0 / 45%), var(--sh-3);
+    scale: none; translate: 0 0;
+    transition: opacity 200ms var(--ease-out), translate 240ms var(--ease-out);
+  }
+  @starting-style { .pop.menu-pop { opacity: 0; translate: 0 32px; } }
+  .pop.menu-pop.out { opacity: 0; scale: none; translate: 0 32px; }
+  .pop.menu-pop .menu { padding: 8px 8px 12px; }
+  .pop.menu-pop .menu-item { min-height: 48px; padding: 0 12px; font-size: var(--t-md); }
+  .pop.menu-pop .menu-item svg { width: 20px; height: 20px; }
+  .pop.menu-pop .menu-reacts { justify-content: space-around; padding: 4px 4px 8px; }
+  .pop.menu-pop .menu-reacts button { width: 48px; height: 48px; font-size: 26px; }
+
+  .toasts { bottom: calc(76px + var(--sa-bottom, 0px)); width: calc(100% - 32px); }
+
+  /* settings go page by page: the list, then one section with a way back */
+  .settings { grid-template-columns: minmax(0, 1fr); padding-top: var(--sa-top, 0px); }
+  .settings:not(.paged) .set-body, .settings.paged .set-nav { display: none; }
+  .set-nav { padding: 16px 8px calc(20px + var(--sa-bottom, 0px)); }
+  .set-body { padding: 56px 16px calc(96px + var(--sa-bottom, 0px)); }
+  .set-back, .set-nav-close { display: grid; }
+  .set-close { position: absolute; top: calc(var(--sa-top, 0px) + 12px); right: 12px; }
+  .set-close span { display: none; }
+  .unsaved { left: 12px; width: calc(100% - 24px); bottom: calc(12px + var(--sa-bottom, 0px)); }
+
+  /* the Ty tab */
+  .you { flex: 1; overflow-y: auto; padding-bottom: 24px; }
+  .you .card-banner { height: 120px; }
+  .you .card-id { --card-ground: var(--layer-2); padding: 0 16px; margin-top: -48px; }
+  .you .card-id .nm { font-size: var(--t-lg); font-weight: 600; letter-spacing: var(--tr-tight); color: var(--fg-strong); margin-top: 8px; }
+  .you .card-id .st { color: var(--muted); font-size: var(--t-sm); }
+  .you .btn-row { margin-top: 12px; }
+  .you-sec { padding: 16px 16px 0; }
+  .you-list { margin: 16px 16px 0; border-radius: var(--r-m); background: var(--layer-1); overflow: hidden; }
+  .you-row {
+    width: 100%; min-height: 56px; display: flex; align-items: center; gap: 12px;
+    padding: 8px 12px 8px 16px; text-align: left;
+    transition: background var(--fast);
+  }
+  .you-row + .you-row { box-shadow: inset 0 1px 0 var(--line); }
+  .you-row:active { background: var(--hover); }
+  .you-row svg { width: 20px; height: 20px; flex: none; fill: none; stroke: var(--fg-2); stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+  .you-row svg.go { width: 16px; height: 16px; stroke: var(--muted); }
+  .you-row .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .you-row .nm b { font-weight: 500; color: var(--fg-strong); }
+  .you-row .nm span { font-size: var(--t-s); color: var(--muted); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+@media (max-width: 640px) and (prefers-reduced-motion: reduce) {
+  .shell > .conv, .shell.in-chat > .conv, .shell > .members { transition-property: opacity, visibility; }
+}
+
+/* Android: the system draws the window chrome, so the title bar goes. */
+.mobile { --titlebar-h: 0px; }
+.mobile .titlebar { display: none; }
+.mobile .gate { padding-top: var(--sa-top, 0px); padding-bottom: var(--sa-bottom, 0px); }
+.mobile [data-act="screen"], .mobile [data-act="cam"] { display: none; }
+.conn-strip { display: none; }
+/* Android: the page starts under the status bar; while the connector is
+   away a strip in the flow says so and pushes everything down a little */
+.mobile body { padding-top: var(--sa-top, 0px); }
+.mobile .conn-strip:not([hidden]) {
+  order: -1; flex: none; height: 28px;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--bg); box-shadow: inset 0 -1px 0 var(--line);
+  font-size: var(--t-s); color: var(--fg-2); white-space: nowrap;
+}
+@starting-style { .mobile .conn-strip:not([hidden]) { height: 0; opacity: 0; } }
+.mobile .conn-strip { transition: height var(--med), opacity var(--med); overflow: hidden; }
+.conn-strip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+.conn-strip[data-state="err"] .dot { background: var(--red); }

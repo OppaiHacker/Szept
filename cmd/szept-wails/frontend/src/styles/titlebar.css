@@ -1,0 +1,65 @@
+/* ============================ title bar ============================ */
+
+.titlebar {
+  height: var(--titlebar-h);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px 0 12px;
+  background: var(--bg);
+  position: relative;
+  z-index: 40;
+}
+
+.tb-brand { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.tb-mark {
+  width: 17px; height: 17px;
+  flex: 0 0 auto;
+  fill: var(--accent);
+}
+.tb-name { flex: 0 0 auto; font-weight: 600; font-size: var(--t-sm); color: var(--fg-strong); }
+.tb-ver { font-family: var(--mono); font-size: var(--t-s); color: var(--faint); }
+.tb-sub { max-width: 20ch; color: var(--faint); font-size: var(--t-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tb-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--t-s);
+  color: var(--fg-2);
+  padding: 4px 12px 4px 8px;
+  border-radius: var(--r-s);
+  background: var(--layer-1);
+  max-width: 46ch;
+  min-width: 0; /* a long connector error shrinks, the window buttons stay */
+}
+.tb-status .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-status .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--amber);
+  flex: 0 0 auto;
+  transition: background var(--med);
+}
+.tb-status[data-state="up"] .dot { background: var(--green); }
+.tb-status[data-state="err"] .dot { background: var(--red); }
+
+/* Round controls, the way every GTK/Adwaita header bar draws them. */
+.tb-buttons { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+/* :not([hidden]) matters: a hidden pill still matches `+`, and the 12px would
+   then beat the auto margin that pins the buttons to the right edge. */
+.tb-status:not([hidden]) + .tb-buttons { margin-left: 12px; }
+.tb-btn {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+  transition: background var(--fast), scale var(--fast);
+}
+.tb-btn svg { width: 9px; height: 9px; fill: none; stroke: var(--fg-2); stroke-width: 1.75; stroke-linecap: round; }
+.tb-btn:hover { background: color-mix(in srgb, var(--fg) 18%, transparent); }
+.tb-btn:hover svg { stroke: var(--fg-strong); }
+.tb-btn:active { scale: .92; }
+.tb-btn.danger:hover { background: var(--red); }
+.tb-btn.danger:hover svg { stroke: #fff; }

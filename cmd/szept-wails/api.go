@@ -1,5 +1,5 @@
 // App: everything the frontend can call. Every method here is bound by Wails
-// and reachable from JS as `main.App.<Name>` (see api() in app.js).
+// and reachable from JS as `main.App.<Name>` (see api() in frontend/src/api/wails.ts).
 //
 // Rule of thumb for this layer: no logic, only translation. Byte slices become
 // hex strings, core errors travel as-is, and anything larger than a few KB is

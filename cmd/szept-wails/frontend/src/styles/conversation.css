@@ -1,0 +1,80 @@
+/* ---------------------------- conversation ---------------------------- */
+
+.conv {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--layer-2);
+}
+
+.conv-head {
+  flex: 0 0 auto;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 16px;
+  background: var(--layer-2);
+  box-shadow: var(--elev);
+  z-index: 3;
+}
+.conv-head .head-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.head-search { width: 160px; height: 24px; margin: 0; padding: 0 8px; border-radius: var(--r-s); background: var(--bg); transition: width var(--med); }
+.head-search:focus-within, .shell.searching .head-search { width: 240px; }
+.head-search input { font-size: var(--t-s); }
+
+/* search results take the members' place, also in a direct chat */
+.shell.searching { grid-template-columns: var(--rail-w) var(--list-w) minmax(0, 1fr) 420px; }
+.shell.searching .members { display: flex; padding-top: 0; background: var(--layer-2); box-shadow: inset 1px 0 0 var(--line); }
+.res-head { display: flex; align-items: center; height: 48px; padding: 0 8px 0 16px; box-shadow: var(--elev); background: var(--layer-1); }
+.res-head b { flex: 1; font-weight: 600; color: var(--fg-strong); }
+.res-list { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.res {
+  position: relative; display: flex; gap: 12px; width: 100%; text-align: left;
+  padding: 12px; border-radius: var(--r-m);
+  background: var(--layer-1); box-shadow: 0 0 0 1px var(--line);
+}
+.res:hover { background: var(--layer-3); }
+.res .gutter { flex: none; }
+.res .msg-col { min-width: 0; flex: 1; }
+.res .msg-who { display: flex; align-items: baseline; gap: 8px; }
+.res .n { font-weight: 600; }
+.res .t { font-size: var(--t-xs); color: var(--muted); }
+.res .bubble { color: var(--fg); overflow-wrap: anywhere; white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+.res mark { background: color-mix(in srgb, var(--amber) 40%, transparent); color: inherit; border-radius: 2px; }
+.res .go { position: absolute; top: 8px; right: 8px; padding: 2px 8px; border-radius: var(--r-s); background: var(--layer-4); font-size: var(--t-xs); font-weight: 600; opacity: 0; }
+.res:hover .go { opacity: 1; }
+.msg.flash { animation: flash 1.2s var(--ease-out); }
+@keyframes flash { from { background: color-mix(in srgb, var(--accent) 12%, transparent); } }
+
+.conv-head .avatar { width: 24px; height: 24px; font-size: 10px; }
+.conv-head .back { display: none; margin-left: -8px; }
+.conv-head .back svg { rotate: 180deg; }
+.conv-head .head-id {
+  display: flex; align-items: center; gap: 8px;
+  min-width: 0;
+  padding: 4px 8px 4px 4px;
+  margin-left: -4px;
+  border-radius: var(--r-s);
+  transition: background var(--fast);
+}
+.conv-head .head-id:hover { background: var(--hover); }
+.conv-head .spacer { flex: 1; }
+.h-ico { display: grid; flex: none; }
+.h-ico svg { width: 24px; height: 24px; fill: none; stroke: var(--faint); stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.h-t, .conv-head .t {
+  font-size: 1rem; font-weight: 600;
+  color: var(--fg-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto;
+}
+/* the channel name keeps its width, the subtitle gives way first */
+.conv-head b.t { flex: none; max-width: 40%; }
+.h-div { flex: none; width: 1px; height: 24px; margin: 0 4px; background: var(--line-2); }
+.conv-head .s {
+  min-width: 0; flex: 0 1 auto;
+  font-size: var(--t-sm); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-head .s em { color: var(--fg-2); font-style: normal; }
