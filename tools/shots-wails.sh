@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Zrzuty ekranu klienta wails do assets/shots/ — odtwarzalne, jak TestShots dla
-# klienta fyne (cmd/szept-gui/shot_dev_test.go, on robi zrzuty mobile-* i
-# spatial-*, bo scena 3D żyje tylko w kliencie na Androida).
+# Zrzuty ekranu klienta wails do assets/shots/ — odtwarzalne.
 #
 #   tools/shots-wails.sh [katalog-wyjściowy]     # domyślnie assets/shots
 #
@@ -111,8 +109,7 @@ echo "== budowanie =="
 make -s bin/szept-wails bin/szept-connector
 
 echo "== dane demonstracyjne =="
-SZEPT_SEED="$WORK/data" SZEPT_SHOTS="$WORK/junk" \
-	go test ./cmd/szept-gui -run TestShotsDesktop >/dev/null
+SZEPT_SEED="$WORK/data" go test ./cmd/szept-wails -run TestSeed >/dev/null
 magick -size 900x900 -define gradient:angle=135 gradient:'#1b3a4b'-'#3a9188' "$WORK/baner.png"
 
 Xvfb $DISP -screen 0 ${SIZE}x24 -nolisten tcp >/dev/null 2>&1 & XVFB_PID=$!
